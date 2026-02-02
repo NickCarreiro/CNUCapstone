@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h1>Welcome, {{ user.username }}</h1>
+  <p class="muted">Upload files into your secure staging area.</p>
+  <div class="actions">
+    <a class="pill" href="/ui/totp">Manage TOTP</a>
+  </div>
+  <form method="post" action="/ui/folder" class="form compact">
+    <label>
+      <span>Create folder (relative to your vault)</span>
+      <input type="text" name="folder" placeholder="projects/phase1" required />
+    </label>
+    <button type="submit">Create folder</button>
+  </form>
+  <form method="post" action="/ui/upload" enctype="multipart/form-data" class="form">
+    <label>
+      <span>Folder (optional)</span>
+      <input type="text" name="folder" placeholder="projects/phase1" />
+    </label>
+    <label>
+      <span>Select file</span>
+      <input type="file" name="file" required />
+    </label>
+    <button type="submit">Upload</button>
+  </form>
+</section>
+<section class="card">
+  <h2>Your files</h2>
+  {% if files %}
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Path</th>
+          <th>Size (bytes)</th>
+          <th>Uploaded</th>
+          <th>Move</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for f in files %}
+        <tr>
+          <td>{{ f.record.file_name }}</td>
+          <td>{{ f.rel_path }}</td>
+          <td>{{ f.record.file_size }}</td>
+          <td>{{ f.record.uploaded_at }}</td>
+          <td>
+            <button
+              type="button"
+              class="pill move-btn"
+              data-file-id="{{ f.record.id }}"
+              data-file-name="{{ f.record.file_name }}"
+              data-current-path="{{ f.rel_path }}"
+            >
+              Move
+            </button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted">No files yet.</p>
+  {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<dialog id="moveDialog" class="modal">
+  <form method="post" action="/ui/move" class="form">
+    <input type="hidden" name="file_id" id="moveFileId" />
+    <h2 id="moveTitle">Move file</h2>
+    <p class="muted" id="moveSubtitle"></p>
+    <label>
+      <span>New folder (relative to your vault)</span>
+      <input type="text" name="new_folder" id="moveFolderInput" placeholder="projects/phase2" list="folderList" />
+      <datalist id="folderList">
+        {% for folder in folders %}
+          {% if folder.path != "" %}
+            <option value="{{ folder.path }}"></option>
+          {% endif %}
+        {% endfor %}
+      </datalist>
+    </label>
+    <div class="folder-tree">
+      <div class="label">Existing folders</div>
+      <div class="tree">
+        {% for folder in folders %}
+          <button
+            type="button"
+            class="tree-item"
+            data-folder="{{ folder.path }}"
+            style="padding-left: {{ 12 + folder.depth * 16 }}px"
+          >
+            {{ folder.path if folder.path else "/" }}
+          </button>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button type="submit">Move</button>
+      <button type="button" class="ghost" id="cancelMove">Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+  const dialog = document.getElementById("moveDialog");
+  const moveFileId = document.getElementById("moveFileId");
+  const moveTitle = document.getElementById("moveTitle");
+  const moveSubtitle = document.getElementById("moveSubtitle");
+  const cancelMove = document.getElementById("cancelMove");
+  const moveFolderInput = document.getElementById("moveFolderInput");
+  const treeItems = document.querySelectorAll(".tree-item");
+
+  document.querySelectorAll(".move-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      moveFileId.value = btn.dataset.fileId;
+      moveTitle.textContent = `Move ${btn.dataset.fileName}`;
+      moveSubtitle.textContent = `Current path: ${btn.dataset.currentPath}`;
+      if (typeof dialog.showModal === "function") {
+        dialog.showModal();
+      } else {
+        dialog.setAttribute("open", "open");
+      }
+    });
+  });
+
+  cancelMove.addEventListener("click", () => {
+    if (typeof dialog.close === "function") {
+      dialog.close();
+    } else {
+      dialog.removeAttribute("open");
+    }
+  });
+
+  treeItems.forEach((item) => {
+    item.addEventListener("click", () => {
+      moveFolderInput.value = item.dataset.folder;
+    });
+  });
+</script>
+{% endblock %}

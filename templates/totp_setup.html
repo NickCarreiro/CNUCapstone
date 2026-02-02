@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h1>TOTP Setup</h1>
+  {% if enabled %}
+    <p class="muted">TOTP is currently enabled for your account.</p>
+    <form method="post" action="/ui/totp/disable">
+      <button type="submit" class="danger">Disable TOTP</button>
+    </form>
+  {% else %}
+    <p class="muted">Scan the secret in your authenticator app or enter it manually.</p>
+    {% if error %}
+      <div class="alert">{{ error }}</div>
+    {% endif %}
+    <div class="totp-box">
+      <div>
+        <div class="label">Manual secret</div>
+        <div class="secret">{{ secret }}</div>
+      </div>
+      <div>
+        <div class="label">Provisioning URI</div>
+        <div class="secret">{{ provisioning_uri }}</div>
+      </div>
+    </div>
+    <form method="post" action="/ui/totp/verify" class="form">
+      <label>
+        <span>Enter current code</span>
+        <input type="text" name="code" inputmode="numeric" pattern="[0-9]*" required />
+      </label>
+      <button type="submit">Verify and Enable</button>
+    </form>
+  {% endif %}
+</section>
+{% endblock %}
