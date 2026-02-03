@@ -4,7 +4,9 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import RedirectResponse
+import mimetypes
+
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
@@ -132,6 +134,14 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
         dirnames.sort()
     folder_rows.sort(key=lambda item: (item["depth"], item["path"]))
 
+    folder_tree: dict[str, dict] = {}
+    for folder in folder_rows:
+        if not folder["path"]:
+            continue
+        node = folder_tree
+        for part in Path(folder["path"]).parts:
+            node = node.setdefault(part, {})
+
     return templates.TemplateResponse(
         "dashboard.html",
         {
@@ -139,6 +149,7 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
             "user": user,
             "files": file_rows,
             "folders": folder_rows,
+            "folder_tree": folder_tree,
             "error": None,
         },
     )
@@ -316,6 +327,58 @@ def move_file(
     record.file_path = str(dest)
     db.commit()
     return RedirectResponse(url="/ui", status_code=303)
+
+
+@router.get("/files/{file_id}")
+def open_file(file_id: str, request: Request, db: Session = Depends(get_db)):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+
+    record = (
+        db.query(FileRecord)
+        .filter(FileRecord.id == file_id, FileRecord.user_id == user.id)
+        .first()
+    )
+    if not record:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    user_dir = _user_root(user)
+    file_path = Path(record.file_path)
+    resolved = file_path.resolve()
+    if not resolved.is_relative_to(user_dir.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="File missing on disk")
+
+    return FileResponse(path=resolved, filename=record.file_name)
+
+
+@router.get("/preview/{file_id}")
+def preview_file(file_id: str, request: Request, db: Session = Depends(get_db)):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+
+    record = (
+        db.query(FileRecord)
+        .filter(FileRecord.id == file_id, FileRecord.user_id == user.id)
+        .first()
+    )
+    if not record:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    user_dir = _user_root(user)
+    file_path = Path(record.file_path)
+    resolved = file_path.resolve()
+    if not resolved.is_relative_to(user_dir.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="File missing on disk")
+
+    media_type, _ = mimetypes.guess_type(str(resolved))
+    headers = {"Content-Disposition": f'inline; filename="{record.file_name}"'}
+    return FileResponse(path=resolved, filename=record.file_name, media_type=media_type, headers=headers)
 
 
 @router.get("/logout")

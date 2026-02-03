@@ -1,4 +1,20 @@
 {% extends "base.html" %}
+{% macro render_folder_tree(node, prefix="") %}
+  {% for name, children in node.items()|sort %}
+    {% set path = name if prefix == "" else prefix ~ "/" ~ name %}
+    {% set has_children = children|length > 0 %}
+    <details class="tree-node" data-has-children="{{ 1 if has_children else 0 }}">
+      <summary class="tree-summary" data-folder="{{ path }}">
+        <span class="tree-label">{{ name }}</span>
+      </summary>
+      {% if has_children %}
+        <div class="tree-children">
+          {{ render_folder_tree(children, path) }}
+        </div>
+      {% endif %}
+    </details>
+  {% endfor %}
+{% endmacro %}
 {% block content %}
 <section class="card">
   <h1>Welcome, {{ user.username }}</h1>
@@ -26,25 +42,46 @@
   </form>
 </section>
 <section class="card">
-  <h2>Your files</h2>
+  <div class="card-header">
+    <h2>Your files</h2>
+    <div class="card-tools">
+      <input type="text" id="fileFilter" placeholder="Search files..." />
+    </div>
+  </div>
   {% if files %}
-    <table class="table">
+    <div class="table-wrap">
+    <table class="table" id="fileTable">
       <thead>
         <tr>
           <th>Name</th>
           <th>Path</th>
           <th>Size (bytes)</th>
           <th>Uploaded</th>
+          <th>Preview</th>
+          <th>Open</th>
           <th>Move</th>
         </tr>
       </thead>
       <tbody>
         {% for f in files %}
-        <tr>
+        <tr class="file-row">
           <td>{{ f.record.file_name }}</td>
           <td>{{ f.rel_path }}</td>
           <td>{{ f.record.file_size }}</td>
           <td>{{ f.record.uploaded_at }}</td>
+          <td>
+            <button
+              type="button"
+              class="pill preview-btn"
+              data-file-id="{{ f.record.id }}"
+              data-file-name="{{ f.record.file_name }}"
+            >
+              Preview
+            </button>
+          </td>
+          <td>
+            <a class="pill" href="/ui/files/{{ f.record.id }}">Open</a>
+          </td>
           <td>
             <button
               type="button"
@@ -60,6 +97,7 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
   {% else %}
     <p class="muted">No files yet.</p>
   {% endif %}
@@ -67,6 +105,26 @@
 {% endblock %}
 
 {% block scripts %}
+<dialog id="previewDialog" class="modal modal-wide">
+  <div class="modal-header">
+    <div class="modal-header-text">
+      <h2 id="previewTitle">Preview</h2>
+      <p class="muted" id="previewSubtitle"></p>
+    </div>
+    <div class="modal-header-actions">
+      <a class="pill" id="previewOpen" target="_blank" rel="noopener">Open</a>
+      <a class="pill" id="previewDownload">Download</a>
+      <button type="button" class="ghost" id="closePreview">Close</button>
+    </div>
+  </div>
+  <div class="preview-body">
+    <iframe id="previewFrame" title="File preview"></iframe>
+    <p class="muted" id="previewFallback">
+      If the preview does not load, try Open (new tab) or Download.
+    </p>
+  </div>
+</dialog>
+
 <dialog id="moveDialog" class="modal">
   <form method="post" action="/ui/move" class="form">
     <input type="hidden" name="file_id" id="moveFileId" />
@@ -86,16 +144,10 @@
     <div class="folder-tree">
       <div class="label">Existing folders</div>
       <div class="tree">
-        {% for folder in folders %}
-          <button
-            type="button"
-            class="tree-item"
-            data-folder="{{ folder.path }}"
-            style="padding-left: {{ 12 + folder.depth * 16 }}px"
-          >
-            {{ folder.path if folder.path else "/" }}
-          </button>
-        {% endfor %}
+        <button type="button" class="tree-root" id="treeRoot" data-folder="">
+          /
+        </button>
+        {{ render_folder_tree(folder_tree) }}
       </div>
     </div>
     <div class="modal-actions">
@@ -112,7 +164,16 @@
   const moveSubtitle = document.getElementById("moveSubtitle");
   const cancelMove = document.getElementById("cancelMove");
   const moveFolderInput = document.getElementById("moveFolderInput");
-  const treeItems = document.querySelectorAll(".tree-item");
+  const treeRoot = document.getElementById("treeRoot");
+  const treeSummaries = document.querySelectorAll(".tree-summary");
+
+  const previewDialog = document.getElementById("previewDialog");
+  const previewFrame = document.getElementById("previewFrame");
+  const previewTitle = document.getElementById("previewTitle");
+  const previewSubtitle = document.getElementById("previewSubtitle");
+  const previewOpen = document.getElementById("previewOpen");
+  const previewDownload = document.getElementById("previewDownload");
+  const closePreview = document.getElementById("closePreview");
 
   document.querySelectorAll(".move-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -135,10 +196,49 @@
     }
   });
 
-  treeItems.forEach((item) => {
-    item.addEventListener("click", () => {
-      moveFolderInput.value = item.dataset.folder;
+  function setMoveFolder(value, el) {
+    moveFolderInput.value = value || "";
+    document.querySelectorAll(".tree-summary.selected").forEach((n) => n.classList.remove("selected"));
+    if (el) el.classList.add("selected");
+  }
+
+  treeRoot.addEventListener("click", () => setMoveFolder("", null));
+
+  treeSummaries.forEach((item) => {
+    item.addEventListener("click", () => setMoveFolder(item.dataset.folder, item));
+  });
+
+  const fileFilter = document.getElementById("fileFilter");
+  const fileRows = document.querySelectorAll("#fileTable .file-row");
+  fileFilter?.addEventListener("input", () => {
+    const q = fileFilter.value.trim().toLowerCase();
+    fileRows.forEach((row) => {
+      row.hidden = q.length > 0 && !row.textContent.toLowerCase().includes(q);
     });
+  });
+
+  document.querySelectorAll(".preview-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      previewTitle.textContent = `Preview ${btn.dataset.fileName}`;
+      previewSubtitle.textContent = "";
+      previewOpen.href = `/ui/preview/${btn.dataset.fileId}`;
+      previewDownload.href = `/ui/files/${btn.dataset.fileId}`;
+      previewFrame.src = previewOpen.href;
+      if (typeof previewDialog.showModal === "function") {
+        previewDialog.showModal();
+      } else {
+        previewDialog.setAttribute("open", "open");
+      }
+    });
+  });
+
+  closePreview.addEventListener("click", () => {
+    previewFrame.src = "";
+    if (typeof previewDialog.close === "function") {
+      previewDialog.close();
+    } else {
+      previewDialog.removeAttribute("open");
+    }
   });
 </script>
 {% endblock %}

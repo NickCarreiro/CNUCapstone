@@ -6,22 +6,45 @@
     <title>{{ title or "Personal File Vault" }}</title>
     <link rel="stylesheet" href="/static/style.css" />
   </head>
-  <body>
+  <body data-theme="light">
     <div class="page">
       <header class="site-header">
-        <div class="brand">Personal File Vault</div>
-        {% if user %}
-        <nav class="nav">
-          <a href="/ui">Dashboard</a>
-          <a href="/ui/logout">Logout</a>
-        </nav>
-        {% endif %}
+        <div class="container header-inner">
+          <div class="brand">Personal File Vault</div>
+          <div class="header-actions">
+            <button type="button" class="ghost toggle-theme" id="themeToggle">Dark mode</button>
+            {% if user %}
+            <nav class="nav">
+              <a href="/ui">Dashboard</a>
+              <a href="/ui/logout">Logout</a>
+            </nav>
+            {% endif %}
+          </div>
+        </div>
       </header>
-      <main class="content">
+      <main class="content container">
         {% block content %}{% endblock %}
       </main>
-      <footer class="site-footer">Single-host secure storage</footer>
+      <footer class="site-footer">
+        <div class="container footer-inner">Single-host secure storage</div>
+      </footer>
     </div>
     {% block scripts %}{% endblock %}
+    <script>
+      const root = document.body;
+      const toggle = document.getElementById("themeToggle");
+      const stored = localStorage.getItem("pfv-theme");
+      if (stored) {
+        root.dataset.theme = stored;
+        toggle.textContent = stored === "dark" ? "Light mode" : "Dark mode";
+      }
+
+      toggle.addEventListener("click", () => {
+        const next = root.dataset.theme === "dark" ? "light" : "dark";
+        root.dataset.theme = next;
+        localStorage.setItem("pfv-theme", next);
+        toggle.textContent = next === "dark" ? "Light mode" : "Dark mode";
+      });
+    </script>
   </body>
 </html>
