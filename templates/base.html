@@ -4,21 +4,32 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ title or "Personal File Vault" }}</title>
-    <link rel="stylesheet" href="/static/style.css" />
+    <link rel="stylesheet" href="/static/style.css?v=6" />
   </head>
   <body data-theme="light">
     <div class="page">
       <header class="site-header">
         <div class="container header-inner">
-          <div class="brand">Personal File Vault</div>
-          <div class="header-actions">
-            <button type="button" class="ghost toggle-theme" id="themeToggle">Dark mode</button>
+          <div class="brand-group">
+            <div class="brand">Personal File Vault</div>
+            <div class="brand-sub">Single-host secure storage</div>
+          </div>
+          <div class="toolbar">
             {% if user %}
             <nav class="nav">
+              <button type="button" class="nav-pill" id="pfvTerminalTab">Terminal</button>
               <a href="/ui">Dashboard</a>
               <a href="/ui/trash">Trash</a>
-              <a href="/ui/logout">Logout</a>
             </nav>
+            <div class="toolbar-actions">
+              <div class="user-pill">{{ user.username }}</div>
+              <button type="button" class="ghost toggle-theme" id="themeToggle">Dark mode</button>
+              <a class="pill ghost-link" href="/ui/logout">Logout</a>
+            </div>
+            {% else %}
+            <div class="toolbar-actions">
+              <button type="button" class="ghost toggle-theme" id="themeToggle">Dark mode</button>
+            </div>
             {% endif %}
           </div>
         </div>
@@ -48,7 +59,7 @@
       });
     </script>
 
-    <div class="terminal" id="pfvTerminal" data-open="1" data-hidden="0" data-max="0">
+    <div class="terminal" id="pfvTerminal" data-open="1" data-hidden="0" data-max="0" data-theme="dark">
       <div class="terminal-bar">
         <div class="terminal-left">
           <button type="button" class="terminal-dot dot-red" id="pfvTerminalClose" aria-label="Close terminal"></button>
@@ -62,6 +73,10 @@
         </div>
       </div>
       <div class="terminal-body" id="pfvTerminalBody" role="log" aria-live="polite" aria-relevant="additions"></div>
+      <span class="resize-handle handle-e" data-resize="e"></span>
+      <span class="resize-handle handle-w" data-resize="w"></span>
+      <span class="resize-handle handle-n" data-resize="n"></span>
+      <span class="resize-handle handle-s" data-resize="s"></span>
     </div>
     <button type="button" class="terminal-fab" id="pfvTerminalFab" hidden>Terminal</button>
     <button type="button" class="terminal-tab" id="pfvTerminalTab" hidden>Vault Terminal</button>
@@ -91,12 +106,34 @@
         if (maxStored === "0" || maxStored === "1") {
           term.dataset.max = maxStored;
         }
+        const posStored = localStorage.getItem("pfv-terminal-pos");
+        if (posStored) {
+          try {
+            const pos = JSON.parse(posStored);
+            if (typeof pos.left === "number" && typeof pos.top === "number") {
+              term.style.left = `${pos.left}px`;
+              term.style.top = `${pos.top}px`;
+              term.style.right = "auto";
+              term.style.bottom = "auto";
+            }
+          } catch {}
+        }
+        const sizeStored = localStorage.getItem("pfv-terminal-size");
+        if (sizeStored) {
+          try {
+            const size = JSON.parse(sizeStored);
+            if (typeof size.width === "number" && typeof size.height === "number") {
+              term.style.width = `${size.width}px`;
+              term.style.height = `${size.height}px`;
+            }
+          } catch {}
+        }
 
         function syncTerminalUi() {
           toggleBtn.textContent = term.dataset.open === "1" ? "Hide" : "Show";
           const hidden = term.dataset.hidden === "1";
           fab.hidden = !hidden;
-          tab.hidden = !hidden;
+          tab.textContent = hidden ? "Show Terminal" : "Hide Terminal";
         }
 
         syncTerminalUi();
@@ -127,10 +164,11 @@
         });
 
         tab.addEventListener("click", () => {
-          term.dataset.hidden = "0";
-          term.dataset.open = "1";
-          localStorage.setItem("pfv-terminal-hidden", "0");
-          localStorage.setItem("pfv-terminal-open", "1");
+          const hidden = term.dataset.hidden === "1";
+          term.dataset.hidden = hidden ? "0" : "1";
+          term.dataset.open = hidden ? "1" : term.dataset.open;
+          localStorage.setItem("pfv-terminal-hidden", term.dataset.hidden);
+          localStorage.setItem("pfv-terminal-open", term.dataset.open);
           syncTerminalUi();
         });
 
@@ -148,6 +186,14 @@
           if (term.dataset.open !== "1") {
             term.dataset.open = "1";
             localStorage.setItem("pfv-terminal-open", "1");
+          }
+          if (next === "1") {
+            term.style.left = "";
+            term.style.top = "";
+            term.style.right = "";
+            term.style.bottom = "";
+            term.style.width = "";
+            term.style.height = "";
           }
           syncTerminalUi();
         });
@@ -191,7 +237,6 @@
         }
 
         let afterId = Number(sessionStorage.getItem("pfv-terminal-after") || 0);
-        let stopped = false;
         let signInNotified = false;
 
         async function poll(url) {
@@ -203,7 +248,6 @@
             });
             if (!res.ok) {
               if (res.status === 401) {
-                stopped = true;
                 if (!signInNotified) {
                   signInNotified = true;
                   appendEvent({ level: "INFO", action: "system", message: "Sign in to see activity." });
@@ -218,14 +262,146 @@
               afterId = events[events.length - 1].id;
               sessionStorage.setItem("pfv-terminal-after", String(afterId));
             }
+            if (signInNotified) {
+              signInNotified = false;
+            }
           } catch {
             // Ignore transient network errors in the UI terminal.
           }
         }
 
+        // Theme sync for terminal
+        function syncTerminalTheme() {
+          term.dataset.theme = document.body.dataset.theme || "light";
+        }
+        syncTerminalTheme();
+        const themeObserver = new MutationObserver(syncTerminalTheme);
+        themeObserver.observe(document.body, { attributes: true, attributeFilter: ["data-theme"] });
+
+        // Drag support (disabled when maximized)
+        let dragActive = false;
+        let dragStartX = 0;
+        let dragStartY = 0;
+        let originLeft = 0;
+        let originTop = 0;
+
+        function onDragStart(e) {
+          if (term.dataset.max === "1") return;
+          const target = e.target;
+          if (target.closest(".terminal-actions")) return;
+          dragActive = true;
+          const rect = term.getBoundingClientRect();
+          originLeft = rect.left;
+          originTop = rect.top;
+          dragStartX = e.clientX;
+          dragStartY = e.clientY;
+          term.classList.add("dragging");
+          document.addEventListener("mousemove", onDragMove);
+          document.addEventListener("mouseup", onDragEnd);
+        }
+
+        function onDragMove(e) {
+          if (!dragActive) return;
+          const dx = e.clientX - dragStartX;
+          const dy = e.clientY - dragStartY;
+          const left = Math.max(8, Math.min(window.innerWidth - 320, originLeft + dx));
+          const top = Math.max(8, Math.min(window.innerHeight - 120, originTop + dy));
+          term.style.left = `${left}px`;
+          term.style.top = `${top}px`;
+          term.style.right = "auto";
+          term.style.bottom = "auto";
+        }
+
+        function onDragEnd() {
+          dragActive = false;
+          term.classList.remove("dragging");
+          document.removeEventListener("mousemove", onDragMove);
+          document.removeEventListener("mouseup", onDragEnd);
+          const rect = term.getBoundingClientRect();
+          localStorage.setItem("pfv-terminal-pos", JSON.stringify({ left: rect.left, top: rect.top }));
+        }
+
+        term.querySelector(".terminal-bar")?.addEventListener("mousedown", onDragStart);
+
+        // Resize support (sides + top/bottom)
+        const handles = term.querySelectorAll(".resize-handle");
+        let resizeActive = false;
+        let resizeDir = "";
+        let startW = 0;
+        let startH = 0;
+        let startX = 0;
+        let startY = 0;
+        let startLeft = 0;
+        let startTop = 0;
+
+        function onResizeStart(e) {
+          if (term.dataset.max === "1") return;
+          resizeActive = true;
+          resizeDir = e.target.dataset.resize || "";
+          const rect = term.getBoundingClientRect();
+          startW = rect.width;
+          startH = rect.height;
+          startLeft = rect.left;
+          startTop = rect.top;
+          startX = e.clientX;
+          startY = e.clientY;
+          document.addEventListener("mousemove", onResizeMove);
+          document.addEventListener("mouseup", onResizeEnd);
+          e.preventDefault();
+          e.stopPropagation();
+        }
+
+        function onResizeMove(e) {
+          if (!resizeActive) return;
+          const dx = e.clientX - startX;
+          const dy = e.clientY - startY;
+          let newW = startW;
+          let newH = startH;
+          let newLeft = startLeft;
+          let newTop = startTop;
+
+          if (resizeDir.includes("e")) {
+            newW = Math.max(360, startW + dx);
+          }
+          if (resizeDir.includes("w")) {
+            newW = Math.max(360, startW - dx);
+            newLeft = startLeft + dx;
+          }
+          if (resizeDir.includes("s")) {
+            newH = Math.max(180, startH + dy);
+          }
+          if (resizeDir.includes("n")) {
+            newH = Math.max(180, startH - dy);
+            newTop = startTop + dy;
+          }
+
+          term.style.width = `${newW}px`;
+          term.style.height = `${newH}px`;
+          term.style.left = `${newLeft}px`;
+          term.style.top = `${newTop}px`;
+          term.style.right = "auto";
+          term.style.bottom = "auto";
+        }
+
+        function onResizeEnd() {
+          resizeActive = false;
+          document.removeEventListener("mousemove", onResizeMove);
+          document.removeEventListener("mouseup", onResizeEnd);
+          const rect = term.getBoundingClientRect();
+          localStorage.setItem(
+            "pfv-terminal-pos",
+            JSON.stringify({ left: rect.left, top: rect.top })
+          );
+          localStorage.setItem(
+            "pfv-terminal-size",
+            JSON.stringify({ width: rect.width, height: rect.height })
+          );
+        }
+
+        handles.forEach((h) => h.addEventListener("mousedown", onResizeStart));
+
         poll("/ui/activity?tail=1&limit=60");
         setInterval(() => {
-          if (stopped) return;
           poll(`/ui/activity?after_id=${afterId}&limit=200`);
         }, 1000);
       })();
