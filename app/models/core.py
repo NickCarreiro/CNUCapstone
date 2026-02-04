@@ -22,6 +22,7 @@ class User(Base):
     sessions: Mapped[list["Session"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     files: Mapped[list["FileRecord"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     key: Mapped["UserKey | None"] = relationship(back_populates="user", cascade="all, delete-orphan", uselist=False)
+    activity: Mapped[list["ActivityEvent"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
 class Session(Base):
@@ -78,3 +79,16 @@ class AuditLog(Base):
     event_type: Mapped[str] = mapped_column(String(120))
     event_timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     details: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ActivityEvent(Base):
+    __tablename__ = "activity_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
+    event_timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    level: Mapped[str] = mapped_column(String(16), default="INFO")
+    action: Mapped[str] = mapped_column(String(64))
+    message: Mapped[str] = mapped_column(Text)
+
+    user: Mapped["User"] = relationship(back_populates="activity")

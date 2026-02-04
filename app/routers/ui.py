@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 import mimetypes
 
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
@@ -12,9 +12,10 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import get_db
-from app.models.core import FileRecord, Session as SessionModel, User
+from app.models.core import ActivityEvent, FileRecord, Session as SessionModel, User
 from app.services.crypto import decrypt_file_iter, encrypt_file_to_path
 from app.services.keystore import ensure_user_key, get_user_dek
+from app.services.activity import add_event
 from app.services.security import decrypt_totp_secret, encrypt_totp_secret, hash_password, verify_password
 from app.services.sessions import create_session
 import pyotp
@@ -143,6 +144,7 @@ def register_action(
     db.refresh(user)
 
     ensure_user_key(db, user)
+    add_event(db, user, action="auth", message=f"Account created for '{user.username}'.")
     session = create_session(db, user)
     user.last_login = datetime.utcnow()
     db.commit()
@@ -184,6 +186,7 @@ def login_action(
             )
 
     ensure_user_key(db, user)
+    add_event(db, user, action="auth", message=f"Signed in as '{user.username}'.")
     session = create_session(db, user)
     user.last_login = datetime.utcnow()
     db.commit()
@@ -359,6 +362,14 @@ def upload_from_ui(
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / safe_name
 
+    add_event(
+        db,
+        user,
+        action="encrypt",
+        message=f"Encrypting upload '{safe_name}' -> '{folder or '/'}' (AES-256-GCM)...",
+    )
+    db.commit()
+
     nonce_b64, tag_b64, plain_size = encrypt_file_to_path(dek, file.file, dest)
     mime_type, _ = mimetypes.guess_type(safe_name)
 
@@ -376,6 +387,13 @@ def upload_from_ui(
         mime_type=mime_type,
     )
     db.add(record)
+    add_event(
+        db,
+        user,
+        action="upload",
+        message=f"Upload complete: '{safe_name}' ({plain_size} bytes).",
+        level="SUCCESS",
+    )
     db.commit()
 
     return RedirectResponse(url="/ui", status_code=303)
@@ -394,6 +412,8 @@ def create_folder(
     user_dir = _user_root(user)
     dest_dir = _safe_join(user_dir, folder)
     dest_dir.mkdir(parents=True, exist_ok=True)
+    add_event(db, user, action="fs", message=f"Created folder '{folder}'.", level="SUCCESS")
+    db.commit()
     return RedirectResponse(url="/ui", status_code=303)
 
 
@@ -421,6 +441,7 @@ def move_file(
     current_path.replace(dest)
 
     record.file_path = str(dest)
+    add_event(db, user, action="fs", message=f"Moved '{record.file_name}' -> '{new_folder or '/'}'.", level="SUCCESS")
     db.commit()
     return RedirectResponse(url="/ui", status_code=303)
 
@@ -441,6 +462,7 @@ def rename_file(
     if not safe_name:
         raise HTTPException(status_code=400, detail="Invalid name")
 
+    old_name = record.file_name
     current_path = _resolve_user_file_path(user, record.file_path)
     dest = current_path.with_name(safe_name)
     current_path.replace(dest)
@@ -449,6 +471,7 @@ def rename_file(
     record.file_path = str(dest)
     if record.is_trashed and record.original_path:
         record.original_path = str(Path(record.original_path).with_name(safe_name))
+    add_event(db, user, action="fs", message=f"Renamed '{old_name}' -> '{safe_name}'.", level="SUCCESS")
     db.commit()
     return RedirectResponse(url=request.headers.get("referer", "/ui"), status_code=303)
 
@@ -478,6 +501,7 @@ def trash_file(
     record.file_path = str(dest)
     record.is_trashed = True
     record.trashed_at = datetime.utcnow()
+    add_event(db, user, action="fs", message=f"Trashed '{record.file_name}'.", level="WARN")
     db.commit()
     return RedirectResponse(url="/ui", status_code=303)
 
@@ -532,6 +556,7 @@ def restore_file(
     record.is_trashed = False
     record.trashed_at = None
     record.original_path = None
+    add_event(db, user, action="fs", message=f"Restored '{record.file_name}'.", level="SUCCESS")
     db.commit()
     return RedirectResponse(url="/ui", status_code=303)
 
@@ -552,6 +577,7 @@ def delete_forever(
         path.unlink()
     except FileNotFoundError:
         pass
+    add_event(db, user, action="fs", message=f"Deleted forever '{record.file_name}'.", level="ERROR")
     db.delete(record)
     db.commit()
     return RedirectResponse(url="/ui/trash", status_code=303)
@@ -577,6 +603,8 @@ def open_file(file_id: str, request: Request, db: Session = Depends(get_db)):
             headers=headers,
         )
 
+    add_event(db, user, action="decrypt", message=f"Decrypting '{record.file_name}' for download...")
+    db.commit()
     dek = get_user_dek(db, user)
     headers["Content-Disposition"] = f'attachment; filename="{record.file_name}"'
     return StreamingResponse(
@@ -603,6 +631,8 @@ def preview_file(file_id: str, request: Request, db: Session = Depends(get_db)):
         headers["Content-Disposition"] = f'inline; filename="{record.file_name}"'
         return FileResponse(path=resolved, filename=record.file_name, media_type=media_type, headers=headers)
 
+    add_event(db, user, action="decrypt", message=f"Decrypting '{record.file_name}' for preview...")
+    db.commit()
     dek = get_user_dek(db, user)
     headers["Content-Disposition"] = f'inline; filename="{record.file_name}"'
     return StreamingResponse(
@@ -612,12 +642,52 @@ def preview_file(file_id: str, request: Request, db: Session = Depends(get_db)):
     )
 
 
+@router.get("/activity")
+def activity_feed(
+    request: Request,
+    response: Response,
+    after_id: int = 0,
+    limit: int = 200,
+    tail: bool = False,
+    db: Session = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "no-store"
+    user = _get_current_user(db, request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    limit = max(1, min(limit, 200))
+    q = db.query(ActivityEvent).filter(ActivityEvent.user_id == user.id)
+
+    if tail and after_id <= 0:
+        rows = q.order_by(ActivityEvent.id.desc()).limit(limit).all()
+        rows.reverse()
+    else:
+        rows = q.filter(ActivityEvent.id > after_id).order_by(ActivityEvent.id).limit(limit).all()
+
+    return {
+        "events": [
+            {
+                "id": row.id,
+                "ts": row.event_timestamp.isoformat(),
+                "level": row.level,
+                "action": row.action,
+                "message": row.message,
+            }
+            for row in rows
+        ]
+    }
+
+
 @router.get("/logout")
 def logout(request: Request, db: Session = Depends(get_db)):
     session_id = request.cookies.get("pfv_session")
     session = _get_session(db, session_id)
     if session:
+        user = db.query(User).filter(User.id == session.user_id).first()
         session.is_active = False
+        if user:
+            add_event(db, user, action="auth", message="Signed out.")
         db.commit()
     response = RedirectResponse(url="/ui/login", status_code=303)
     response.delete_cookie("pfv_session")

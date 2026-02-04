@@ -47,5 +47,188 @@
         toggle.textContent = next === "dark" ? "Light mode" : "Dark mode";
       });
     </script>
+
+    <div class="terminal" id="pfvTerminal" data-open="1" data-hidden="0" data-max="0">
+      <div class="terminal-bar">
+        <div class="terminal-left">
+          <button type="button" class="terminal-dot dot-red" id="pfvTerminalClose" aria-label="Close terminal"></button>
+          <button type="button" class="terminal-dot dot-yellow" id="pfvTerminalMinimize" aria-label="Minimize terminal"></button>
+          <button type="button" class="terminal-dot dot-green" id="pfvTerminalMaximize" aria-label="Maximize terminal"></button>
+          <span class="terminal-title">Vault Terminal</span>
+        </div>
+        <div class="terminal-actions">
+          <button type="button" class="ghost" id="pfvTerminalToggle">Hide</button>
+          <button type="button" class="ghost" id="pfvTerminalClear">Clear</button>
+        </div>
+      </div>
+      <div class="terminal-body" id="pfvTerminalBody" role="log" aria-live="polite" aria-relevant="additions"></div>
+    </div>
+    <button type="button" class="terminal-fab" id="pfvTerminalFab" hidden>Terminal</button>
+    <button type="button" class="terminal-tab" id="pfvTerminalTab" hidden>Vault Terminal</button>
+
+    <script>
+      (function () {
+        const term = document.getElementById("pfvTerminal");
+        const body = document.getElementById("pfvTerminalBody");
+        const toggleBtn = document.getElementById("pfvTerminalToggle");
+        const clearBtn = document.getElementById("pfvTerminalClear");
+        const closeDot = document.getElementById("pfvTerminalClose");
+        const minDot = document.getElementById("pfvTerminalMinimize");
+        const maxDot = document.getElementById("pfvTerminalMaximize");
+        const fab = document.getElementById("pfvTerminalFab");
+        const tab = document.getElementById("pfvTerminalTab");
+        if (!term || !body || !toggleBtn || !clearBtn || !closeDot || !minDot || !maxDot || !fab || !tab) return;
+
+        const openStored = localStorage.getItem("pfv-terminal-open");
+        if (openStored === "0" || openStored === "1") {
+          term.dataset.open = openStored;
+        }
+        const hiddenStored = localStorage.getItem("pfv-terminal-hidden");
+        if (hiddenStored === "0" || hiddenStored === "1") {
+          term.dataset.hidden = hiddenStored;
+        }
+        const maxStored = localStorage.getItem("pfv-terminal-max");
+        if (maxStored === "0" || maxStored === "1") {
+          term.dataset.max = maxStored;
+        }
+
+        function syncTerminalUi() {
+          toggleBtn.textContent = term.dataset.open === "1" ? "Hide" : "Show";
+          const hidden = term.dataset.hidden === "1";
+          fab.hidden = !hidden;
+          tab.hidden = !hidden;
+        }
+
+        syncTerminalUi();
+
+        toggleBtn.addEventListener("click", () => {
+          const next = term.dataset.open === "1" ? "0" : "1";
+          term.dataset.open = next;
+          localStorage.setItem("pfv-terminal-open", next);
+          syncTerminalUi();
+        });
+
+        clearBtn.addEventListener("click", () => {
+          body.innerHTML = "";
+        });
+
+        closeDot.addEventListener("click", () => {
+          term.dataset.hidden = "1";
+          localStorage.setItem("pfv-terminal-hidden", "1");
+          syncTerminalUi();
+        });
+
+        fab.addEventListener("click", () => {
+          term.dataset.hidden = "0";
+          term.dataset.open = "1";
+          localStorage.setItem("pfv-terminal-hidden", "0");
+          localStorage.setItem("pfv-terminal-open", "1");
+          syncTerminalUi();
+        });
+
+        tab.addEventListener("click", () => {
+          term.dataset.hidden = "0";
+          term.dataset.open = "1";
+          localStorage.setItem("pfv-terminal-hidden", "0");
+          localStorage.setItem("pfv-terminal-open", "1");
+          syncTerminalUi();
+        });
+
+        minDot.addEventListener("click", () => {
+          const next = term.dataset.open === "1" ? "0" : "1";
+          term.dataset.open = next;
+          localStorage.setItem("pfv-terminal-open", next);
+          syncTerminalUi();
+        });
+
+        maxDot.addEventListener("click", () => {
+          const next = term.dataset.max === "1" ? "0" : "1";
+          term.dataset.max = next;
+          localStorage.setItem("pfv-terminal-max", next);
+          if (term.dataset.open !== "1") {
+            term.dataset.open = "1";
+            localStorage.setItem("pfv-terminal-open", "1");
+          }
+          syncTerminalUi();
+        });
+
+        let autoScroll = true;
+        body.addEventListener("scroll", () => {
+          autoScroll = body.scrollTop + body.clientHeight >= body.scrollHeight - 8;
+        });
+
+        function fmtTs(iso) {
+          try {
+            const d = new Date(iso);
+            return d.toLocaleTimeString([], { hour12: false });
+          } catch {
+            return iso;
+          }
+        }
+
+        function appendEvent(evt) {
+          const line = document.createElement("div");
+          line.className = `terminal-line level-${(evt.level || "INFO").toLowerCase()}`;
+
+          const ts = document.createElement("span");
+          ts.className = "terminal-ts";
+          ts.textContent = `[${fmtTs(evt.ts || new Date().toISOString())}]`;
+
+          const action = document.createElement("span");
+          action.className = "terminal-action";
+          action.textContent = `${evt.action || "system"}:`;
+
+          const msg = document.createElement("span");
+          msg.className = "terminal-msg";
+          msg.textContent = evt.message || "";
+
+          line.append(ts, action, msg);
+          body.appendChild(line);
+
+          if (autoScroll) {
+            body.scrollTop = body.scrollHeight;
+          }
+        }
+
+        let afterId = Number(sessionStorage.getItem("pfv-terminal-after") || 0);
+        let stopped = false;
+        let signInNotified = false;
+
+        async function poll(url) {
+          try {
+            const res = await fetch(url, {
+              credentials: "same-origin",
+              headers: { Accept: "application/json" },
+              cache: "no-store",
+            });
+            if (!res.ok) {
+              if (res.status === 401) {
+                stopped = true;
+                if (!signInNotified) {
+                  signInNotified = true;
+                  appendEvent({ level: "INFO", action: "system", message: "Sign in to see activity." });
+                }
+              }
+              return;
+            }
+            const data = await res.json();
+            const events = data.events || [];
+            for (const evt of events) appendEvent(evt);
+            if (events.length) {
+              afterId = events[events.length - 1].id;
+              sessionStorage.setItem("pfv-terminal-after", String(afterId));
+            }
+          } catch {
+            // Ignore transient network errors in the UI terminal.
+          }
+        }
+
+        poll("/ui/activity?tail=1&limit=60");
+        setInterval(() => {
+          if (stopped) return;
+          poll(`/ui/activity?after_id=${afterId}&limit=200`);
+        }, 1000);
+      })();
+    </script>
   </body>
 </html>

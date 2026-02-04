@@ -11,6 +11,7 @@ from app.models.core import FileRecord, User
 from app.services.authn import get_current_user
 from app.services.crypto import encrypt_file_to_path
 from app.services.keystore import ensure_user_key, get_user_dek
+from app.services.activity import add_event
 
 router = APIRouter(prefix="/files", tags=["files"])
 
@@ -24,6 +25,14 @@ def upload_file(
 ):
     ensure_user_key(db, user)
     dek = get_user_dek(db, user)
+
+    add_event(
+        db,
+        user,
+        action="encrypt",
+        message=f"Encrypting API upload '{os.path.basename(file.filename)}' -> '{folder or '/'}' (AES-256-GCM)...",
+    )
+    db.commit()
 
     user_dir = Path(settings.staging_path) / str(user.id)
     user_dir.mkdir(parents=True, exist_ok=True)
@@ -53,6 +62,13 @@ def upload_file(
         mime_type=mime_type,
     )
     db.add(record)
+    add_event(
+        db,
+        user,
+        action="upload",
+        message=f"API upload complete: '{safe_name}' ({plain_size} bytes).",
+        level="SUCCESS",
+    )
     db.commit()
     db.refresh(record)
 
