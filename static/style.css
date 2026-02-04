@@ -444,6 +444,11 @@ body[data-theme="dark"] .totp-box {
   background: #f8fafc;
 }
 
+.tree-panel {
+  max-height: 60vh;
+  overflow: auto;
+}
+
 body[data-theme="dark"] .folder-tree {
   background: #0c1524;
   border: 1px solid #223145;
@@ -499,6 +504,26 @@ body[data-theme="dark"] .folder-tree {
   gap: 0.25rem;
 }
 
+.tree-files {
+  list-style: none;
+  margin: 0.25rem 0 0.5rem;
+  padding: 0 0 0 0.5rem;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.tree-file {
+  font-size: 0.9rem;
+  color: var(--muted);
+  padding: 0.2rem 0.4rem;
+  border-radius: 8px;
+}
+
+.tree-file:hover {
+  background: rgba(148, 163, 184, 0.18);
+  color: var(--ink);
+}
+
 .tree-root:hover,
 .tree-summary:hover {
   background: #e2e8f0;
@@ -507,6 +532,11 @@ body[data-theme="dark"] .folder-tree {
 body[data-theme="dark"] .tree-root:hover,
 body[data-theme="dark"] .tree-summary:hover {
   background: #152238;
+}
+
+body[data-theme="dark"] .tree-file:hover {
+  background: rgba(30, 41, 59, 0.7);
+  color: #e2e8f0;
 }
 
 .tree-summary.selected {
@@ -557,6 +587,15 @@ body[data-theme="dark"] .tree-summary:hover {
 }
 
 .terminal[data-open="0"] .terminal-body {
+  display: none;
+}
+
+.terminal[data-open="0"] {
+  height: auto !important;
+  min-height: unset;
+}
+
+.terminal[data-open="0"] .resize-handle {
   display: none;
 }
 

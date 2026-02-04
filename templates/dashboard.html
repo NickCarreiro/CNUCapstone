@@ -15,6 +15,26 @@
     </details>
   {% endfor %}
 {% endmacro %}
+{% macro render_vault_tree(node) %}
+  {% for name, children in node.items()|sort if name != "__files__" %}
+    {% set has_children = children|length > 1 or (children.get("__files__") and children.get("__files__")|length > 0) %}
+    <details class="tree-node" data-has-children="{{ 1 if has_children else 0 }}">
+      <summary class="tree-summary">
+        <span class="tree-label">{{ name }}</span>
+      </summary>
+      <div class="tree-children">
+        {% if children.get("__files__") %}
+          <ul class="tree-files">
+            {% for fname in children.get("__files__") %}
+              <li class="tree-file">{{ fname }}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+        {{ render_vault_tree(children) }}
+      </div>
+    </details>
+  {% endfor %}
+{% endmacro %}
 {% block content %}
 <section class="card">
   <h1>Welcome, {{ user.username }}</h1>
@@ -40,6 +60,27 @@
     </label>
     <button type="submit">Upload</button>
   </form>
+</section>
+<section class="card">
+  <div class="card-header">
+    <h2>Vault structure</h2>
+  </div>
+  <p class="muted">
+    Browse the folders and files stored in your vault.
+  </p>
+  <div class="folder-tree tree-panel">
+    <div class="tree">
+      <div class="tree-root" aria-hidden="true">/</div>
+      {% if vault_tree.get("__files__") %}
+        <ul class="tree-files">
+          {% for fname in vault_tree.get("__files__") %}
+            <li class="tree-file">{{ fname }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+      {{ render_vault_tree(vault_tree) }}
+    </div>
+  </div>
 </section>
 <section class="card">
   <div class="card-header">
@@ -213,7 +254,6 @@
   const renameTitle = document.getElementById("renameTitle");
   const renameInput = document.getElementById("renameInput");
   const cancelRename = document.getElementById("cancelRename");
-
   document.querySelectorAll(".move-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       moveFileId.value = btn.dataset.fileId;

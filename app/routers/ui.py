@@ -89,6 +89,55 @@ def _resolve_user_file_path(user: User, path_str: str) -> Path:
     return resolved
 
 
+def _ensure_tree_node(node: dict) -> dict:
+    if "__files__" not in node:
+        node["__files__"] = []
+    return node
+
+
+def _build_vault_tree(root: Path, files: list[FileRecord]) -> dict:
+    tree: dict[str, dict] = {}
+    _ensure_tree_node(tree)
+
+    for dirpath, dirnames, _ in os.walk(root):
+        if ".trash" in Path(dirpath).parts:
+            continue
+        rel = Path(dirpath).resolve().relative_to(root)
+        if str(rel) == ".":
+            node = tree
+        else:
+            node = tree
+            for part in rel.parts:
+                node = node.setdefault(part, {})
+                _ensure_tree_node(node)
+        dirnames.sort()
+
+    for record in files:
+        try:
+            rel = Path(record.file_path).resolve().relative_to(root)
+        except ValueError:
+            continue
+        parts = rel.parts
+        if not parts:
+            continue
+        *folders, filename = parts
+        node = tree
+        for part in folders:
+            node = node.setdefault(part, {})
+            _ensure_tree_node(node)
+        _ensure_tree_node(node)
+        node["__files__"].append(filename)
+
+    def _sort_tree(node: dict) -> None:
+        if "__files__" in node:
+            node["__files__"].sort()
+        for key in sorted(k for k in node.keys() if k != "__files__"):
+            _sort_tree(node[key])
+
+    _sort_tree(tree)
+    return tree
+
+
 @router.get("/login")
 def login_page(request: Request):
     return templates.TemplateResponse("login.html", {"request": request, "error": None})
@@ -237,6 +286,8 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
         for part in Path(folder["path"]).parts:
             node = node.setdefault(part, {})
 
+    vault_tree = _build_vault_tree(root, files)
+
     return templates.TemplateResponse(
         "dashboard.html",
         {
@@ -245,6 +296,7 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
             "files": file_rows,
             "folders": folder_rows,
             "folder_tree": folder_tree,
+            "vault_tree": vault_tree,
             "error": None,
         },
     )

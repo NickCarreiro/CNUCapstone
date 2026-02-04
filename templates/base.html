@@ -98,6 +98,7 @@
         if (openStored === "0" || openStored === "1") {
           term.dataset.open = openStored;
         }
+        term.dataset.min = term.dataset.open === "1" ? "0" : "1";
         const hiddenStored = localStorage.getItem("pfv-terminal-hidden");
         if (hiddenStored === "0" || hiddenStored === "1") {
           term.dataset.hidden = hiddenStored;
@@ -131,6 +132,7 @@
 
         function syncTerminalUi() {
           toggleBtn.textContent = term.dataset.open === "1" ? "Hide" : "Show";
+          term.dataset.min = term.dataset.open === "1" ? "0" : "1";
           const hidden = term.dataset.hidden === "1";
           fab.hidden = !hidden;
           tab.textContent = hidden ? "Show Terminal" : "Hide Terminal";
@@ -173,14 +175,55 @@
         });
 
         minDot.addEventListener("click", () => {
+          if (term.dataset.max === "1") {
+            term.dataset.max = "0";
+            localStorage.setItem("pfv-terminal-max", "0");
+            const premax = localStorage.getItem("pfv-terminal-premax");
+            if (premax) {
+              try {
+                const pos = JSON.parse(premax);
+                if (typeof pos.left === "number") term.style.left = `${pos.left}px`;
+                if (typeof pos.top === "number") term.style.top = `${pos.top}px`;
+                if (typeof pos.width === "number") term.style.width = `${pos.width}px`;
+                if (typeof pos.height === "number") term.style.height = `${pos.height}px`;
+                term.style.right = "auto";
+                term.style.bottom = "auto";
+              } catch {}
+            }
+          }
           const next = term.dataset.open === "1" ? "0" : "1";
           term.dataset.open = next;
+          term.dataset.min = next === "1" ? "0" : "1";
+          if (next === "1") {
+            const sizeStored = localStorage.getItem("pfv-terminal-size");
+            if (sizeStored) {
+              try {
+                const size = JSON.parse(sizeStored);
+                if (typeof size.width === "number") term.style.width = `${size.width}px`;
+                if (typeof size.height === "number") term.style.height = `${size.height}px`;
+              } catch {}
+            }
+          } else {
+            term.style.height = "";
+          }
           localStorage.setItem("pfv-terminal-open", next);
           syncTerminalUi();
         });
 
         maxDot.addEventListener("click", () => {
           const next = term.dataset.max === "1" ? "0" : "1";
+          if (next === "1") {
+            const rect = term.getBoundingClientRect();
+            localStorage.setItem(
+              "pfv-terminal-premax",
+              JSON.stringify({
+                left: rect.left,
+                top: rect.top,
+                width: rect.width,
+                height: rect.height,
+              })
+            );
+          }
           term.dataset.max = next;
           localStorage.setItem("pfv-terminal-max", next);
           if (term.dataset.open !== "1") {
@@ -194,6 +237,19 @@
             term.style.bottom = "";
             term.style.width = "";
             term.style.height = "";
+          } else {
+            const premax = localStorage.getItem("pfv-terminal-premax");
+            if (premax) {
+              try {
+                const pos = JSON.parse(premax);
+                if (typeof pos.left === "number") term.style.left = `${pos.left}px`;
+                if (typeof pos.top === "number") term.style.top = `${pos.top}px`;
+                if (typeof pos.width === "number") term.style.width = `${pos.width}px`;
+                if (typeof pos.height === "number") term.style.height = `${pos.height}px`;
+                term.style.right = "auto";
+                term.style.bottom = "auto";
+              } catch {}
+            }
           }
           syncTerminalUi();
         });
