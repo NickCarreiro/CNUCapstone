@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -14,6 +14,7 @@ from app.services.security import (
     verify_password,
 )
 from app.services.sessions import create_session
+from app.services.keystore import ensure_user_key
 import pyotp
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -32,6 +33,7 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
     db.add(user)
     db.commit()
     db.refresh(user)
+    ensure_user_key(db, user)
     return user
 
 
@@ -48,6 +50,7 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
         if not pyotp.TOTP(secret).verify(payload.totp_code):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid TOTP")
 
+    ensure_user_key(db, user)
     session = create_session(db, user)
     user.last_login = datetime.utcnow()
     db.commit()
@@ -56,12 +59,26 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/logout")
-def logout(session_id: str, db: Session = Depends(get_db)):
-    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
-    if not session:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
-    session.is_active = False
-    db.commit()
+def logout(request: Request, db: Session = Depends(get_db)):
+    # Prefer logging out the caller's current session (cookie or Authorization bearer token)
+    session_id = request.cookies.get("pfv_session")
+    auth = request.headers.get("authorization")
+    if not session_id and auth and auth.lower().startswith("bearer "):
+        session_id = auth.split(" ", 1)[1].strip()
+    if not session_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
+    try:
+        import uuid
+
+        sid = uuid.UUID(session_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session")
+
+    session = db.query(SessionModel).filter(SessionModel.id == sid).first()
+    if session:
+        session.is_active = False
+        db.commit()
     return {"status": "ok"}
 
 

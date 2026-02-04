@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     password_hash_scheme: str = "argon2"
     totp_issuer: str = "Personal File Vault"
     totp_encryption_key: str = "CHANGE_ME"
+    # 32-byte AES key, base64url-encoded (generated). Used to wrap per-user file keys.
+    master_key: str = "CHANGE_ME"
+    # Optional: derive keys from a passphrase file + managed salt.
+    passphrase_file: str | None = None
+    salt_file: str = "/var/lib/pfv/salt.bin"
 
     # Storage paths
     vault_base_path: str = "/var/lib/pfv"

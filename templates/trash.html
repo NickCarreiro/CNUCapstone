@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <div class="card-header">
+    <h2>Trash</h2>
+    <div class="card-tools">
+      <a class="pill" href="/ui">Back to Dashboard</a>
+    </div>
+  </div>
+  <p class="muted">Files in Trash can be restored or deleted permanently.</p>
+
+  {% if files %}
+    <div class="table-wrap">
+      <table class="table" id="trashTable">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Trash Path</th>
+            <th>Trashed</th>
+            <th>Restore</th>
+            <th>Delete Forever</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for f in files %}
+          <tr>
+            <td>{{ f.record.file_name }}</td>
+            <td>{{ f.rel_path }}</td>
+            <td>{{ f.record.trashed_at }}</td>
+            <td>
+              <form method="post" action="/ui/restore" class="inline-form">
+                <input type="hidden" name="file_id" value="{{ f.record.id }}" />
+                <button type="submit">Restore</button>
+              </form>
+            </td>
+            <td>
+              <form method="post" action="/ui/delete" class="inline-form" onsubmit="return confirm('Delete permanently? This cannot be undone.');">
+                <input type="hidden" name="file_id" value="{{ f.record.id }}" />
+                <button type="submit" class="danger">Delete</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted">Trash is empty.</p>
+  {% endif %}
+</section>
+{% endblock %}

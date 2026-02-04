@@ -59,6 +59,8 @@
           <th>Uploaded</th>
           <th>Preview</th>
           <th>Open</th>
+          <th>Rename</th>
+          <th>Trash</th>
           <th>Move</th>
         </tr>
       </thead>
@@ -81,6 +83,22 @@
           </td>
           <td>
             <a class="pill" href="/ui/files/{{ f.record.id }}">Open</a>
+          </td>
+          <td>
+            <button
+              type="button"
+              class="pill rename-btn"
+              data-file-id="{{ f.record.id }}"
+              data-file-name="{{ f.record.file_name }}"
+            >
+              Rename
+            </button>
+          </td>
+          <td>
+            <form method="post" action="/ui/trash" class="inline-form">
+              <input type="hidden" name="file_id" value="{{ f.record.id }}" />
+              <button type="submit" class="danger">Trash</button>
+            </form>
           </td>
           <td>
             <button
@@ -157,6 +175,21 @@
   </form>
 </dialog>
 
+<dialog id="renameDialog" class="modal">
+  <form method="post" action="/ui/rename" class="form">
+    <input type="hidden" name="file_id" id="renameFileId" />
+    <h2 id="renameTitle">Rename</h2>
+    <label>
+      <span>New name</span>
+      <input type="text" name="new_name" id="renameInput" required />
+    </label>
+    <div class="modal-actions">
+      <button type="submit">Rename</button>
+      <button type="button" class="ghost" id="cancelRename">Cancel</button>
+    </div>
+  </form>
+</dialog>
+
 <script>
   const dialog = document.getElementById("moveDialog");
   const moveFileId = document.getElementById("moveFileId");
@@ -174,6 +207,12 @@
   const previewOpen = document.getElementById("previewOpen");
   const previewDownload = document.getElementById("previewDownload");
   const closePreview = document.getElementById("closePreview");
+
+  const renameDialog = document.getElementById("renameDialog");
+  const renameFileId = document.getElementById("renameFileId");
+  const renameTitle = document.getElementById("renameTitle");
+  const renameInput = document.getElementById("renameInput");
+  const cancelRename = document.getElementById("cancelRename");
 
   document.querySelectorAll(".move-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -219,11 +258,12 @@
 
   document.querySelectorAll(".preview-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
+      const url = `/ui/preview/${btn.dataset.fileId}?v=${Date.now()}`;
       previewTitle.textContent = `Preview ${btn.dataset.fileName}`;
       previewSubtitle.textContent = "";
-      previewOpen.href = `/ui/preview/${btn.dataset.fileId}`;
-      previewDownload.href = `/ui/files/${btn.dataset.fileId}`;
-      previewFrame.src = previewOpen.href;
+      previewOpen.href = url;
+      previewDownload.href = `/ui/files/${btn.dataset.fileId}?v=${Date.now()}`;
+      previewFrame.src = url;
       if (typeof previewDialog.showModal === "function") {
         previewDialog.showModal();
       } else {
@@ -238,6 +278,29 @@
       previewDialog.close();
     } else {
       previewDialog.removeAttribute("open");
+    }
+  });
+
+  document.querySelectorAll(".rename-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      renameFileId.value = btn.dataset.fileId;
+      renameTitle.textContent = `Rename ${btn.dataset.fileName}`;
+      renameInput.value = btn.dataset.fileName;
+      if (typeof renameDialog.showModal === "function") {
+        renameDialog.showModal();
+      } else {
+        renameDialog.setAttribute("open", "open");
+      }
+      renameInput.focus();
+      renameInput.select();
+    });
+  });
+
+  cancelRename.addEventListener("click", () => {
+    if (typeof renameDialog.close === "function") {
+      renameDialog.close();
+    } else {
+      renameDialog.removeAttribute("open");
     }
   });
 </script>

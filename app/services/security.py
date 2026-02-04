@@ -5,6 +5,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from passlib.context import CryptContext
 
 from app.config import settings
+from app.services.key_derivation import totp_fernet_key_str
 
 pwd_context = CryptContext(schemes=[settings.password_hash_scheme], deprecated="auto")
 
@@ -22,7 +23,7 @@ def get_totp() -> pyotp.TOTP:
 
 
 def _fernet() -> Fernet:
-    return Fernet(settings.totp_encryption_key.encode())
+    return Fernet(totp_fernet_key_str().encode())
 
 
 def encrypt_totp_secret(secret: str) -> str:

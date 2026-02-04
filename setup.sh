@@ -45,8 +45,91 @@ pip install -r requirements.txt
 if [ ! -f .env ]; then
   log "Creating .env from .env.example"
   cp .env.example .env
-  KEY="$(python scripts/generate_fernet_key.py)"
-  sed -i "s/^PFV_TOTP_ENCRYPTION_KEY=.*/PFV_TOTP_ENCRYPTION_KEY=\"$KEY\"/" .env
+  # If you use passphrase-based key derivation, you only need to manage passphrase.txt.
+  # Salt is generated below (if missing) at PFV_SALT_FILE.
+  TOTP_KEY="$(python scripts/generate_fernet_key.py)"
+  sed -i "s/^PFV_TOTP_ENCRYPTION_KEY=.*/PFV_TOTP_ENCRYPTION_KEY=\"$TOTP_KEY\"/" .env
+  MASTER_KEY="$(python scripts/generate_aes_key.py)"
+  sed -i "s/^PFV_MASTER_KEY=.*/PFV_MASTER_KEY=\"$MASTER_KEY\"/" .env
+fi
+
+if ! grep -q '^PFV_TOTP_ENCRYPTION_KEY=' .env || grep -q '^PFV_TOTP_ENCRYPTION_KEY="CHANGE_ME"$' .env; then
+  log "Setting PFV_TOTP_ENCRYPTION_KEY in .env"
+  TOTP_KEY="$(python scripts/generate_fernet_key.py)"
+  if grep -q '^PFV_TOTP_ENCRYPTION_KEY=' .env; then
+    sed -i "s/^PFV_TOTP_ENCRYPTION_KEY=.*/PFV_TOTP_ENCRYPTION_KEY=\"$TOTP_KEY\"/" .env
+  else
+    printf '\nPFV_TOTP_ENCRYPTION_KEY=\"%s\"\n' "$TOTP_KEY" >> .env
+  fi
+fi
+
+if ! grep -q '^PFV_MASTER_KEY=' .env || grep -q '^PFV_MASTER_KEY="CHANGE_ME"$' .env; then
+  log "Setting PFV_MASTER_KEY in .env"
+  MASTER_KEY="$(python scripts/generate_aes_key.py)"
+  if grep -q '^PFV_MASTER_KEY=' .env; then
+    sed -i "s/^PFV_MASTER_KEY=.*/PFV_MASTER_KEY=\"$MASTER_KEY\"/" .env
+  else
+    printf '\nPFV_MASTER_KEY=\"%s\"\n' "$MASTER_KEY" >> .env
+  fi
+fi
+
+if ! grep -q '^PFV_PASSPHRASE_FILE=' .env; then
+  log "Setting PFV_PASSPHRASE_FILE in .env (passphrase-derived keys)"
+  printf '\nPFV_PASSPHRASE_FILE=\"%s\"\n' "passphrase.txt" >> .env
+fi
+
+if ! grep -q '^PFV_SALT_FILE=' .env; then
+  log "Setting PFV_SALT_FILE in .env"
+  printf '\nPFV_SALT_FILE=\"%s\"\n' "/var/lib/pfv/salt.bin" >> .env
+fi
+
+PASSFILE="$(python - <<'PY'
+from app.config import settings
+print(settings.passphrase_file or "")
+PY
+)"
+SALTFILE="$(python - <<'PY'
+from app.config import settings
+print(settings.salt_file)
+PY
+)"
+
+if [ -n "$PASSFILE" ] && [ ! -f "$PASSFILE" ]; then
+  log "Passphrase file not found: $PASSFILE"
+  log "Create it (one line, keep it secret) and rerun setup."
+  exit 1
+fi
+
+if [ -n "$PASSFILE" ]; then
+  if [ ! -f "$SALTFILE" ]; then
+    log "Generating salt file at $SALTFILE"
+    SALT_DIR="$(dirname "$SALTFILE")"
+    ensure_dir "$SALT_DIR" || true
+
+    if python - <<PY
+import os
+p=r"$SALTFILE"
+os.makedirs(os.path.dirname(p), exist_ok=True)
+open(p,"xb").write(os.urandom(16))
+print("wrote", p)
+PY
+    then
+      true
+    elif command -v sudo >/dev/null 2>&1; then
+      sudo python3 - <<PY
+import os
+p=r"$SALTFILE"
+os.makedirs(os.path.dirname(p), exist_ok=True)
+open(p,"xb").write(os.urandom(16))
+print("wrote", p)
+PY
+      sudo chmod 600 "$SALTFILE" || true
+      sudo chown "$USER" "$SALTFILE" || true
+    else
+      log "Could not create salt file (no permissions)."
+      exit 1
+    fi
+  fi
 fi
 
 log "Ensuring storage directories"
@@ -91,13 +174,8 @@ else
   exit 1
 fi
 
-log "Creating database tables"
-python - <<'PY'
-from app.db import Base, engine
-from app.models import core
-Base.metadata.create_all(engine)
-print("tables created")
-PY
+log "Creating database tables + ensuring schema"
+python -c 'from app.db_init import init_db; print(init_db())'
 
 log "Setup complete. Start the server with:"
 log "  python -m uvicorn app.main:app --reload --port 8001"

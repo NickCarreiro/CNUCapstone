@@ -21,6 +21,7 @@ class User(Base):
 
     sessions: Mapped[list["Session"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     files: Mapped[list["FileRecord"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    key: Mapped["UserKey | None"] = relationship(back_populates="user", cascade="all, delete-orphan", uselist=False)
 
 
 class Session(Base):
@@ -42,10 +43,31 @@ class FileRecord(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
     file_name: Mapped[str] = mapped_column(String(255))
     file_path: Mapped[str] = mapped_column(Text)
+    original_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     file_size: Mapped[int] = mapped_column(Integer)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    is_trashed: Mapped[bool] = mapped_column(Boolean, default=False)
+    trashed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    is_encrypted: Mapped[bool] = mapped_column(Boolean, default=False)
+    enc_nonce: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    enc_tag: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="files")
+
+
+class UserKey(Base):
+    __tablename__ = "user_keys"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), unique=True, index=True)
+    # base64url strings (nonce + ciphertext) wrapping the 32-byte DEK
+    wrap_nonce: Mapped[str] = mapped_column(String(64))
+    wrapped_dek: Mapped[str] = mapped_column(Text)
+    key_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="key")
 
 
 class AuditLog(Base):

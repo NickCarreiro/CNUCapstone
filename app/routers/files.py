@@ -1,35 +1,56 @@
 import os
+import mimetypes
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, UploadFile
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import get_db
 from app.models.core import FileRecord, User
+from app.services.authn import get_current_user
+from app.services.crypto import encrypt_file_to_path
+from app.services.keystore import ensure_user_key, get_user_dek
 
 router = APIRouter(prefix="/files", tags=["files"])
 
 
 @router.post("/upload")
-def upload_file(user_id: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+def upload_file(
+    user: User = Depends(get_current_user),
+    file: UploadFile = File(...),
+    folder: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    ensure_user_key(db, user)
+    dek = get_user_dek(db, user)
 
-    # TODO: enforce session validation and per-user authorization
-    # TODO: write to staging_path and apply chattr +i at the OS layer
+    user_dir = Path(settings.staging_path) / str(user.id)
+    user_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_folder = (folder or "").strip().lstrip("/").replace("\\", "/")
+    dest_dir = (user_dir / safe_folder).resolve()
+    if not dest_dir.is_relative_to(user_dir.resolve()):
+        dest_dir = user_dir
+    dest_dir.mkdir(parents=True, exist_ok=True)
 
     safe_name = os.path.basename(file.filename)
-    staged_path = f"{settings.staging_path}/{safe_name}"
-    contents = file.file.read()
-    with open(staged_path, "wb") as f:
-        f.write(contents)
+    dest = dest_dir / safe_name
+    nonce_b64, tag_b64, plain_size = encrypt_file_to_path(dek, file.file, dest)
+    mime_type, _ = mimetypes.guess_type(safe_name)
 
     record = FileRecord(
         user_id=user.id,
         file_name=safe_name,
-        file_path=staged_path,
-        file_size=len(contents),
+        file_path=str(dest),
+        original_path=None,
+        file_size=plain_size,
+        is_trashed=False,
+        trashed_at=None,
+        is_encrypted=True,
+        enc_nonce=nonce_b64,
+        enc_tag=tag_b64,
+        mime_type=mime_type,
     )
     db.add(record)
     db.commit()

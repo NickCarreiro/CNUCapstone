@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h1>Create account</h1>
+  <p class="muted">Choose a username and a strong password.</p>
+  {% if error %}
+  <div class="alert">{{ error }}</div>
+  {% endif %}
+  <form method="post" action="/ui/register" class="form">
+    <label>
+      <span>Username</span>
+      <input type="text" name="username" value="{{ username or '' }}" required />
+    </label>
+    <label>
+      <span>Password</span>
+      <input type="password" name="password" required />
+    </label>
+    <label>
+      <span>Confirm password</span>
+      <input type="password" name="confirm_password" required />
+    </label>
+    <button type="submit">Create account</button>
+  </form>
+  <p class="muted" style="margin-top: 1rem;">
+    Already have an account? <a href="/ui/login">Sign in</a>
+  </p>
+</section>
+{% endblock %}
