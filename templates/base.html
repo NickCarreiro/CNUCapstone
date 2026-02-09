@@ -73,6 +73,10 @@
         </div>
       </div>
       <div class="terminal-body" id="pfvTerminalBody" role="log" aria-live="polite" aria-relevant="additions"></div>
+      <form class="terminal-input" id="pfvTerminalForm">
+        <input type="text" id="pfvTerminalCommand" name="command" placeholder="Type: list, move, copy, rename" autocomplete="off" />
+        <button type="submit">Run</button>
+      </form>
       <span class="resize-handle handle-e" data-resize="e"></span>
       <span class="resize-handle handle-w" data-resize="w"></span>
       <span class="resize-handle handle-n" data-resize="n"></span>
@@ -92,6 +96,8 @@
         const maxDot = document.getElementById("pfvTerminalMaximize");
         const fab = document.getElementById("pfvTerminalFab");
         const tab = document.getElementById("pfvTerminalTab");
+        const termForm = document.getElementById("pfvTerminalForm");
+        const termCommand = document.getElementById("pfvTerminalCommand");
         if (!term || !body || !toggleBtn || !clearBtn || !closeDot || !minDot || !maxDot || !fab || !tab) return;
 
         const openStored = localStorage.getItem("pfv-terminal-open");
@@ -268,7 +274,27 @@
           }
         }
 
+        function fmtDate(iso) {
+          try {
+            const d = new Date(iso);
+            return d.toLocaleDateString([], { year: "numeric", month: "short", day: "2-digit" });
+          } catch {
+            return "";
+          }
+        }
+
+        let lastDateLabel = "";
+
         function appendEvent(evt) {
+          const dateLabel = fmtDate(evt.ts || new Date().toISOString());
+          if (dateLabel && dateLabel !== lastDateLabel) {
+            const divider = document.createElement("div");
+            divider.className = "terminal-line terminal-date";
+            divider.textContent = dateLabel;
+            body.appendChild(divider);
+            lastDateLabel = dateLabel;
+          }
+
           const line = document.createElement("div");
           line.className = `terminal-line level-${(evt.level || "INFO").toLowerCase()}`;
 
@@ -291,6 +317,58 @@
             body.scrollTop = body.scrollHeight;
           }
         }
+
+        termForm?.addEventListener("submit", async (e) => {
+          e.preventDefault();
+          const raw = termCommand?.value || "";
+          if (!raw.trim()) return;
+          appendEvent({ level: "INFO", action: "cmd", message: raw });
+          if (termCommand) termCommand.value = "";
+          try {
+            const res = await fetch("/ui/terminal", {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({ command: raw }),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+              appendEvent({ level: "ERROR", action: "cmd", message: data.detail || "Command failed" });
+            } else {
+              appendEvent({ level: "SUCCESS", action: "cmd", message: data.message || "OK" });
+            }
+          } catch {
+            appendEvent({ level: "ERROR", action: "cmd", message: "Terminal command failed to send." });
+          }
+        });
+
+        termCommand?.addEventListener("keydown", async (e) => {
+          if (e.key !== "Tab") return;
+          e.preventDefault();
+          const value = termCommand.value;
+          const parts = value.split(/\s+/);
+          if (parts.length === 0) return;
+          const current = parts[parts.length - 1] || "";
+          try {
+            const res = await fetch(`/ui/terminal/suggest?prefix=${encodeURIComponent(current)}`, {
+              cache: "no-store",
+              credentials: "same-origin",
+            });
+            const data = await res.json();
+            const suggestions = data.suggestions || [];
+            if (suggestions.length === 1) {
+              parts[parts.length - 1] = suggestions[0];
+              termCommand.value = parts.join(" ") + (suggestions[0].endsWith("/") ? "" : " ");
+            } else if (suggestions.length > 1) {
+              appendEvent({
+                level: "INFO",
+                action: "suggest",
+                message: suggestions.join("  "),
+              });
+            }
+          } catch {
+            appendEvent({ level: "ERROR", action: "suggest", message: "Autocomplete failed." });
+          }
+        });
 
         let afterId = Number(sessionStorage.getItem("pfv-terminal-after") || 0);
         let signInNotified = false;

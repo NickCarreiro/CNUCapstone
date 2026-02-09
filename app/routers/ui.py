@@ -1,10 +1,12 @@
 import os
+import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 import mimetypes
+import logging
 
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
@@ -22,6 +24,7 @@ import pyotp
 
 router = APIRouter(prefix="/ui", tags=["ui"])
 templates = Jinja2Templates(directory="templates")
+logger = logging.getLogger("uvicorn.error")
 
 
 def _get_session(db: Session, session_id: str | None) -> SessionModel | None:
@@ -136,6 +139,24 @@ def _build_vault_tree(root: Path, files: list[FileRecord]) -> dict:
 
     _sort_tree(tree)
     return tree
+
+
+def _normalize_rel_path(value: str) -> str:
+    return (value or "").strip().lstrip("/").replace("\\", "/")
+
+
+def _parse_terminal_command(raw: str) -> tuple[str, list[str]]:
+    tokens = [t for t in (raw or "").strip().split() if t]
+    if not tokens:
+        return "", []
+    cmd = tokens[0].lower()
+    return cmd, tokens[1:]
+
+
+def _format_list_entries(entries: list[str]) -> str:
+    if not entries:
+        return "(empty)"
+    return "\n".join(entries)
 
 
 @router.get("/login")
@@ -681,12 +702,14 @@ def preview_file(file_id: str, request: Request, db: Session = Depends(get_db)):
     if not record.is_encrypted or not record.enc_nonce or not record.enc_tag:
         media_type, _ = mimetypes.guess_type(record.file_name)
         headers["Content-Disposition"] = f'inline; filename="{record.file_name}"'
+        logger.info("preview: serving plaintext file '%s' (user=%s)", record.file_name, user.username)
         return FileResponse(path=resolved, filename=record.file_name, media_type=media_type, headers=headers)
 
     add_event(db, user, action="decrypt", message=f"Decrypting '{record.file_name}' for preview...")
     db.commit()
     dek = get_user_dek(db, user)
     headers["Content-Disposition"] = f'inline; filename="{record.file_name}"'
+    logger.info("preview: decrypting file '%s' (user=%s)", record.file_name, user.username)
     return StreamingResponse(
         decrypt_file_iter(dek, resolved, record.enc_nonce or "", record.enc_tag or ""),
         media_type=record.mime_type or "application/octet-stream",
@@ -729,6 +752,122 @@ def activity_feed(
             for row in rows
         ]
     }
+
+
+@router.post("/terminal")
+def terminal_command(
+    request: Request,
+    command: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    user = _get_current_user(db, request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    cmd, args = _parse_terminal_command(command)
+    if cmd == "help":
+        message = (
+            "Commands:\n"
+            "  list [folder]\n"
+            "  move <src> <dst>\n"
+            "  copy <src> <dst>\n"
+            "  rename <src> <dst>\n"
+            "Paths are relative to your vault."
+        )
+        add_event(db, user, action="terminal", message=message)
+        return {"ok": True, "message": message}
+
+    if cmd not in {"list", "move", "copy", "rename"}:
+        raise HTTPException(status_code=400, detail="Unsupported command")
+
+    root = _user_root(user)
+    safe_args = [_normalize_rel_path(a) for a in args]
+
+    if cmd == "list":
+        target = safe_args[0] if safe_args else ""
+        path = _safe_join(root, target)
+        if not path.exists() or not path.is_dir():
+            raise HTTPException(status_code=400, detail="Folder not found")
+        entries = []
+        for item in sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
+            name = f"{item.name}/" if item.is_dir() else item.name
+            entries.append(name)
+        message = _format_list_entries(entries)
+        add_event(db, user, action="terminal", message=f"list {target or '/'}\n{message}")
+        return {"ok": True, "message": message}
+
+    if len(safe_args) < 2:
+        raise HTTPException(status_code=400, detail="Missing path arguments")
+
+    src = _safe_join(root, safe_args[0])
+    dst = _safe_join(root, safe_args[1])
+
+    if not src.exists():
+        raise HTTPException(status_code=400, detail="Source not found")
+
+    if cmd == "rename":
+        if src.is_dir():
+            dst = dst if dst.suffix == "" else dst
+        if dst.exists():
+            raise HTTPException(status_code=400, detail="Destination already exists")
+        src.rename(dst)
+        add_event(db, user, action="terminal", message=f"rename {safe_args[0]} -> {safe_args[1]}")
+        return {"ok": True, "message": "Renamed."}
+
+    if cmd == "move":
+        if dst.exists():
+            raise HTTPException(status_code=400, detail="Destination already exists")
+        shutil.move(str(src), str(dst))
+        add_event(db, user, action="terminal", message=f"move {safe_args[0]} -> {safe_args[1]}")
+        return {"ok": True, "message": "Moved."}
+
+    if cmd == "copy":
+        if dst.exists():
+            raise HTTPException(status_code=400, detail="Destination already exists")
+        if src.is_dir():
+            shutil.copytree(src, dst)
+        else:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+        add_event(db, user, action="terminal", message=f"copy {safe_args[0]} -> {safe_args[1]}")
+        return {"ok": True, "message": "Copied."}
+
+    raise HTTPException(status_code=400, detail="Unsupported command")
+
+
+@router.get("/terminal/suggest")
+def terminal_suggest(
+    request: Request,
+    prefix: str = "",
+    db: Session = Depends(get_db),
+):
+    user = _get_current_user(db, request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    root = _user_root(user)
+    raw = _normalize_rel_path(prefix)
+    base_dir = raw
+    partial = ""
+    if raw and not raw.endswith("/"):
+        base_dir = str(Path(raw).parent) if str(Path(raw).parent) != "." else ""
+        partial = Path(raw).name
+
+    target_dir = _safe_join(root, base_dir)
+    if not target_dir.exists() or not target_dir.is_dir():
+        return {"suggestions": []}
+
+    suggestions: list[str] = []
+    for item in sorted(target_dir.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
+        name = item.name
+        if partial and not name.lower().startswith(partial.lower()):
+            continue
+        rel = str(Path(base_dir) / name) if base_dir else name
+        if item.is_dir():
+            rel = f"{rel}/"
+        suggestions.append(rel)
+
+    return {"suggestions": suggestions[:50]}
 
 
 @router.get("/logout")
