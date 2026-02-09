@@ -14,8 +14,7 @@
       <table class="table" id="trashTable">
         <thead>
           <tr>
-            <th>Name</th>
-            <th>Trash Path</th>
+            <th>Item</th>
             <th>Trashed</th>
             <th>Restore</th>
             <th>Delete Forever</th>
@@ -24,18 +23,17 @@
         <tbody>
           {% for f in files %}
           <tr>
-            <td>{{ f.record.file_name }}</td>
-            <td>{{ f.rel_path }}</td>
+            <td>{{ f.display_name }}</td>
             <td>{{ f.record.trashed_at }}</td>
             <td>
               <form method="post" action="/ui/restore" class="inline-form">
-                <input type="hidden" name="file_id" value="{{ f.record.id }}" />
+                <input type="hidden" name="file_token" value="{{ f.token }}" />
                 <button type="submit">Restore</button>
               </form>
             </td>
             <td>
               <form method="post" action="/ui/delete" class="inline-form" onsubmit="return confirm('Delete permanently? This cannot be undone.');">
-                <input type="hidden" name="file_id" value="{{ f.record.id }}" />
+                <input type="hidden" name="file_token" value="{{ f.token }}" />
                 <button type="submit" class="danger">Delete</button>
               </form>
             </td>

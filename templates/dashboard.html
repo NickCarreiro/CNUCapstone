@@ -17,19 +17,16 @@
 {% endmacro %}
 {% macro render_vault_tree(node) %}
   {% for name, children in node.items()|sort if name != "__files__" %}
-    {% set has_children = children|length > 1 or (children.get("__files__") and children.get("__files__")|length > 0) %}
+    {% set file_count = children.get("__files__")|length if children.get("__files__") else 0 %}
+    {% set has_children = children|length > 1 or file_count > 0 %}
     <details class="tree-node" data-has-children="{{ 1 if has_children else 0 }}">
       <summary class="tree-summary">
         <span class="tree-label">{{ name }}</span>
+        {% if file_count %}
+          <span class="tree-count">{{ file_count }} file{{ "s" if file_count != 1 }}</span>
+        {% endif %}
       </summary>
       <div class="tree-children">
-        {% if children.get("__files__") %}
-          <ul class="tree-files">
-            {% for fname in children.get("__files__") %}
-              <li class="tree-file">{{ fname }}</li>
-            {% endfor %}
-          </ul>
-        {% endif %}
         {{ render_vault_tree(children) }}
       </div>
     </details>
@@ -37,7 +34,7 @@
 {% endmacro %}
 {% block content %}
 <section class="card">
-  <h1>Welcome, {{ user.username }}</h1>
+  <h1>Welcome</h1>
   <p class="muted">Upload files into your secure staging area.</p>
   <div class="actions">
     <a class="pill" href="/ui/totp">Manage TOTP</a>
@@ -71,13 +68,6 @@
   <div class="folder-tree tree-panel">
     <div class="tree">
       <div class="tree-root" aria-hidden="true">/</div>
-      {% if vault_tree.get("__files__") %}
-        <ul class="tree-files">
-          {% for fname in vault_tree.get("__files__") %}
-            <li class="tree-file">{{ fname }}</li>
-          {% endfor %}
-        </ul>
-      {% endif %}
       {{ render_vault_tree(vault_tree) }}
     </div>
   </div>
@@ -94,8 +84,7 @@
     <table class="table" id="fileTable">
       <thead>
         <tr>
-          <th>Name</th>
-          <th>Path</th>
+          <th>Item</th>
           <th>Size (bytes)</th>
           <th>Uploaded</th>
           <th>Preview</th>
@@ -108,36 +97,35 @@
       <tbody>
         {% for f in files %}
         <tr class="file-row">
-          <td>{{ f.record.file_name }}</td>
-          <td>{{ f.rel_path }}</td>
+          <td>{{ f.display_name }}</td>
           <td>{{ f.record.file_size }}</td>
           <td>{{ f.record.uploaded_at }}</td>
           <td>
             <button
               type="button"
               class="pill preview-btn"
-              data-file-id="{{ f.record.id }}"
-              data-file-name="{{ f.record.file_name }}"
+              data-file-token="{{ f.token }}"
+              data-display-name="{{ f.display_name }}"
             >
               Preview
             </button>
           </td>
           <td>
-            <a class="pill" href="/ui/files/{{ f.record.id }}">Open</a>
+            <a class="pill" href="/ui/files/{{ f.token }}">Open</a>
           </td>
           <td>
             <button
               type="button"
               class="pill rename-btn"
-              data-file-id="{{ f.record.id }}"
-              data-file-name="{{ f.record.file_name }}"
+              data-file-token="{{ f.token }}"
+              data-display-name="{{ f.display_name }}"
             >
               Rename
             </button>
           </td>
           <td>
             <form method="post" action="/ui/trash" class="inline-form">
-              <input type="hidden" name="file_id" value="{{ f.record.id }}" />
+              <input type="hidden" name="file_token" value="{{ f.token }}" />
               <button type="submit" class="danger">Trash</button>
             </form>
           </td>
@@ -145,9 +133,8 @@
             <button
               type="button"
               class="pill move-btn"
-              data-file-id="{{ f.record.id }}"
-              data-file-name="{{ f.record.file_name }}"
-              data-current-path="{{ f.rel_path }}"
+              data-file-token="{{ f.token }}"
+              data-display-name="{{ f.display_name }}"
             >
               Move
             </button>
@@ -186,7 +173,7 @@
 
 <dialog id="moveDialog" class="modal">
   <form method="post" action="/ui/move" class="form">
-    <input type="hidden" name="file_id" id="moveFileId" />
+    <input type="hidden" name="file_token" id="moveFileId" />
     <h2 id="moveTitle">Move file</h2>
     <p class="muted" id="moveSubtitle"></p>
     <label>
@@ -218,7 +205,7 @@
 
 <dialog id="renameDialog" class="modal">
   <form method="post" action="/ui/rename" class="form">
-    <input type="hidden" name="file_id" id="renameFileId" />
+    <input type="hidden" name="file_token" id="renameFileId" />
     <h2 id="renameTitle">Rename</h2>
     <label>
       <span>New name</span>
@@ -256,9 +243,9 @@
   const cancelRename = document.getElementById("cancelRename");
   document.querySelectorAll(".move-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      moveFileId.value = btn.dataset.fileId;
-      moveTitle.textContent = `Move ${btn.dataset.fileName}`;
-      moveSubtitle.textContent = `Current path: ${btn.dataset.currentPath}`;
+      moveFileId.value = btn.dataset.fileToken;
+      moveTitle.textContent = `Move ${btn.dataset.displayName || "file"}`;
+      moveSubtitle.textContent = "";
       if (typeof dialog.showModal === "function") {
         dialog.showModal();
       } else {
@@ -298,11 +285,11 @@
 
   document.querySelectorAll(".preview-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const url = `/ui/preview/${btn.dataset.fileId}?v=${Date.now()}`;
-      previewTitle.textContent = `Preview ${btn.dataset.fileName}`;
+      const url = `/ui/preview/${btn.dataset.fileToken}?v=${Date.now()}`;
+      previewTitle.textContent = `Preview ${btn.dataset.displayName || "file"}`;
       previewSubtitle.textContent = "";
       previewOpen.href = url;
-      previewDownload.href = `/ui/files/${btn.dataset.fileId}?v=${Date.now()}`;
+      previewDownload.href = `/ui/files/${btn.dataset.fileToken}?v=${Date.now()}`;
       previewFrame.src = url;
       if (typeof previewDialog.showModal === "function") {
         previewDialog.showModal();
@@ -323,9 +310,9 @@
 
   document.querySelectorAll(".rename-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      renameFileId.value = btn.dataset.fileId;
-      renameTitle.textContent = `Rename ${btn.dataset.fileName}`;
-      renameInput.value = btn.dataset.fileName;
+      renameFileId.value = btn.dataset.fileToken;
+      renameTitle.textContent = `Rename ${btn.dataset.displayName || "file"}`;
+      renameInput.value = "";
       if (typeof renameDialog.showModal === "function") {
         renameDialog.showModal();
       } else {

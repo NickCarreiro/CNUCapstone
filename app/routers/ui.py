@@ -25,6 +25,7 @@ import pyotp
 router = APIRouter(prefix="/ui", tags=["ui"])
 templates = Jinja2Templates(directory="templates")
 logger = logging.getLogger("uvicorn.error")
+_FILE_TOKEN_CACHE: dict[str, dict[str, str]] = {}
 
 
 def _get_session(db: Session, session_id: str | None) -> SessionModel | None:
@@ -51,6 +52,10 @@ def _get_current_user(db: Session, request: Request) -> User | None:
     if not session:
         return None
     return db.query(User).filter(User.id == session.user_id).first()
+
+
+def _get_session_id(request: Request) -> str:
+    return request.cookies.get("pfv_session") or ""
 
 
 def _user_root(user: User) -> Path:
@@ -82,6 +87,32 @@ def _get_user_file(db: Session, user: User, file_id: str) -> FileRecord:
     if not record:
         raise HTTPException(status_code=404, detail="File not found")
     return record
+
+
+def _issue_file_token(session_id: str, file_id: uuid.UUID) -> str:
+    if not session_id:
+        return str(file_id)
+    token = uuid.uuid4().hex
+    _FILE_TOKEN_CACHE.setdefault(session_id, {})[token] = str(file_id)
+    return token
+
+
+def _resolve_file_token(session_id: str, token: str) -> str:
+    if session_id:
+        cached = _FILE_TOKEN_CACHE.get(session_id, {}).get(token)
+        if cached:
+            return cached
+    try:
+        parsed = uuid.UUID(token)
+        return str(parsed)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="File not found")
+
+
+def _get_user_file_by_token(db: Session, user: User, request: Request, token: str) -> FileRecord:
+    session_id = _get_session_id(request)
+    file_id = _resolve_file_token(session_id, token)
+    return _get_user_file(db, user, file_id)
 
 
 def _resolve_user_file_path(user: User, path_str: str) -> Path:
@@ -154,6 +185,7 @@ def _parse_terminal_command(raw: str) -> tuple[str, list[str]]:
         "ls": "list",
         "mv": "move",
         "cp": "copy",
+        "mkdir": "directory",
     }
     cmd = aliases.get(cmd, cmd)
     return cmd, tokens[1:]
@@ -295,15 +327,26 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
         .filter(FileRecord.user_id == user.id, FileRecord.is_trashed.is_(False))
         .all()
     )
+    session_id = _get_session_id(request)
+    if session_id:
+        _FILE_TOKEN_CACHE[session_id] = {}
     root = _user_root(user).resolve()
     file_rows = []
-    for record in files:
+    for idx, record in enumerate(files, start=1):
         try:
             rel = Path(record.file_path).resolve().relative_to(root)
             rel_path = str(rel)
         except ValueError:
             rel_path = record.file_path
-        file_rows.append({"record": record, "rel_path": rel_path})
+        token = _issue_file_token(session_id, record.id)
+        file_rows.append(
+            {
+                "record": record,
+                "rel_path": rel_path,
+                "token": token,
+                "display_name": f"File {idx}",
+            }
+        )
 
     folder_rows = []
     for dirpath, dirnames, _ in os.walk(root):
@@ -511,7 +554,7 @@ def create_folder(
 @router.post("/move")
 def move_file(
     request: Request,
-    file_id: str = Form(...),
+    file_token: str = Form(...),
     new_folder: str = Form(""),
     db: Session = Depends(get_db),
 ):
@@ -519,7 +562,7 @@ def move_file(
     if not user:
         return RedirectResponse(url="/ui/login", status_code=303)
 
-    record = _get_user_file(db, user, file_id)
+    record = _get_user_file_by_token(db, user, request, file_token)
     if record.is_trashed:
         raise HTTPException(status_code=400, detail="File is in trash")
 
@@ -540,7 +583,7 @@ def move_file(
 @router.post("/rename")
 def rename_file(
     request: Request,
-    file_id: str = Form(...),
+    file_token: str = Form(...),
     new_name: str = Form(...),
     db: Session = Depends(get_db),
 ):
@@ -548,7 +591,7 @@ def rename_file(
     if not user:
         return RedirectResponse(url="/ui/login", status_code=303)
 
-    record = _get_user_file(db, user, file_id)
+    record = _get_user_file_by_token(db, user, request, file_token)
     safe_name = Path(new_name).name.strip()
     if not safe_name:
         raise HTTPException(status_code=400, detail="Invalid name")
@@ -570,14 +613,14 @@ def rename_file(
 @router.post("/trash")
 def trash_file(
     request: Request,
-    file_id: str = Form(...),
+    file_token: str = Form(...),
     db: Session = Depends(get_db),
 ):
     user = _get_current_user(db, request)
     if not user:
         return RedirectResponse(url="/ui/login", status_code=303)
 
-    record = _get_user_file(db, user, file_id)
+    record = _get_user_file_by_token(db, user, request, file_token)
     if record.is_trashed:
         return RedirectResponse(url="/ui", status_code=303)
 
@@ -608,15 +651,26 @@ def trash_view(request: Request, db: Session = Depends(get_db)):
         .filter(FileRecord.user_id == user.id, FileRecord.is_trashed.is_(True))
         .all()
     )
+    session_id = _get_session_id(request)
+    if session_id:
+        _FILE_TOKEN_CACHE[session_id] = {}
     root = _user_root(user).resolve()
     rows = []
-    for record in files:
+    for idx, record in enumerate(files, start=1):
         try:
             rel = Path(record.file_path).resolve().relative_to(root)
             rel_path = str(rel)
         except ValueError:
             rel_path = record.file_path
-        rows.append({"record": record, "rel_path": rel_path})
+        token = _issue_file_token(session_id, record.id)
+        rows.append(
+            {
+                "record": record,
+                "rel_path": rel_path,
+                "token": token,
+                "display_name": f"File {idx}",
+            }
+        )
 
     return templates.TemplateResponse(
         "trash.html",
@@ -627,14 +681,14 @@ def trash_view(request: Request, db: Session = Depends(get_db)):
 @router.post("/restore")
 def restore_file(
     request: Request,
-    file_id: str = Form(...),
+    file_token: str = Form(...),
     db: Session = Depends(get_db),
 ):
     user = _get_current_user(db, request)
     if not user:
         return RedirectResponse(url="/ui/login", status_code=303)
 
-    record = _get_user_file(db, user, file_id)
+    record = _get_user_file_by_token(db, user, request, file_token)
     if not record.is_trashed or not record.original_path:
         return RedirectResponse(url="/ui/trash", status_code=303)
 
@@ -655,14 +709,14 @@ def restore_file(
 @router.post("/delete")
 def delete_forever(
     request: Request,
-    file_id: str = Form(...),
+    file_token: str = Form(...),
     db: Session = Depends(get_db),
 ):
     user = _get_current_user(db, request)
     if not user:
         return RedirectResponse(url="/ui/login", status_code=303)
 
-    record = _get_user_file(db, user, file_id)
+    record = _get_user_file_by_token(db, user, request, file_token)
     path = _resolve_user_file_path(user, record.file_path)
     try:
         path.unlink()
@@ -674,13 +728,13 @@ def delete_forever(
     return RedirectResponse(url="/ui/trash", status_code=303)
 
 
-@router.get("/files/{file_id}")
-def open_file(file_id: str, request: Request, db: Session = Depends(get_db)):
+@router.get("/files/{file_token}")
+def open_file(file_token: str, request: Request, db: Session = Depends(get_db)):
     user = _get_current_user(db, request)
     if not user:
         return RedirectResponse(url="/ui/login", status_code=303)
 
-    record = _get_user_file(db, user, file_id)
+    record = _get_user_file_by_token(db, user, request, file_token)
     resolved = _resolve_user_file_path(user, record.file_path)
     if not resolved.exists():
         raise HTTPException(status_code=404, detail="File missing on disk")
@@ -705,13 +759,13 @@ def open_file(file_id: str, request: Request, db: Session = Depends(get_db)):
     )
 
 
-@router.get("/preview/{file_id}")
-def preview_file(file_id: str, request: Request, db: Session = Depends(get_db)):
+@router.get("/preview/{file_token}")
+def preview_file(file_token: str, request: Request, db: Session = Depends(get_db)):
     user = _get_current_user(db, request)
     if not user:
         return RedirectResponse(url="/ui/login", status_code=303)
 
-    record = _get_user_file(db, user, file_id)
+    record = _get_user_file_by_token(db, user, request, file_token)
     resolved = _resolve_user_file_path(user, record.file_path)
     if not resolved.exists():
         raise HTTPException(status_code=404, detail="File missing on disk")
@@ -742,6 +796,8 @@ def activity_feed(
     after_id: int = 0,
     limit: int = 200,
     tail: bool = False,
+    redact: bool = False,
+    no_history: bool = False,
     db: Session = Depends(get_db),
 ):
     response.headers["Cache-Control"] = "no-store"
@@ -751,12 +807,32 @@ def activity_feed(
 
     limit = max(1, min(limit, 200))
     q = db.query(ActivityEvent).filter(ActivityEvent.user_id == user.id)
+    last_id = (
+        db.query(ActivityEvent.id)
+        .filter(ActivityEvent.user_id == user.id)
+        .order_by(ActivityEvent.id.desc())
+        .limit(1)
+        .scalar()
+    )
+
+    if no_history and after_id <= 0:
+        return {"events": [], "last_id": last_id or 0}
 
     if tail and after_id <= 0:
         rows = q.order_by(ActivityEvent.id.desc()).limit(limit).all()
         rows.reverse()
     else:
         rows = q.filter(ActivityEvent.id > after_id).order_by(ActivityEvent.id).limit(limit).all()
+
+    def _redact_message(action: str) -> str:
+        return {
+            "auth": "Authentication event.",
+            "decrypt": "File decrypted.",
+            "upload": "Upload completed.",
+            "fs": "Filesystem operation.",
+            "terminal": "Terminal command executed.",
+            "cmd": "Terminal command executed.",
+        }.get(action, "Activity event.")
 
     return {
         "events": [
@@ -765,10 +841,11 @@ def activity_feed(
                 "ts": row.event_timestamp.isoformat(),
                 "level": row.level,
                 "action": row.action,
-                "message": row.message,
+                "message": _redact_message(row.action) if redact else row.message,
             }
             for row in rows
-        ]
+        ],
+        "last_id": last_id or 0,
     }
 
 
@@ -790,12 +867,13 @@ def terminal_command(
             "  move <src> <dst>\n"
             "  copy <src> <dst>\n"
             "  rename <src> <dst>\n"
+            "  directory <path>\n"
             "Paths are relative to your vault."
         )
         add_event(db, user, action="terminal", message=message)
         return {"ok": True, "message": message}
 
-    if cmd not in {"list", "move", "copy", "rename"}:
+    if cmd not in {"list", "move", "copy", "rename", "directory"}:
         raise HTTPException(status_code=400, detail="Unsupported command")
 
     root = _user_root(user)
@@ -816,6 +894,15 @@ def terminal_command(
         message = _format_list_entries(entries)
         add_event(db, user, action="terminal", message=f"list {target or '/'}\n{message}")
         return {"ok": True, "message": message}
+
+    if cmd == "directory":
+        if len(safe_args) < 1:
+            raise HTTPException(status_code=400, detail="Missing directory path")
+        target = _safe_join(root, safe_args[0])
+        _ensure_no_symlink(target, root)
+        target.mkdir(parents=True, exist_ok=True)
+        add_event(db, user, action="terminal", message=f"directory {safe_args[0]}")
+        return {"ok": True, "message": "Directory created."}
 
     if len(safe_args) < 2:
         raise HTTPException(status_code=400, detail="Missing path arguments")

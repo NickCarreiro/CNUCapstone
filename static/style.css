@@ -488,6 +488,15 @@ body[data-theme="dark"] .folder-tree {
   gap: 0.5rem;
 }
 
+.tree-count {
+  margin-left: auto;
+  font-size: 0.75rem;
+  color: var(--muted);
+  background: rgba(148, 163, 184, 0.18);
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+}
+
 .tree-node[data-has-children="0"] > summary::-webkit-details-marker {
   display: none;
 }

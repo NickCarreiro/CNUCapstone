@@ -22,7 +22,7 @@
               <a href="/ui/trash">Trash</a>
             </nav>
             <div class="toolbar-actions">
-              <div class="user-pill">{{ user.username }}</div>
+              <div class="user-pill">Signed in</div>
               <button type="button" class="ghost toggle-theme" id="themeToggle">Dark mode</button>
               <a class="pill ghost-link" href="/ui/logout">Logout</a>
             </div>
@@ -534,10 +534,28 @@
 
         handles.forEach((h) => h.addEventListener("mousedown", onResizeStart));
 
-        poll("/ui/activity?tail=1&limit=60");
-        setInterval(() => {
-          poll(`/ui/activity?after_id=${afterId}&limit=200`);
-        }, 1000);
+        async function bootstrapActivity() {
+          try {
+            const res = await fetch("/ui/activity?no_history=1&redact=1", {
+              credentials: "same-origin",
+              headers: { Accept: "application/json" },
+              cache: "no-store",
+            });
+            if (res.ok) {
+              const data = await res.json();
+              afterId = Number(data.last_id || 0);
+              sessionStorage.setItem("pfv-terminal-after", String(afterId));
+            }
+          } catch {
+            // Ignore bootstrap errors.
+          }
+        }
+
+        bootstrapActivity().finally(() => {
+          setInterval(() => {
+            poll(`/ui/activity?after_id=${afterId}&limit=200&redact=1`);
+          }, 1000);
+        });
       })();
     </script>
   </body>
