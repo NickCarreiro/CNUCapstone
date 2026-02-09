@@ -1,4 +1,5 @@
 import os
+import shlex
 import shutil
 import uuid
 from datetime import datetime
@@ -177,7 +178,13 @@ def _normalize_rel_path(value: str) -> str:
 
 
 def _parse_terminal_command(raw: str) -> tuple[str, list[str]]:
-    tokens = [t for t in (raw or "").strip().split() if t]
+    raw = (raw or "").strip()
+    if not raw:
+        return "", []
+    try:
+        tokens = shlex.split(raw)
+    except ValueError:
+        tokens = raw.split()
     if not tokens:
         return "", []
     cmd = tokens[0].lower()
