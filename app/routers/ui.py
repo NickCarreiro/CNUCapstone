@@ -150,6 +150,12 @@ def _parse_terminal_command(raw: str) -> tuple[str, list[str]]:
     if not tokens:
         return "", []
     cmd = tokens[0].lower()
+    aliases = {
+        "ls": "list",
+        "mv": "move",
+        "cp": "copy",
+    }
+    cmd = aliases.get(cmd, cmd)
     return cmd, tokens[1:]
 
 
@@ -157,6 +163,18 @@ def _format_list_entries(entries: list[str]) -> str:
     if not entries:
         return "(empty)"
     return "\n".join(entries)
+
+
+def _ensure_no_symlink(path: Path, root: Path) -> None:
+    try:
+        rel = path.resolve().relative_to(root.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    current = root.resolve()
+    for part in rel.parts:
+        current = current / part
+        if current.exists() and current.is_symlink():
+            raise HTTPException(status_code=400, detail="Symlinks are not allowed")
 
 
 @router.get("/login")
@@ -786,10 +804,13 @@ def terminal_command(
     if cmd == "list":
         target = safe_args[0] if safe_args else ""
         path = _safe_join(root, target)
+        _ensure_no_symlink(path, root)
         if not path.exists() or not path.is_dir():
             raise HTTPException(status_code=400, detail="Folder not found")
         entries = []
         for item in sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
+            if item.is_symlink():
+                continue
             name = f"{item.name}/" if item.is_dir() else item.name
             entries.append(name)
         message = _format_list_entries(entries)
@@ -802,10 +823,14 @@ def terminal_command(
     src = _safe_join(root, safe_args[0])
     dst = _safe_join(root, safe_args[1])
 
+    _ensure_no_symlink(src, root)
+    _ensure_no_symlink(dst.parent, root)
+
     if not src.exists():
         raise HTTPException(status_code=400, detail="Source not found")
 
     if cmd == "rename":
+        _ensure_no_symlink(dst.parent, root)
         if src.is_dir():
             dst = dst if dst.suffix == "" else dst
         if dst.exists():
@@ -815,6 +840,7 @@ def terminal_command(
         return {"ok": True, "message": "Renamed."}
 
     if cmd == "move":
+        _ensure_no_symlink(dst.parent, root)
         if dst.exists():
             raise HTTPException(status_code=400, detail="Destination already exists")
         shutil.move(str(src), str(dst))
@@ -822,6 +848,7 @@ def terminal_command(
         return {"ok": True, "message": "Moved."}
 
     if cmd == "copy":
+        _ensure_no_symlink(dst.parent, root)
         if dst.exists():
             raise HTTPException(status_code=400, detail="Destination already exists")
         if src.is_dir():
