@@ -204,21 +204,6 @@ def _format_list_entries(entries: list[str]) -> str:
     return "\n".join(entries)
 
 
-def _mask_name(name: str) -> str:
-    safe = (name or "").strip()
-    if not safe:
-        return "File"
-    stem = Path(safe).stem
-    ext = Path(safe).suffix
-    if len(stem) <= 5:
-        masked = f"{stem[0]}…{stem[-1]}" if len(stem) > 1 else f"{stem}…"
-    elif len(stem) <= 12:
-        masked = f"{stem[:4]}…{stem[-2:]}"
-    else:
-        masked = f"{stem[:8]}…{stem[-4:]}"
-    return f"{masked}{ext}"
-
-
 def _ensure_no_symlink(path: Path, root: Path) -> None:
     try:
         rel = path.resolve().relative_to(root.resolve())
@@ -366,7 +351,7 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
                 "record": record,
                 "rel_path": rel_path,
                 "token": token,
-                "display_name": _mask_name(record.file_name),
+                "display_name": record.file_name,
             }
         )
 
@@ -690,7 +675,7 @@ def trash_view(request: Request, db: Session = Depends(get_db)):
                 "record": record,
                 "rel_path": rel_path,
                 "token": token,
-                "display_name": _mask_name(record.file_name),
+                "display_name": record.file_name,
             }
         )
 
@@ -811,13 +796,6 @@ def preview_file(file_token: str, request: Request, db: Session = Depends(get_db
     )
 
 
-@router.get("/file-name/{file_token}")
-def file_name(file_token: str, request: Request, db: Session = Depends(get_db)):
-    user = _get_current_user(db, request)
-    if not user:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    record = _get_user_file_by_token(db, user, request, file_token)
-    return {"name": record.file_name}
 
 
 @router.get("/activity")

@@ -97,15 +97,7 @@
       <tbody>
         {% for f in files %}
         <tr class="file-row">
-          <td>
-            <button
-              type="button"
-              class="file-name"
-              data-file-token="{{ f.token }}"
-            >
-              {{ f.display_name }}
-            </button>
-          </td>
+          <td>{{ f.display_name }}</td>
           <td>{{ f.record.file_size }}</td>
           <td>{{ f.record.uploaded_at }}</td>
           <td>
@@ -159,20 +151,6 @@
 {% endblock %}
 
 {% block scripts %}
-<dialog id="fileNameDialog" class="modal">
-  <div class="modal-header">
-    <div class="modal-header-text">
-      <h2>File name</h2>
-      <p class="muted">Full file name (fetched securely).</p>
-    </div>
-    <div class="modal-header-actions">
-      <button type="button" class="ghost" id="closeFileName">Close</button>
-    </div>
-  </div>
-  <div class="modal-body">
-    <p id="fileNameValue" class="file-name-full"></p>
-  </div>
-</dialog>
 <dialog id="previewDialog" class="modal modal-wide">
   <div class="modal-header">
     <div class="modal-header-text">
@@ -263,27 +241,6 @@
   const renameTitle = document.getElementById("renameTitle");
   const renameInput = document.getElementById("renameInput");
   const cancelRename = document.getElementById("cancelRename");
-  const fileNameDialog = document.getElementById("fileNameDialog");
-  const fileNameValue = document.getElementById("fileNameValue");
-  const closeFileName = document.getElementById("closeFileName");
-  const nameTooltip = document.createElement("div");
-  nameTooltip.className = "file-name-tooltip";
-  document.body.appendChild(nameTooltip);
-
-  async function fetchFullName(token) {
-    const res = await fetch(`/ui/file-name/${token}`, { cache: "no-store" });
-    if (!res.ok) throw new Error("failed");
-    const data = await res.json();
-    return data.name || "";
-  }
-
-  closeFileName?.addEventListener("click", () => {
-    if (typeof fileNameDialog.close === "function") {
-      fileNameDialog.close();
-    } else {
-      fileNameDialog.removeAttribute("open");
-    }
-  });
   document.querySelectorAll(".move-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       moveFileId.value = btn.dataset.fileToken;
@@ -411,48 +368,5 @@
     }
   });
 
-  document.querySelectorAll(".file-name").forEach((btn) => {
-    let hoverTimer = null;
-    btn.addEventListener("mouseenter", () => {
-      hoverTimer = setTimeout(async () => {
-        try {
-          if (!btn.dataset.fullName) {
-            btn.dataset.fullName = await fetchFullName(btn.dataset.fileToken);
-          }
-          if (btn.dataset.fullName) {
-            nameTooltip.textContent = btn.dataset.fullName;
-            const rect = btn.getBoundingClientRect();
-            nameTooltip.style.left = `${rect.left + window.scrollX}px`;
-            nameTooltip.style.top = `${rect.bottom + window.scrollY + 6}px`;
-            nameTooltip.classList.add("show");
-          }
-        } catch {}
-      }, 300);
-    });
-    btn.addEventListener("mouseleave", () => {
-      if (hoverTimer) clearTimeout(hoverTimer);
-      nameTooltip.classList.remove("show");
-    });
-    btn.addEventListener("click", async () => {
-      try {
-        if (!btn.dataset.fullName) {
-          btn.dataset.fullName = await fetchFullName(btn.dataset.fileToken);
-        }
-        fileNameValue.textContent = btn.dataset.fullName || "Unavailable";
-        if (typeof fileNameDialog.showModal === "function") {
-          fileNameDialog.showModal();
-        } else {
-          fileNameDialog.setAttribute("open", "open");
-        }
-      } catch {
-        fileNameValue.textContent = "Unavailable";
-        if (typeof fileNameDialog.showModal === "function") {
-          fileNameDialog.showModal();
-        } else {
-          fileNameDialog.setAttribute("open", "open");
-        }
-      }
-    });
-  });
 </script>
 {% endblock %}
