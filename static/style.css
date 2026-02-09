@@ -339,6 +339,84 @@ body[data-theme="dark"] .alert {
   border-bottom: 1px solid var(--border);
 }
 
+.table th.resizable {
+  position: relative;
+}
+
+.col-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+}
+
+.col-resizer::after {
+  content: "";
+  position: absolute;
+  top: 20%;
+  right: 3px;
+  width: 2px;
+  height: 60%;
+  background: rgba(148, 163, 184, 0.45);
+  border-radius: 999px;
+}
+
+body.resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.file-name {
+  background: none;
+  border: none;
+  color: var(--ink);
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.file-name:hover {
+  text-decoration: underline;
+}
+
+.file-name-tooltip {
+  position: absolute;
+  z-index: 400;
+  padding: 0.4rem 0.6rem;
+  background: #0b1020;
+  color: #e2e8f0;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 8px;
+  font-size: 0.85rem;
+  box-shadow: 0 12px 30px rgba(2, 6, 23, 0.35);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.file-name-tooltip.show {
+  opacity: 1;
+}
+
+.file-name-full {
+  font-weight: 600;
+  word-break: break-word;
+}
+
+body[data-theme="dark"] .file-name-tooltip {
+  background: #0b1020;
+  color: #e2e8f0;
+}
+
+body[data-theme="light"] .file-name-tooltip {
+  background: #ffffff;
+  color: #1f2933;
+  border: 1px solid rgba(148, 163, 184, 0.5);
+}
+
 body[data-theme="dark"] .table th,
 body[data-theme="dark"] .table td {
   border-bottom: 1px solid #243247;
