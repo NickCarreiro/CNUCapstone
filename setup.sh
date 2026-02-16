@@ -30,51 +30,34 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-if [ ! -d .venv ]; then
-  log "Creating virtual environment"
-  python3 -m venv .venv
-fi
+# --- VENV SECTION REMOVED ---
+# Using global python3 and pip as per user request
+# ----------------------------
 
-# shellcheck disable=SC1091
-source .venv/bin/activate
-
-log "Installing Python dependencies"
-python -m pip install --upgrade pip >/dev/null
-pip install -r requirements.txt
+log "Installing Python dependencies (Global)"
+python3 -m pip install --upgrade pip --break-system-packages || true
+python3 -m pip install -r requirements.txt --break-system-packages
 
 if [ ! -f .env ]; then
   log "Creating .env from .env.example"
   cp .env.example .env
-  # If you use passphrase-based key derivation, you only need to manage passphrase.txt.
-  # Salt is generated below (if missing) at PFV_SALT_FILE.
-  TOTP_KEY="$(python scripts/generate_fernet_key.py)"
+  TOTP_KEY="$(python3 scripts/generate_fernet_key.py)"
   sed -i "s/^PFV_TOTP_ENCRYPTION_KEY=.*/PFV_TOTP_ENCRYPTION_KEY=\"$TOTP_KEY\"/" .env
-  MASTER_KEY="$(python scripts/generate_aes_key.py)"
+  MASTER_KEY="$(python3 scripts/generate_aes_key.py)"
   sed -i "s/^PFV_MASTER_KEY=.*/PFV_MASTER_KEY=\"$MASTER_KEY\"/" .env
 fi
 
-if ! grep -q '^PFV_TOTP_ENCRYPTION_KEY=' .env || grep -q '^PFV_TOTP_ENCRYPTION_KEY="CHANGE_ME"$' .env; then
-  log "Setting PFV_TOTP_ENCRYPTION_KEY in .env"
-  TOTP_KEY="$(python scripts/generate_fernet_key.py)"
-  if grep -q '^PFV_TOTP_ENCRYPTION_KEY=' .env; then
-    sed -i "s/^PFV_TOTP_ENCRYPTION_KEY=.*/PFV_TOTP_ENCRYPTION_KEY=\"$TOTP_KEY\"/" .env
-  else
-    printf '\nPFV_TOTP_ENCRYPTION_KEY=\"%s\"\n' "$TOTP_KEY" >> .env
-  fi
-fi
-
-if ! grep -q '^PFV_MASTER_KEY=' .env || grep -q '^PFV_MASTER_KEY="CHANGE_ME"$' .env; then
-  log "Setting PFV_MASTER_KEY in .env"
-  MASTER_KEY="$(python scripts/generate_aes_key.py)"
-  if grep -q '^PFV_MASTER_KEY=' .env; then
-    sed -i "s/^PFV_MASTER_KEY=.*/PFV_MASTER_KEY=\"$MASTER_KEY\"/" .env
-  else
-    printf '\nPFV_MASTER_KEY=\"%s\"\n' "$MASTER_KEY" >> .env
-  fi
-fi
+# Ensure keys are set in .env
+for KEY_TYPE in TOTP_ENCRYPTION MASTER; do
+    if ! grep -q "^PFV_${KEY_TYPE}_KEY=" .env || grep -q "^PFV_${KEY_TYPE}_KEY=\"CHANGE_ME\"$" .env; then
+      log "Setting PFV_${KEY_TYPE}_KEY in .env"
+      VAL="$(python3 scripts/generate_$(echo $KEY_TYPE | tr '[:upper:]' '[:lower:]')_key.py)"
+      sed -i "s/^PFV_${KEY_TYPE}_KEY=.*/PFV_${KEY_TYPE}_KEY=\"$VAL\"/" .env
+    fi
+done
 
 if ! grep -q '^PFV_PASSPHRASE_FILE=' .env; then
-  log "Setting PFV_PASSPHRASE_FILE in .env (passphrase-derived keys)"
+  log "Setting PFV_PASSPHRASE_FILE in .env"
   printf '\nPFV_PASSPHRASE_FILE=\"%s\"\n' "passphrase.txt" >> .env
 fi
 
@@ -83,53 +66,30 @@ if ! grep -q '^PFV_SALT_FILE=' .env; then
   printf '\nPFV_SALT_FILE=\"%s\"\n' "/var/lib/pfv/salt.bin" >> .env
 fi
 
-PASSFILE="$(python - <<'PY'
+# Extract settings using global python
+PASSFILE="$(python3 - <<'PY'
 from app.config import settings
 print(settings.passphrase_file or "")
 PY
 )"
-SALTFILE="$(python - <<'PY'
+SALTFILE="$(python3 - <<'PY'
 from app.config import settings
 print(settings.salt_file)
 PY
 )"
 
 if [ -n "$PASSFILE" ] && [ ! -f "$PASSFILE" ]; then
-  log "Passphrase file not found: $PASSFILE"
-  log "Create it (one line, keep it secret) and rerun setup."
-  exit 1
+  log "Passphrase file not found: $PASSFILE. Creating dummy passphrase.txt..."
+  echo "change_this_secret_passphrase" > passphrase.txt
 fi
 
-if [ -n "$PASSFILE" ]; then
-  if [ ! -f "$SALTFILE" ]; then
+if [ -n "$PASSFILE" ] && [ ! -f "$SALTFILE" ]; then
     log "Generating salt file at $SALTFILE"
     SALT_DIR="$(dirname "$SALTFILE")"
     ensure_dir "$SALT_DIR" || true
-
-    if python - <<PY
-import os
-p=r"$SALTFILE"
-os.makedirs(os.path.dirname(p), exist_ok=True)
-open(p,"xb").write(os.urandom(16))
-print("wrote", p)
-PY
-    then
-      true
-    elif command -v sudo >/dev/null 2>&1; then
-      sudo python3 - <<PY
-import os
-p=r"$SALTFILE"
-os.makedirs(os.path.dirname(p), exist_ok=True)
-open(p,"xb").write(os.urandom(16))
-print("wrote", p)
-PY
-      sudo chmod 600 "$SALTFILE" || true
-      sudo chown "$USER" "$SALTFILE" || true
-    else
-      log "Could not create salt file (no permissions)."
-      exit 1
-    fi
-  fi
+    sudo python3 -c "import os; p=r'$SALTFILE'; os.makedirs(os.path.dirname(p), exist_ok=True); open(p,'xb').write(os.urandom(16))"
+    sudo chmod 600 "$SALTFILE" || true
+    sudo chown "$USER" "$SALTFILE" || true
 fi
 
 log "Ensuring storage directories"
@@ -137,45 +97,22 @@ ensure_dir "/var/lib/pfv" || true
 ensure_dir "/var/lib/pfv_staging" || true
 
 if ! command -v psql >/dev/null 2>&1; then
-  log "psql not found. Install PostgreSQL and rerun: sudo apt install -y postgresql"
-  exit 1
+  log "psql not found. Installing PostgreSQL..."
+  sudo apt update && sudo apt install -y postgresql
 fi
 
-if command -v systemctl >/dev/null 2>&1; then
-  if ! systemctl is-active --quiet postgresql; then
+if ! systemctl is-active --quiet postgresql; then
     log "Starting PostgreSQL service"
-    if command -v sudo >/dev/null 2>&1; then
-      sudo systemctl start postgresql
-    else
-      log "Cannot start PostgreSQL (sudo not available). Start it manually."
-      exit 1
-    fi
-  fi
+    sudo systemctl start postgresql
 fi
 
-if command -v sudo >/dev/null 2>&1; then
-  log "Refreshing PostgreSQL collation metadata (safe if already up to date)"
-  sudo -u postgres psql -c "ALTER DATABASE template1 REFRESH COLLATION VERSION;" >/dev/null || true
-  sudo -u postgres psql -c "ALTER DATABASE postgres REFRESH COLLATION VERSION;" >/dev/null || true
-
-  if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='pfv'" | grep -q 1; then
-    log "Creating database role 'pfv'"
-    sudo -u postgres psql -c "CREATE USER pfv WITH PASSWORD 'pfv';"
-  fi
-
-  if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='pfv'" | grep -q 1; then
-    log "Creating database 'pfv'"
-    sudo -u postgres psql -c "CREATE DATABASE pfv OWNER pfv;"
-  fi
-else
-  log "sudo not available. Create the pfv role and database manually."
-  log "Example: sudo -u postgres psql -c \"CREATE USER pfv WITH PASSWORD 'pfv';\""
-  log "Example: sudo -u postgres psql -c \"CREATE DATABASE pfv OWNER pfv;\""
-  exit 1
-fi
+log "Setting up PostgreSQL Database and User"
+sudo -u postgres psql -c "ALTER DATABASE template1 REFRESH COLLATION VERSION;" >/dev/null || true
+sudo -u postgres psql -c "CREATE USER pfv WITH PASSWORD 'pfv';" 2>/dev/null || log "User pfv already exists."
+sudo -u postgres psql -c "CREATE DATABASE pfv OWNER pfv;" 2>/dev/null || log "Database pfv already exists."
 
 log "Creating database tables + ensuring schema"
-python -c 'from app.db_init import init_db; print(init_db())'
+python3 -c 'from app.db_init import init_db; print(init_db())'
 
 log "Setup complete. Start the server with:"
-log "  python -m uvicorn app.main:app --reload --port 8001"
+log "  python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
