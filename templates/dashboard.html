@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% block body_class %}page-dashboard{% endblock %}
 {% macro render_folder_tree(node, prefix="") %}
   {% for name, children in node.items()|sort %}
     {% set path = name if prefix == "" else prefix ~ "/" ~ name %}
@@ -33,32 +34,52 @@
   {% endfor %}
 {% endmacro %}
 {% block content %}
-<section class="card">
-  <h1>Welcome</h1>
-  <p class="muted">Upload files into your secure staging area.</p>
+{% set file_count = files|length %}
+{% set folder_count = (folders|length - 1) if folders|length > 0 else 0 %}
+{% set top_level_count = vault_tree|length %}
+<section class="card hero-card dashboard-hero">
+  <div class="eyebrow">Vault Cockpit</div>
+  <h1>Welcome, {{ user.username }}</h1>
+  <p class="muted">Manage your encrypted files, folders, and account security from one workspace.</p>
+  <div class="stat-row">
+    <div class="stat-chip">
+      <div class="stat-number">{{ file_count }}</div>
+      <div class="stat-label">Files</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ folder_count }}</div>
+      <div class="stat-label">Folders</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ top_level_count }}</div>
+      <div class="stat-label">Top-level branches</div>
+    </div>
+  </div>
   <div class="actions">
     <a class="pill" href="/ui/totp">Manage TOTP</a>
   </div>
-  <form method="post" action="/ui/folder" class="form compact">
-    <label>
-      <span>Create folder (relative to your vault)</span>
-      <input type="text" name="folder" placeholder="projects/phase1" required />
-    </label>
-    <button type="submit">Create folder</button>
-  </form>
-  <form method="post" action="/ui/upload" enctype="multipart/form-data" class="form">
-    <label>
-      <span>Folder (optional)</span>
-      <input type="text" name="folder" placeholder="projects/phase1" />
-    </label>
-    <label>
-      <span>Select file</span>
-      <input type="file" name="file" required />
-    </label>
-    <button type="submit">Upload</button>
-  </form>
+  <div class="two-col-forms">
+    <form method="post" action="/ui/folder" class="form compact soft-panel">
+      <label>
+        <span>Create folder (relative to your vault)</span>
+        <input type="text" name="folder" placeholder="projects/phase1" required />
+      </label>
+      <button type="submit">Create folder</button>
+    </form>
+    <form method="post" action="/ui/upload" enctype="multipart/form-data" class="form soft-panel">
+      <label>
+        <span>Folder (optional)</span>
+        <input type="text" name="folder" placeholder="projects/phase1" />
+      </label>
+      <label>
+        <span>Select file</span>
+        <input type="file" name="file" required />
+      </label>
+      <button type="submit">Upload</button>
+    </form>
+  </div>
 </section>
-<section class="card">
+<section class="card tree-card">
   <div class="card-header">
     <h2>Vault structure</h2>
   </div>
@@ -72,13 +93,14 @@
     </div>
   </div>
 </section>
-<section class="card">
+<section class="card files-card">
   <div class="card-header">
     <h2>Your files</h2>
     <div class="card-tools">
       <input type="text" id="fileFilter" placeholder="Search files..." />
     </div>
   </div>
+  <p class="muted">Preview, rename, move, or send files to trash from this list.</p>
   {% if files %}
     <div class="table-wrap">
     <table class="table" id="fileTable">

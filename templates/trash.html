@@ -1,8 +1,22 @@
 {% extends "base.html" %}
+{% block body_class %}page-trash{% endblock %}
 {% block content %}
+{% set trashed_count = files|length %}
+<section class="card hero-card trash-hero">
+  <div class="eyebrow">Recovery Zone</div>
+  <h1>Trash</h1>
+  <p class="muted">Items here are out of your vault listing but still recoverable until permanently deleted.</p>
+  <div class="stat-row">
+    <div class="stat-chip">
+      <div class="stat-number">{{ trashed_count }}</div>
+      <div class="stat-label">Items in trash</div>
+    </div>
+  </div>
+</section>
+
 <section class="card">
   <div class="card-header">
-    <h2>Trash</h2>
+    <h2>Trash contents</h2>
     <div class="card-tools">
       <a class="pill" href="/ui">Back to Dashboard</a>
     </div>

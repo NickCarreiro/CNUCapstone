@@ -1,13 +1,37 @@
 {% extends "base.html" %}
+{% block body_class %}page-group-detail{% endblock %}
 {% block content %}
+{% set member_count = members|length %}
+{% set file_count = files|length %}
+{% set invite_count = pending_invites|length %}
+<section class="card hero-card group-detail-hero">
+  <div class="eyebrow">Group Workspace</div>
+  <h1>{{ group.name }}</h1>
+  <p class="muted">Shared storage and membership management for this group.</p>
+  <div class="stat-row">
+    <div class="stat-chip">
+      <div class="stat-number">{{ member_count }}</div>
+      <div class="stat-label">Members</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ file_count }}</div>
+      <div class="stat-label">Shared files</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ invite_count }}</div>
+      <div class="stat-label">Pending invites</div>
+    </div>
+  </div>
+</section>
+
 <section class="card">
   <div class="card-header">
-    <h2>Group: {{ group.name }}</h2>
+    <h2>Group controls</h2>
     <div class="card-tools">
       <a class="pill" href="/ui/groups">Back to Groups</a>
     </div>
   </div>
-  <p class="muted">This is the group-specific view. Shared vault features can be added here incrementally.</p>
+  <p class="muted">Review membership and shared files from this group dashboard.</p>
 </section>
 
 <section class="card">

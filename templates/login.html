@@ -1,6 +1,8 @@
 {% extends "base.html" %}
+{% block body_class %}page-login{% endblock %}
 {% block content %}
-<section class="card">
+<section class="card auth-card">
+  <div class="eyebrow">Secure Access</div>
   <h1>Sign in</h1>
   <p class="muted">Enter your username, password, and TOTP code if enabled.</p>
   {% if error %}
@@ -21,7 +23,7 @@
     </label>
     <button type="submit">Sign in</button>
   </form>
-  <p class="muted" style="margin-top: 1rem;">
+  <p class="muted helper-link">
     New here? <a href="/ui/register">Create an account</a>
   </p>
 </section>

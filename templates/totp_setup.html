@@ -1,6 +1,8 @@
 {% extends "base.html" %}
+{% block body_class %}page-totp{% endblock %}
 {% block content %}
-<section class="card">
+<section class="card auth-card">
+  <div class="eyebrow">Account Security</div>
   <h1>TOTP Setup</h1>
   {% if enabled %}
     <p class="muted">TOTP is currently enabled for your account.</p>
