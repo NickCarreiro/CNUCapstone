@@ -8,6 +8,7 @@ from app.models import core as _core  # noqa: F401  (register models)
 
 def ensure_schema() -> str:
     insp = inspect(engine)
+    table_names = set(insp.get_table_names())
 
     def has_column(table: str, col: str) -> bool:
         return any(c["name"] == col for c in insp.get_columns(table))
@@ -17,7 +18,7 @@ def ensure_schema() -> str:
     # Create missing tables early (Base.metadata.create_all handles most, but keep this explicit for safety).
     # user_keys is new and should exist if DB was created before the model was added.
 
-    if "files" in insp.get_table_names():
+    if "files" in table_names:
         if not has_column("files", "original_path"):
             stmts.append("ALTER TABLE files ADD COLUMN original_path TEXT")
         if not has_column("files", "is_trashed"):
@@ -33,20 +34,43 @@ def ensure_schema() -> str:
         if not has_column("files", "mime_type"):
             stmts.append("ALTER TABLE files ADD COLUMN mime_type VARCHAR(255)")
 
-    if not stmts:
+    if "users" in table_names and not has_column("users", "is_admin"):
+        stmts.append("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE")
+
+    schema_changed = False
+    with engine.begin() as conn:
+        if stmts:
+            schema_changed = True
+            for stmt in stmts:
+                conn.execute(text(stmt))
+
         # Best-effort cleanup for earlier dev DBs where is_encrypted might have been defaulted incorrectly.
-        with engine.begin() as conn:
+        if "files" in table_names:
             conn.execute(text("UPDATE files SET is_encrypted = FALSE WHERE enc_nonce IS NULL OR enc_tag IS NULL"))
             conn.execute(text("UPDATE files SET is_encrypted = TRUE WHERE enc_nonce IS NOT NULL AND enc_tag IS NOT NULL"))
-        return "schema ok"
 
-    with engine.begin() as conn:
-        for stmt in stmts:
-            conn.execute(text(stmt))
-        conn.execute(text("UPDATE files SET is_encrypted = FALSE WHERE enc_nonce IS NULL OR enc_tag IS NULL"))
-        conn.execute(text("UPDATE files SET is_encrypted = TRUE WHERE enc_nonce IS NOT NULL AND enc_tag IS NOT NULL"))
+        # Ensure at least one system administrator exists for admin UI bootstrap.
+        if "users" in table_names:
+            has_admin = conn.execute(text("SELECT EXISTS(SELECT 1 FROM users WHERE is_admin = TRUE)")).scalar()
+            if not has_admin:
+                promoted = conn.execute(
+                    text(
+                        """
+                        UPDATE users
+                        SET is_admin = TRUE
+                        WHERE id = (
+                            SELECT id
+                            FROM users
+                            ORDER BY created_at ASC NULLS LAST, id ASC
+                            LIMIT 1
+                        )
+                        """
+                    )
+                )
+                if promoted.rowcount and promoted.rowcount > 0:
+                    schema_changed = True
 
-    return "schema updated"
+    return "schema updated" if schema_changed else "schema ok"
 
 
 def init_db() -> str:

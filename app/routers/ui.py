@@ -2,8 +2,10 @@ import os
 import shlex
 import shutil
 import uuid
+import hashlib
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote_plus
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 import mimetypes
@@ -11,14 +13,28 @@ import logging
 
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import get_db
-from app.models.core import ActivityEvent, FileRecord, Session as SessionModel, User
-from app.services.crypto import decrypt_file_iter, encrypt_file_to_path
+from app.models.core import (
+    ActivityEvent,
+    AuditLog,
+    FileRecord,
+    Group,
+    GroupFileRecord,
+    GroupKey,
+    GroupMembership,
+    Session as SessionModel,
+    User,
+    UserKey,
+)
+from app.services.crypto import b64d, decrypt_file_iter, encrypt_file_to_path, unwrap_key
+from app.services.key_derivation import master_key_bytes, using_passphrase
 from app.services.keystore import ensure_user_key, get_user_dek
 from app.services.activity import add_event
+from app.services.audit import add_audit_log
 from app.services.security import decrypt_totp_secret, encrypt_totp_secret, hash_password, verify_password
 from app.services.sessions import create_session
 import pyotp
@@ -27,6 +43,27 @@ router = APIRouter(prefix="/ui", tags=["ui"])
 templates = Jinja2Templates(directory="templates")
 logger = logging.getLogger("uvicorn.error")
 _FILE_TOKEN_CACHE: dict[str, dict[str, str]] = {}
+
+_TERMINAL_COMMANDS = [
+    "help",
+    "pwd",
+    "list",
+    "tree",
+    "find",
+    "stat",
+    "view",
+    "hash",
+    "quota",
+    "encstatus",
+    "directory",
+    "move",
+    "copy",
+    "rename",
+]
+_TERMINAL_SCAN_LIMIT = 20000
+_TERMINAL_RESULT_LIMIT = 200
+_TERMINAL_PREVIEW_MAX_BYTES = 256 * 1024
+_TERMINAL_PREVIEW_MAX_LINES = 200
 
 
 def _get_session(db: Session, session_id: str | None) -> SessionModel | None:
@@ -63,6 +100,11 @@ def _user_root(user: User) -> Path:
     root = Path(settings.staging_path) / str(user.id)
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def _admin_redirect(message: str, *, error: bool = False) -> RedirectResponse:
+    key = "error" if error else "notice"
+    return RedirectResponse(url=f"/ui/admin/users?{key}={quote_plus(message)}", status_code=303)
 
 
 def _safe_join(root: Path, rel_path: str) -> Path:
@@ -193,6 +235,12 @@ def _parse_terminal_command(raw: str) -> tuple[str, list[str]]:
         "mv": "move",
         "cp": "copy",
         "mkdir": "directory",
+        "cat": "view",
+        "sha256": "hash",
+        "du": "quota",
+        "encryption": "encstatus",
+        "cryptostatus": "encstatus",
+        "keys": "encstatus",
     }
     cmd = aliases.get(cmd, cmd)
     return cmd, tokens[1:]
@@ -214,6 +262,70 @@ def _ensure_no_symlink(path: Path, root: Path) -> None:
         current = current / part
         if current.exists() and current.is_symlink():
             raise HTTPException(status_code=400, detail="Symlinks are not allowed")
+
+
+def _terminal_rel_path(root: Path, path: Path) -> str:
+    rel = path.resolve().relative_to(root.resolve())
+    rel_str = str(rel).replace("\\", "/")
+    return "/" if rel_str == "." else rel_str
+
+
+def _format_bytes(size: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(size)
+    unit = units[0]
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            break
+        value /= 1024
+    if unit == "B":
+        return f"{int(value)} {unit}"
+    return f"{value:.2f} {unit}"
+
+
+def _parse_int_arg(value: str, *, default: int, minimum: int, maximum: int, name: str) -> int:
+    if value == "":
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{name} must be an integer")
+    if parsed < minimum or parsed > maximum:
+        raise HTTPException(status_code=400, detail=f"{name} must be between {minimum} and {maximum}")
+    return parsed
+
+
+def _build_tree_lines(root: Path, start: Path, *, depth: int) -> list[str]:
+    base = _terminal_rel_path(root, start)
+    lines = ["/" if base == "/" else f"{base}/"]
+    scanned = 0
+
+    def walk(path: Path, prefix: str, level: int) -> bool:
+        nonlocal scanned
+        if level >= depth:
+            return False
+
+        try:
+            entries = [p for p in sorted(path.iterdir(), key=lambda x: (x.is_file(), x.name.lower())) if not p.is_symlink()]
+        except OSError:
+            lines.append(f"{prefix}`-- [unreadable]")
+            return False
+        for idx, entry in enumerate(entries):
+            scanned += 1
+            if scanned > _TERMINAL_SCAN_LIMIT:
+                lines.append(f"{prefix}`-- ... (scan limit reached)")
+                return True
+            connector = "`-- " if idx == len(entries) - 1 else "|-- "
+            label = f"{entry.name}/" if entry.is_dir() else entry.name
+            lines.append(f"{prefix}{connector}{label}")
+            if entry.is_dir():
+                child_prefix = f"{prefix}{'    ' if idx == len(entries) - 1 else '|   '}"
+                if walk(entry, child_prefix, level + 1):
+                    return True
+        return False
+
+    walk(start, "", 0)
+    return lines
 
 
 @router.get("/login")
@@ -265,15 +377,25 @@ def register_action(
             status_code=409,
         )
 
-    user = User(username=username, password_hash=hash_password(password))
+    is_first_user = db.query(User.id).first() is None
+    user = User(
+        username=username,
+        password_hash=hash_password(password),
+        is_admin=is_first_user,
+    )
     db.add(user)
     db.commit()
     db.refresh(user)
 
     ensure_user_key(db, user)
     add_event(db, user, action="auth", message=f"Account created for '{user.username}'.")
+    add_audit_log(db, user=user, event_type="account.registered", details="Account created via web registration.")
+    if user.is_admin:
+        add_event(db, user, action="auth", message="System administrator role granted to first account.", level="SUCCESS")
+        add_audit_log(db, user=user, event_type="account.role_admin_granted", details="System administrator role granted.")
     session = create_session(db, user)
     user.last_login = datetime.utcnow()
+    add_audit_log(db, user=user, event_type="signin.success", details="Signed in after registration.")
     db.commit()
 
     response = RedirectResponse(url="/ui", status_code=303)
@@ -290,7 +412,15 @@ def login_action(
     db: Session = Depends(get_db),
 ):
     user = db.query(User).filter(User.username == username).first()
-    if not user or not verify_password(password, user.password_hash):
+    if not user:
+        return templates.TemplateResponse(
+            "login.html",
+            {"request": request, "error": "Invalid username or password"},
+            status_code=401,
+        )
+    if not verify_password(password, user.password_hash):
+        add_audit_log(db, user=user, event_type="signin.failed_password", details="Password verification failed.")
+        db.commit()
         return templates.TemplateResponse(
             "login.html",
             {"request": request, "error": "Invalid username or password"},
@@ -299,6 +429,8 @@ def login_action(
 
     if user.totp_enabled:
         if not totp_code:
+            add_audit_log(db, user=user, event_type="signin.failed_totp_required", details="MFA code required.")
+            db.commit()
             return templates.TemplateResponse(
                 "login.html",
                 {"request": request, "error": "TOTP code required"},
@@ -306,6 +438,8 @@ def login_action(
             )
         secret = decrypt_totp_secret(user.totp_secret_enc or "")
         if not pyotp.TOTP(secret).verify(totp_code):
+            add_audit_log(db, user=user, event_type="signin.failed_totp_invalid", details="Invalid MFA code.")
+            db.commit()
             return templates.TemplateResponse(
                 "login.html",
                 {"request": request, "error": "Invalid TOTP code"},
@@ -314,6 +448,7 @@ def login_action(
 
     ensure_user_key(db, user)
     add_event(db, user, action="auth", message=f"Signed in as '{user.username}'.")
+    add_audit_log(db, user=user, event_type="signin.success", details="Interactive sign-in completed.")
     session = create_session(db, user)
     user.last_login = datetime.utcnow()
     db.commit()
@@ -391,6 +526,356 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
     )
 
 
+@router.get("/admin/users")
+def admin_users_page(request: Request, db: Session = Depends(get_db)):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    now = datetime.utcnow()
+    users = db.query(User).order_by(User.created_at.asc(), User.username.asc()).all()
+    active_sessions_by_user = {
+        user_id: int(count)
+        for user_id, count in (
+            db.query(SessionModel.user_id, func.count(SessionModel.id))
+            .filter(
+                SessionModel.is_active.is_(True),
+                SessionModel.expires_at > now,
+            )
+            .group_by(SessionModel.user_id)
+            .all()
+        )
+    }
+    files_by_user = {
+        user_id: int(count)
+        for user_id, count in (
+            db.query(FileRecord.user_id, func.count(FileRecord.id))
+            .group_by(FileRecord.user_id)
+            .all()
+        )
+    }
+    groups_by_user = {
+        user_id: int(count)
+        for user_id, count in (
+            db.query(GroupMembership.user_id, func.count(GroupMembership.id))
+            .group_by(GroupMembership.user_id)
+            .all()
+        )
+    }
+    admin_count = sum(1 for u in users if u.is_admin)
+
+    rows = [
+        {
+            "user": target,
+            "active_sessions": active_sessions_by_user.get(target.id, 0),
+            "file_count": files_by_user.get(target.id, 0),
+            "group_count": groups_by_user.get(target.id, 0),
+        }
+        for target in users
+    ]
+
+    return templates.TemplateResponse(
+        "admin_users.html",
+        {
+            "request": request,
+            "user": admin_user,
+            "rows": rows,
+            "admin_count": admin_count,
+            "totp_enabled_count": sum(1 for u in users if u.totp_enabled),
+            "active_session_total": sum(item["active_sessions"] for item in rows),
+            "notice": request.query_params.get("notice"),
+            "error": request.query_params.get("error"),
+        },
+    )
+
+
+@router.get("/audit")
+def audit_log_page(
+    request: Request,
+    event: str = "",
+    q: str = "",
+    limit: int = 200,
+    db: Session = Depends(get_db),
+):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+
+    event_filter = (event or "").strip()
+    text_filter = (q or "").strip()
+    limit = max(1, min(limit, 1000))
+
+    query = db.query(AuditLog).filter(AuditLog.user_id == user.id)
+    if event_filter:
+        query = query.filter(AuditLog.event_type.ilike(f"%{event_filter}%"))
+    if text_filter:
+        like = f"%{text_filter}%"
+        query = query.filter(or_(AuditLog.event_type.ilike(like), AuditLog.details.ilike(like)))
+
+    total_matching = query.count()
+    logs = query.order_by(AuditLog.event_timestamp.desc(), AuditLog.id.desc()).limit(limit).all()
+
+    signin_events = sum(1 for row in logs if row.event_type.startswith("signin."))
+    failed_signins = sum(1 for row in logs if row.event_type.startswith("signin.failed"))
+    account_events = sum(
+        1
+        for row in logs
+        if row.event_type.startswith("account.")
+        or row.event_type.startswith("mfa.")
+        or row.event_type.startswith("signout")
+    )
+
+    rows = [{"log": row, "username": user.username} for row in logs]
+    return templates.TemplateResponse(
+        "audit_log.html",
+        {
+            "request": request,
+            "user": user,
+            "rows": rows,
+            "is_admin_view": False,
+            "title": "My Audit Log",
+            "filters": {
+                "event": event_filter,
+                "q": text_filter,
+                "limit": limit,
+                "username": "",
+            },
+            "summary": {
+                "displayed": len(rows),
+                "matching": total_matching,
+                "signin_events": signin_events,
+                "failed_signins": failed_signins,
+                "account_events": account_events,
+            },
+        },
+    )
+
+
+@router.get("/admin/audit")
+def admin_audit_log_page(
+    request: Request,
+    username: str = "",
+    event: str = "",
+    q: str = "",
+    limit: int = 400,
+    db: Session = Depends(get_db),
+):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    username_filter = (username or "").strip()
+    event_filter = (event or "").strip()
+    text_filter = (q or "").strip()
+    limit = max(1, min(limit, 2000))
+
+    query = db.query(AuditLog, User.username).outerjoin(User, AuditLog.user_id == User.id)
+    if username_filter:
+        query = query.filter(User.username.ilike(f"%{username_filter}%"))
+    if event_filter:
+        query = query.filter(AuditLog.event_type.ilike(f"%{event_filter}%"))
+    if text_filter:
+        like = f"%{text_filter}%"
+        query = query.filter(
+            or_(
+                AuditLog.event_type.ilike(like),
+                AuditLog.details.ilike(like),
+                User.username.ilike(like),
+            )
+        )
+
+    total_matching = query.count()
+    results = query.order_by(AuditLog.event_timestamp.desc(), AuditLog.id.desc()).limit(limit).all()
+
+    rows = []
+    signin_events = 0
+    failed_signins = 0
+    account_events = 0
+    users_seen: set[uuid.UUID] = set()
+    for log_row, username_value in results:
+        if log_row.user_id:
+            users_seen.add(log_row.user_id)
+        if log_row.event_type.startswith("signin."):
+            signin_events += 1
+        if log_row.event_type.startswith("signin.failed"):
+            failed_signins += 1
+        if (
+            log_row.event_type.startswith("account.")
+            or log_row.event_type.startswith("mfa.")
+            or log_row.event_type.startswith("signout")
+        ):
+            account_events += 1
+        rows.append(
+            {
+                "log": log_row,
+                "username": username_value or "(system)",
+            }
+        )
+
+    return templates.TemplateResponse(
+        "audit_log.html",
+        {
+            "request": request,
+            "user": admin_user,
+            "rows": rows,
+            "is_admin_view": True,
+            "title": "Admin Audit Log",
+            "filters": {
+                "username": username_filter,
+                "event": event_filter,
+                "q": text_filter,
+                "limit": limit,
+            },
+            "summary": {
+                "displayed": len(rows),
+                "matching": total_matching,
+                "signin_events": signin_events,
+                "failed_signins": failed_signins,
+                "account_events": account_events,
+                "users_seen": len(users_seen),
+            },
+        },
+    )
+
+
+@router.post("/admin/users/{user_id}/revoke-sessions")
+def admin_revoke_sessions(user_id: str, request: Request, db: Session = Depends(get_db)):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    try:
+        target_id = uuid.UUID(user_id)
+    except ValueError:
+        return _admin_redirect("Invalid user identifier.", error=True)
+
+    target = db.query(User).filter(User.id == target_id).first()
+    if not target:
+        return _admin_redirect("User not found.", error=True)
+
+    revoked = (
+        db.query(SessionModel)
+        .filter(SessionModel.user_id == target.id, SessionModel.is_active.is_(True))
+        .update({SessionModel.is_active: False}, synchronize_session=False)
+    )
+    add_event(
+        db,
+        admin_user,
+        action="admin",
+        message=f"Revoked {revoked} active session(s) for '{target.username}'.",
+        level="WARN",
+    )
+    add_audit_log(
+        db,
+        user=target,
+        event_type="account.sessions_revoked_by_admin",
+        details=f"Admin '{admin_user.username}' revoked {revoked} active session(s).",
+    )
+    add_audit_log(
+        db,
+        user=admin_user,
+        event_type="admin.sessions_revoked",
+        details=f"Revoked {revoked} active session(s) for '{target.username}'.",
+    )
+    db.commit()
+    return _admin_redirect(f"Revoked {revoked} active session(s) for '{target.username}'.")
+
+
+@router.post("/admin/users/{user_id}/reset-totp")
+def admin_reset_totp(user_id: str, request: Request, db: Session = Depends(get_db)):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    try:
+        target_id = uuid.UUID(user_id)
+    except ValueError:
+        return _admin_redirect("Invalid user identifier.", error=True)
+
+    target = db.query(User).filter(User.id == target_id).first()
+    if not target:
+        return _admin_redirect("User not found.", error=True)
+
+    target.totp_enabled = False
+    target.totp_secret_enc = None
+    add_event(
+        db,
+        admin_user,
+        action="admin",
+        message=f"Reset MFA enrollment for '{target.username}'.",
+        level="WARN",
+    )
+    add_audit_log(
+        db,
+        user=target,
+        event_type="mfa.reset_by_admin",
+        details=f"Admin '{admin_user.username}' reset MFA enrollment.",
+    )
+    add_audit_log(
+        db,
+        user=admin_user,
+        event_type="admin.mfa_reset",
+        details=f"Reset MFA enrollment for '{target.username}'.",
+    )
+    db.commit()
+    return _admin_redirect(f"MFA reset for '{target.username}'.")
+
+
+@router.post("/admin/users/{user_id}/toggle-admin")
+def admin_toggle_role(user_id: str, request: Request, db: Session = Depends(get_db)):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    try:
+        target_id = uuid.UUID(user_id)
+    except ValueError:
+        return _admin_redirect("Invalid user identifier.", error=True)
+
+    target = db.query(User).filter(User.id == target_id).first()
+    if not target:
+        return _admin_redirect("User not found.", error=True)
+
+    if target.is_admin:
+        admin_count = db.query(func.count(User.id)).filter(User.is_admin.is_(True)).scalar() or 0
+        if admin_count <= 1:
+            return _admin_redirect("Cannot remove the last system administrator.", error=True)
+
+    target.is_admin = not target.is_admin
+    status_label = "granted" if target.is_admin else "removed"
+    add_event(
+        db,
+        admin_user,
+        action="admin",
+        message=f"System administrator role {status_label} for '{target.username}'.",
+        level="SUCCESS",
+    )
+    add_audit_log(
+        db,
+        user=target,
+        event_type="account.role_admin_granted_by_admin" if target.is_admin else "account.role_admin_removed_by_admin",
+        details=f"Admin '{admin_user.username}' {status_label} administrator role.",
+    )
+    add_audit_log(
+        db,
+        user=admin_user,
+        event_type="admin.role_admin_granted" if target.is_admin else "admin.role_admin_removed",
+        details=f"Administrator role {status_label} for '{target.username}'.",
+    )
+    db.commit()
+    return _admin_redirect(f"Administrator role {status_label} for '{target.username}'.")
+
+
 @router.get("/totp")
 def totp_setup(request: Request, db: Session = Depends(get_db)):
     user = _get_current_user(db, request)
@@ -418,6 +903,12 @@ def totp_setup(request: Request, db: Session = Depends(get_db)):
         totp = pyotp.TOTP(pyotp.random_base32())
         secret = totp.secret
         user.totp_secret_enc = encrypt_totp_secret(secret)
+        add_audit_log(
+            db,
+            user=user,
+            event_type="mfa.secret_provisioned",
+            details="MFA enrollment secret generated.",
+        )
         db.commit()
 
     provisioning_uri = pyotp.TOTP(secret).provisioning_uri(
@@ -452,6 +943,13 @@ def totp_verify(
 
     secret = decrypt_totp_secret(user.totp_secret_enc)
     if not pyotp.TOTP(secret).verify(code):
+        add_audit_log(
+            db,
+            user=user,
+            event_type="mfa.verify_failed",
+            details="Invalid MFA verification code during enrollment.",
+        )
+        db.commit()
         return templates.TemplateResponse(
             "totp_setup.html",
             {
@@ -468,6 +966,12 @@ def totp_verify(
         )
 
     user.totp_enabled = True
+    add_audit_log(
+        db,
+        user=user,
+        event_type="mfa.enabled",
+        details="MFA enabled after verification.",
+    )
     db.commit()
     return RedirectResponse(url="/ui/totp", status_code=303)
 
@@ -480,6 +984,12 @@ def totp_disable(request: Request, db: Session = Depends(get_db)):
 
     user.totp_enabled = False
     user.totp_secret_enc = None
+    add_audit_log(
+        db,
+        user=user,
+        event_type="mfa.disabled",
+        details="MFA disabled by user.",
+    )
     db.commit()
     return RedirectResponse(url="/ui/totp", status_code=303)
 
@@ -872,7 +1382,16 @@ def terminal_command(
     if cmd == "help":
         message = (
             "Commands:\n"
+            "  help\n"
+            "  pwd\n"
             "  list [folder]\n"
+            "  tree [folder] [depth]\n"
+            "  find <pattern> [folder]\n"
+            "  stat <path>\n"
+            "  view <file> [lines]\n"
+            "  hash <file>\n"
+            "  quota [folder]\n"
+            "  encstatus\n"
             "  move <src> <dst>\n"
             "  copy <src> <dst>\n"
             "  rename <src> <dst>\n"
@@ -882,11 +1401,16 @@ def terminal_command(
         add_event(db, user, action="terminal", message=message)
         return {"ok": True, "message": message}
 
-    if cmd not in {"list", "move", "copy", "rename", "directory"}:
+    if cmd not in set(_TERMINAL_COMMANDS):
         raise HTTPException(status_code=400, detail="Unsupported command")
 
     root = _user_root(user)
     safe_args = [_normalize_rel_path(a) for a in args]
+
+    if cmd == "pwd":
+        message = "/"
+        add_event(db, user, action="terminal", message="pwd /")
+        return {"ok": True, "message": message}
 
     if cmd == "list":
         target = safe_args[0] if safe_args else ""
@@ -902,6 +1426,462 @@ def terminal_command(
             entries.append(name)
         message = _format_list_entries(entries)
         add_event(db, user, action="terminal", message=f"list {target or '/'}\n{message}")
+        return {"ok": True, "message": message}
+
+    if cmd == "tree":
+        target = safe_args[0] if safe_args else ""
+        depth = _parse_int_arg(safe_args[1] if len(safe_args) > 1 else "", default=2, minimum=1, maximum=6, name="depth")
+        path = _safe_join(root, target)
+        _ensure_no_symlink(path, root)
+        if not path.exists() or not path.is_dir():
+            raise HTTPException(status_code=400, detail="Folder not found")
+        lines = _build_tree_lines(root, path, depth=depth)
+        if len(lines) > _TERMINAL_RESULT_LIMIT:
+            lines = lines[:_TERMINAL_RESULT_LIMIT] + ["... (results truncated)"]
+        message = "\n".join(lines)
+        add_event(db, user, action="terminal", message=f"tree {target or '/'} depth={depth}\n{message}")
+        return {"ok": True, "message": message}
+
+    if cmd == "find":
+        if len(safe_args) < 1:
+            raise HTTPException(status_code=400, detail="Missing search pattern")
+        pattern = safe_args[0].strip().lower()
+        if not pattern:
+            raise HTTPException(status_code=400, detail="Search pattern cannot be empty")
+        if len(pattern) > 120:
+            raise HTTPException(status_code=400, detail="Search pattern is too long")
+        target = safe_args[1] if len(safe_args) > 1 else ""
+        start = _safe_join(root, target)
+        _ensure_no_symlink(start, root)
+        if not start.exists() or not start.is_dir():
+            raise HTTPException(status_code=400, detail="Folder not found")
+
+        matches: list[str] = []
+        scanned = 0
+        truncated = False
+        for dirpath, dirnames, filenames in os.walk(start):
+            dir_path = Path(dirpath)
+            clean_dirs: list[str] = []
+            for dirname in sorted(dirnames):
+                candidate = dir_path / dirname
+                if candidate.is_symlink():
+                    continue
+                clean_dirs.append(dirname)
+                scanned += 1
+                if scanned > _TERMINAL_SCAN_LIMIT:
+                    truncated = True
+                    break
+                if pattern in dirname.lower():
+                    rel = f"{_terminal_rel_path(root, candidate)}/"
+                    matches.append(rel)
+                    if len(matches) >= _TERMINAL_RESULT_LIMIT:
+                        truncated = True
+                        break
+            dirnames[:] = clean_dirs
+            if truncated:
+                break
+
+            for filename in sorted(filenames):
+                candidate = dir_path / filename
+                if candidate.is_symlink():
+                    continue
+                scanned += 1
+                if scanned > _TERMINAL_SCAN_LIMIT:
+                    truncated = True
+                    break
+                if pattern in filename.lower():
+                    rel = _terminal_rel_path(root, candidate)
+                    matches.append(rel)
+                    if len(matches) >= _TERMINAL_RESULT_LIMIT:
+                        truncated = True
+                        break
+            if truncated:
+                break
+
+        if not matches:
+            message = "(no matches)"
+        else:
+            message = "\n".join(matches)
+        if truncated:
+            message = f"{message}\n... (results truncated)"
+        add_event(db, user, action="terminal", message=f"find '{pattern}' in {target or '/'}\n{message}")
+        return {"ok": True, "message": message}
+
+    if cmd == "stat":
+        if len(safe_args) < 1:
+            raise HTTPException(status_code=400, detail="Missing path")
+        target = safe_args[0]
+        path = _safe_join(root, target)
+        _ensure_no_symlink(path, root)
+        if not path.exists():
+            raise HTTPException(status_code=400, detail="Path not found")
+
+        rel = _terminal_rel_path(root, path)
+        st = path.stat()
+        modified = datetime.utcfromtimestamp(st.st_mtime).isoformat(timespec="seconds") + "Z"
+        if path.is_dir():
+            try:
+                entries = [p for p in path.iterdir() if not p.is_symlink()]
+            except OSError:
+                entries = []
+            message = (
+                f"Path: {rel if rel == '/' else rel + '/'}\n"
+                "Type: directory\n"
+                f"Entries: {len(entries)}\n"
+                f"Modified (UTC): {modified}"
+            )
+        else:
+            mime_type, _ = mimetypes.guess_type(path.name)
+            size_raw = st.st_size
+            message = (
+                f"Path: {rel}\n"
+                "Type: file\n"
+                f"Size: {size_raw} bytes ({_format_bytes(size_raw)})\n"
+                f"MIME: {mime_type or 'application/octet-stream'}\n"
+                f"Modified (UTC): {modified}"
+            )
+        add_event(db, user, action="terminal", message=f"stat {target}\n{message}")
+        return {"ok": True, "message": message}
+
+    if cmd == "view":
+        if len(safe_args) < 1:
+            raise HTTPException(status_code=400, detail="Missing file path")
+        target = safe_args[0]
+        max_lines = _parse_int_arg(
+            safe_args[1] if len(safe_args) > 1 else "",
+            default=40,
+            minimum=1,
+            maximum=_TERMINAL_PREVIEW_MAX_LINES,
+            name="lines",
+        )
+        path = _safe_join(root, target)
+        _ensure_no_symlink(path, root)
+        if not path.exists() or not path.is_file():
+            raise HTTPException(status_code=400, detail="File not found")
+
+        size_raw = path.stat().st_size
+        if size_raw > _TERMINAL_PREVIEW_MAX_BYTES:
+            raise HTTPException(status_code=400, detail="File too large for view command")
+
+        raw = path.read_bytes()
+        if b"\x00" in raw:
+            raise HTTPException(status_code=400, detail="Binary files are not supported by view command")
+
+        text = raw.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        if not lines:
+            message = "(empty file)"
+        else:
+            preview = lines[:max_lines]
+            message = "\n".join(preview)
+            remaining = len(lines) - len(preview)
+            if remaining > 0:
+                message = f"{message}\n... ({remaining} more lines)"
+        add_event(db, user, action="terminal", message=f"view {target} ({max_lines} lines)\n{message}")
+        return {"ok": True, "message": message}
+
+    if cmd == "hash":
+        if len(safe_args) < 1:
+            raise HTTPException(status_code=400, detail="Missing file path")
+        target = safe_args[0]
+        path = _safe_join(root, target)
+        _ensure_no_symlink(path, root)
+        if not path.exists() or not path.is_file():
+            raise HTTPException(status_code=400, detail="File not found")
+        digest = hashlib.sha256()
+        with path.open("rb") as fh:
+            while True:
+                chunk = fh.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        rel = _terminal_rel_path(root, path)
+        message = f"SHA256 {rel}\n{digest.hexdigest()}"
+        add_event(db, user, action="terminal", message=f"hash {target}\n{message}")
+        return {"ok": True, "message": message}
+
+    if cmd == "quota":
+        target = safe_args[0] if safe_args else ""
+        start = _safe_join(root, target)
+        _ensure_no_symlink(start, root)
+        if not start.exists() or not start.is_dir():
+            raise HTTPException(status_code=400, detail="Folder not found")
+
+        total_files = 0
+        total_dirs = 0
+        total_bytes = 0
+        scanned = 0
+        truncated = False
+        for dirpath, dirnames, filenames in os.walk(start):
+            dir_path = Path(dirpath)
+            clean_dirs: list[str] = []
+            for dirname in dirnames:
+                candidate = dir_path / dirname
+                if candidate.is_symlink():
+                    continue
+                clean_dirs.append(dirname)
+            dirnames[:] = clean_dirs
+
+            for dirname in clean_dirs:
+                scanned += 1
+                if scanned > _TERMINAL_SCAN_LIMIT:
+                    truncated = True
+                    break
+                total_dirs += 1
+            if truncated:
+                break
+
+            for filename in filenames:
+                candidate = dir_path / filename
+                if candidate.is_symlink():
+                    continue
+                scanned += 1
+                if scanned > _TERMINAL_SCAN_LIMIT:
+                    truncated = True
+                    break
+                try:
+                    total_bytes += candidate.stat().st_size
+                except OSError:
+                    continue
+                total_files += 1
+            if truncated:
+                break
+
+        message = (
+            f"Path: {target or '/'}\n"
+            f"Directories: {total_dirs}\n"
+            f"Files: {total_files}\n"
+            f"Total size: {_format_bytes(total_bytes)} ({total_bytes} bytes)"
+        )
+        if truncated:
+            message = f"{message}\nNote: scan limit reached, results may be partial."
+        add_event(db, user, action="terminal", message=f"quota {target or '/'}\n{message}")
+        return {"ok": True, "message": message}
+
+    if cmd == "encstatus":
+        if safe_args:
+            raise HTTPException(status_code=400, detail="encstatus does not take arguments")
+
+        checked_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        key_row = db.query(UserKey).filter(UserKey.user_id == user.id).first()
+
+        key_present = key_row is not None
+        key_version = "n/a"
+        key_created = "n/a"
+        wrap_nonce_state = "n/a"
+        wrapped_dek_state = "n/a"
+        unwrap_state = "not checked"
+        if key_row:
+            key_version = str(key_row.key_version)
+            if key_row.created_at:
+                key_created = key_row.created_at.isoformat(timespec="seconds") + "Z"
+            try:
+                wrap_nonce_len = len(b64d(key_row.wrap_nonce))
+                if wrap_nonce_len == 12:
+                    wrap_nonce_state = f"{wrap_nonce_len} bytes (valid)"
+                else:
+                    wrap_nonce_state = f"{wrap_nonce_len} bytes (unexpected)"
+            except Exception:
+                wrap_nonce_state = "invalid base64"
+            try:
+                wrapped_dek_len = len(b64d(key_row.wrapped_dek))
+                if wrapped_dek_len >= 33:
+                    wrapped_dek_state = f"{wrapped_dek_len} bytes (present)"
+                else:
+                    wrapped_dek_state = f"{wrapped_dek_len} bytes (unexpected)"
+            except Exception:
+                wrapped_dek_state = "invalid base64"
+
+            try:
+                dek = unwrap_key(
+                    master_key_bytes(),
+                    key_row.wrap_nonce,
+                    key_row.wrapped_dek,
+                    aad=str(user.id).encode(),
+                )
+                unwrap_state = "OK (32-byte DEK)" if len(dek) == 32 else f"FAILED (DEK length {len(dek)})"
+            except Exception:
+                unwrap_state = "FAILED"
+
+        active_file_filter = [
+            FileRecord.user_id == user.id,
+            FileRecord.is_trashed.is_(False),
+        ]
+        active_files = (
+            db.query(func.count(FileRecord.id))
+            .filter(*active_file_filter)
+            .scalar()
+            or 0
+        )
+        active_encrypted = (
+            db.query(func.count(FileRecord.id))
+            .filter(*active_file_filter, FileRecord.is_encrypted.is_(True))
+            .scalar()
+            or 0
+        )
+        active_encrypted_meta_complete = (
+            db.query(func.count(FileRecord.id))
+            .filter(
+                *active_file_filter,
+                FileRecord.is_encrypted.is_(True),
+                FileRecord.enc_nonce.is_not(None),
+                FileRecord.enc_tag.is_not(None),
+            )
+            .scalar()
+            or 0
+        )
+        active_plaintext = max(0, active_files - active_encrypted)
+        active_metadata_issues = max(0, active_encrypted - active_encrypted_meta_complete)
+        active_encrypted_bytes = (
+            db.query(func.coalesce(func.sum(FileRecord.file_size), 0))
+            .filter(*active_file_filter, FileRecord.is_encrypted.is_(True))
+            .scalar()
+            or 0
+        )
+        trashed_files = (
+            db.query(func.count(FileRecord.id))
+            .filter(FileRecord.user_id == user.id, FileRecord.is_trashed.is_(True))
+            .scalar()
+            or 0
+        )
+
+        group_rows = (
+            db.query(Group.id, Group.name)
+            .join(GroupMembership, GroupMembership.group_id == Group.id)
+            .filter(GroupMembership.user_id == user.id)
+            .order_by(Group.name.asc())
+            .all()
+        )
+        group_ids = [row.id for row in group_rows]
+        group_key_versions: dict[uuid.UUID, int] = {}
+        group_file_total = 0
+        group_file_encrypted = 0
+        group_file_meta_complete = 0
+        if group_ids:
+            for row in (
+                db.query(GroupKey.group_id, GroupKey.key_version)
+                .filter(GroupKey.group_id.in_(group_ids))
+                .all()
+            ):
+                group_key_versions[row.group_id] = row.key_version
+
+            group_file_total = (
+                db.query(func.count(GroupFileRecord.id))
+                .filter(GroupFileRecord.group_id.in_(group_ids))
+                .scalar()
+                or 0
+            )
+            group_file_encrypted = (
+                db.query(func.count(GroupFileRecord.id))
+                .filter(
+                    GroupFileRecord.group_id.in_(group_ids),
+                    GroupFileRecord.is_encrypted.is_(True),
+                )
+                .scalar()
+                or 0
+            )
+            group_file_meta_complete = (
+                db.query(func.count(GroupFileRecord.id))
+                .filter(
+                    GroupFileRecord.group_id.in_(group_ids),
+                    GroupFileRecord.is_encrypted.is_(True),
+                    GroupFileRecord.enc_nonce.is_not(None),
+                    GroupFileRecord.enc_tag.is_not(None),
+                )
+                .scalar()
+                or 0
+            )
+
+        groups_joined = len(group_rows)
+        groups_with_key = len(group_key_versions)
+        groups_missing_key = [row.name for row in group_rows if row.id not in group_key_versions]
+        group_file_metadata_issues = max(0, group_file_encrypted - group_file_meta_complete)
+
+        group_key_summary = "(none)"
+        if group_key_versions:
+            summary_parts: list[str] = []
+            for row in group_rows:
+                version = group_key_versions.get(row.id)
+                if version is None:
+                    continue
+                summary_parts.append(f"{row.name}=v{version}")
+                if len(summary_parts) >= 6:
+                    break
+            remaining = len(group_key_versions) - len(summary_parts)
+            group_key_summary = ", ".join(summary_parts)
+            if remaining > 0:
+                group_key_summary = f"{group_key_summary}, ... (+{remaining} more)"
+
+        missing_group_summary = "(none)"
+        if groups_missing_key:
+            missing_group_summary = ", ".join(groups_missing_key[:6])
+            remaining = len(groups_missing_key) - min(len(groups_missing_key), 6)
+            if remaining > 0:
+                missing_group_summary = f"{missing_group_summary}, ... (+{remaining} more)"
+
+        issues: list[str] = []
+        if not key_present:
+            issues.append("User key record is missing.")
+        if unwrap_state.startswith("FAILED"):
+            issues.append("User DEK unwrap check failed.")
+        if active_metadata_issues > 0:
+            issues.append(f"{active_metadata_issues} personal encrypted file(s) missing nonce/tag metadata.")
+        if group_file_metadata_issues > 0:
+            issues.append(f"{group_file_metadata_issues} group encrypted file(s) missing nonce/tag metadata.")
+        if groups_missing_key:
+            issues.append(f"{len(groups_missing_key)} joined group(s) do not have a group key record.")
+
+        root_key_source = (
+            "Passphrase-derived root (Argon2id + HKDF-SHA256)"
+            if using_passphrase()
+            else "PFV_MASTER_KEY (base64url, 32 bytes)"
+        )
+        lines = [
+            "Encryption Status",
+            f"Account: {user.username}",
+            f"Checked (UTC): {checked_at}",
+            "",
+            "Cipher Suite",
+            "  File encryption: AES-256-GCM (12-byte nonce, 16-byte tag)",
+            "  Key wrapping: AES-256-GCM wrapped DEK (AAD bound to user/group id)",
+            "  Direct messages: Fernet tokens (enc:v1 prefix)",
+            f"  Root key source: {root_key_source}",
+            "",
+            "User Key",
+            f"  Record present: {'yes' if key_present else 'no'}",
+            f"  Key version: {key_version}",
+            f"  Created (UTC): {key_created}",
+            f"  Wrap nonce: {wrap_nonce_state}",
+            f"  Wrapped DEK blob: {wrapped_dek_state}",
+            f"  DEK unwrap check: {unwrap_state}",
+            "",
+            "Personal Vault Coverage",
+            f"  Active files: {active_files}",
+            f"  Encrypted active files: {active_encrypted}",
+            f"  Plaintext active files: {active_plaintext}",
+            f"  Encrypted metadata complete: {active_encrypted_meta_complete}/{active_encrypted}",
+            f"  Encrypted active data: {_format_bytes(active_encrypted_bytes)} ({active_encrypted_bytes} bytes)",
+            f"  Trashed files: {trashed_files}",
+            "",
+            "Group Encryption Coverage",
+            f"  Joined groups: {groups_joined}",
+            f"  Groups with key record: {groups_with_key}/{groups_joined}",
+            f"  Missing group key records: {missing_group_summary}",
+            f"  Group key versions: {group_key_summary}",
+            f"  Group files visible: {group_file_total}",
+            f"  Group encrypted files: {group_file_encrypted}",
+            f"  Group encrypted metadata complete: {group_file_meta_complete}/{group_file_encrypted}",
+            "",
+            "Health Summary",
+        ]
+        if issues:
+            for issue in issues:
+                lines.append(f"  WARN: {issue}")
+        else:
+            lines.append("  OK: no key or encryption metadata issues detected.")
+
+        message = "\n".join(lines)
+        add_event(db, user, action="terminal", message=f"encstatus\n{message}")
         return {"ok": True, "message": message}
 
     if cmd == "directory":
@@ -969,28 +1949,40 @@ def terminal_suggest(
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     root = _user_root(user)
-    raw = _normalize_rel_path(prefix)
-    base_dir = raw
+    raw = (prefix or "").strip()
+    raw_norm = _normalize_rel_path(raw)
+    base_dir = raw_norm
     partial = ""
-    if raw and not raw.endswith("/"):
-        base_dir = str(Path(raw).parent) if str(Path(raw).parent) != "." else ""
-        partial = Path(raw).name
+    if raw_norm and not raw_norm.endswith("/"):
+        base_dir = str(Path(raw_norm).parent) if str(Path(raw_norm).parent) != "." else ""
+        partial = Path(raw_norm).name
+
+    command_suggestions: list[str] = []
+    if "/" not in raw and "\\" not in raw and " " not in raw:
+        lowered = raw.lower()
+        command_suggestions = [name for name in _TERMINAL_COMMANDS if name.startswith(lowered)]
 
     target_dir = _safe_join(root, base_dir)
-    if not target_dir.exists() or not target_dir.is_dir():
-        return {"suggestions": []}
+    path_suggestions: list[str] = []
+    if target_dir.exists() and target_dir.is_dir():
+        for item in sorted(target_dir.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
+            name = item.name
+            if partial and not name.lower().startswith(partial.lower()):
+                continue
+            rel = str(Path(base_dir) / name) if base_dir else name
+            if item.is_dir():
+                rel = f"{rel}/"
+            path_suggestions.append(rel)
 
-    suggestions: list[str] = []
-    for item in sorted(target_dir.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
-        name = item.name
-        if partial and not name.lower().startswith(partial.lower()):
+    merged: list[str] = []
+    seen: set[str] = set()
+    for value in command_suggestions + path_suggestions:
+        if value in seen:
             continue
-        rel = str(Path(base_dir) / name) if base_dir else name
-        if item.is_dir():
-            rel = f"{rel}/"
-        suggestions.append(rel)
+        seen.add(value)
+        merged.append(value)
 
-    return {"suggestions": suggestions[:50]}
+    return {"suggestions": merged[:50]}
 
 
 @router.get("/logout")
@@ -1002,6 +1994,7 @@ def logout(request: Request, db: Session = Depends(get_db)):
         session.is_active = False
         if user:
             add_event(db, user, action="auth", message="Signed out.")
+            add_audit_log(db, user=user, event_type="signout", details="Interactive sign-out completed.")
         db.commit()
     response = RedirectResponse(url="/ui/login", status_code=303)
     response.delete_cookie("pfv_session")

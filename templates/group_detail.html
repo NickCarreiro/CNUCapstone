@@ -48,7 +48,7 @@
   </form>
   {% if files %}
     <div class="table-wrap">
-      <table class="table">
+      <table class="table" id="groupDetailFilesTable">
         <thead>
           <tr>
             <th>File</th>
@@ -60,10 +60,10 @@
         <tbody>
           {% for item in files %}
           <tr>
-            <td>{{ item.file_name }}</td>
-            <td>{{ item.file_size }}</td>
-            <td>{{ item.uploaded_at }}</td>
-            <td><a class="pill" href="/ui/groups/{{ group.id }}/files/{{ item.id }}">Open</a></td>
+            <td data-label="File">{{ item.file_name }}</td>
+            <td data-label="Size (bytes)">{{ item.file_size }}</td>
+            <td data-label="Uploaded">{{ item.uploaded_at }}</td>
+            <td data-label="Open"><a class="pill" href="/ui/groups/{{ group.id }}/files/{{ item.id }}">Open</a></td>
           </tr>
           {% endfor %}
         </tbody>
@@ -80,7 +80,7 @@
   </div>
   {% if members %}
     <div class="table-wrap">
-      <table class="table">
+      <table class="table" id="groupDetailMembersTable">
         <thead>
           <tr>
             <th>Username</th>
@@ -91,9 +91,9 @@
         <tbody>
           {% for member in members %}
           <tr>
-            <td>{{ member.user.username }}</td>
-            <td>{{ member.role }}</td>
-            <td>{{ member.joined_at }}</td>
+            <td data-label="Username">{{ member.user.username }}</td>
+            <td data-label="Role">{{ member.role }}</td>
+            <td data-label="Joined">{{ member.joined_at }}</td>
           </tr>
           {% endfor %}
         </tbody>
@@ -123,7 +123,7 @@
   </div>
   {% if pending_invites %}
     <div class="table-wrap">
-      <table class="table">
+      <table class="table" id="groupDetailInvitesTable">
         <thead>
           <tr>
             <th>Invitee</th>
@@ -134,9 +134,9 @@
         <tbody>
           {% for invite in pending_invites %}
           <tr>
-            <td>{{ invite.invitee.username }}</td>
-            <td>{{ invite.inviter.username }}</td>
-            <td>{{ invite.created_at }}</td>
+            <td data-label="Invitee">{{ invite.invitee.username }}</td>
+            <td data-label="Inviter">{{ invite.inviter.username }}</td>
+            <td data-label="Created">{{ invite.created_at }}</td>
           </tr>
           {% endfor %}
         </tbody>

@@ -4,7 +4,68 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{{ title or "Personal File Vault" }}</title>
-    <link rel="stylesheet" href="/static/style.css?v=7" />
+    <script>
+      (function () {
+        const root = document.documentElement;
+        root.classList.add("vp-pending");
+
+        function applyViewportMetrics() {
+          const vv = window.visualViewport;
+          const width = Math.max(Math.round(vv ? vv.width : window.innerWidth || 0), 320);
+          const height = Math.max(Math.round(vv ? vv.height : window.innerHeight || 0), 320);
+          root.style.setProperty("--app-vw", `${width}px`);
+          root.style.setProperty("--app-vh", `${height}px`);
+
+          const header = document.querySelector(".site-header");
+          const footer = document.querySelector(".site-footer");
+          const headerHeight = header ? Math.ceil(header.getBoundingClientRect().height) : 0;
+          const footerHeight = footer ? Math.ceil(footer.getBoundingClientRect().height) : 0;
+          root.style.setProperty("--app-header-h", `${headerHeight}px`);
+          root.style.setProperty("--app-footer-h", `${footerHeight}px`);
+        }
+
+        function markReady() {
+          root.classList.remove("vp-pending");
+          root.classList.add("vp-ready");
+        }
+
+        function bootstrapViewport() {
+          applyViewportMetrics();
+          markReady();
+        }
+
+        applyViewportMetrics();
+        if (!window.matchMedia("(max-width: 760px)").matches) {
+          markReady();
+        }
+
+        if (document.readyState === "loading") {
+          document.addEventListener(
+            "DOMContentLoaded",
+            () => {
+              requestAnimationFrame(bootstrapViewport);
+            },
+            { once: true }
+          );
+        } else {
+          requestAnimationFrame(bootstrapViewport);
+        }
+
+        window.addEventListener("resize", applyViewportMetrics, { passive: true });
+        window.addEventListener(
+          "orientationchange",
+          () => {
+            requestAnimationFrame(applyViewportMetrics);
+          },
+          { passive: true }
+        );
+
+        if (window.visualViewport) {
+          window.visualViewport.addEventListener("resize", applyViewportMetrics, { passive: true });
+        }
+      })();
+    </script>
+    <link rel="stylesheet" href="/static/style.css?v=13" />
   </head>
   <body data-theme="light" class="{% block body_class %}{% endblock %}">
     <div class="page">
@@ -16,13 +77,19 @@
           </div>
           <div class="toolbar">
             {% if user %}
-            <nav class="nav">
+            <nav class="nav" id="pfvPrimaryNav">
               <button type="button" class="nav-pill" id="pfvTerminalNav">Terminal</button>
               <a href="/ui">Dashboard</a>
               <a href="/ui/groups">Groups</a>
+              <a href="/ui/audit">Audit</a>
               <a href="/ui/trash">Trash</a>
+              {% if user.is_admin %}
+              <a href="/ui/admin/users">Admin</a>
+              <a href="/ui/admin/audit">Admin Audit</a>
+              {% endif %}
             </nav>
             <div class="toolbar-actions">
+              <button type="button" class="ghost nav-menu-toggle" id="pfvMenuToggle" aria-expanded="false" aria-controls="pfvPrimaryNav">Menu</button>
               <div class="user-pill">Signed in</div>
               <button type="button" class="ghost toggle-theme" id="themeToggle">Dark mode</button>
               <a class="pill ghost-link" href="/ui/logout">Logout</a>
@@ -58,26 +125,93 @@
         localStorage.setItem("pfv-theme", next);
         toggle.textContent = next === "dark" ? "Light mode" : "Dark mode";
       });
+
+      const toolbar = document.querySelector(".toolbar");
+      const nav = document.getElementById("pfvPrimaryNav");
+      const menuToggle = document.getElementById("pfvMenuToggle");
+      const mobileQuery = window.matchMedia("(max-width: 760px)");
+      const MENU_STATE_KEY = "pfv-mobile-menu-open";
+
+      function setMenuState(open) {
+        if (!toolbar || !menuToggle) return;
+        const isOpen = !!open;
+        toolbar.dataset.menuOpen = isOpen ? "1" : "0";
+        menuToggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
+        menuToggle.textContent = isOpen ? "Close menu" : "Menu";
+      }
+
+      function syncMenuState() {
+        if (!toolbar || !menuToggle) return;
+        if (!mobileQuery.matches) {
+          toolbar.dataset.menuOpen = "1";
+          menuToggle.setAttribute("aria-expanded", "false");
+          menuToggle.textContent = "Menu";
+          return;
+        }
+        const stored = localStorage.getItem(MENU_STATE_KEY);
+        setMenuState(stored === "1");
+      }
+
+      if (menuToggle && toolbar && nav) {
+        menuToggle.addEventListener("click", () => {
+          if (!mobileQuery.matches) return;
+          const nextOpen = toolbar.dataset.menuOpen !== "1";
+          setMenuState(nextOpen);
+          localStorage.setItem(MENU_STATE_KEY, nextOpen ? "1" : "0");
+        });
+
+        nav.addEventListener("click", (event) => {
+          const target = event.target instanceof Element ? event.target.closest("a, button") : null;
+          if (!target || !mobileQuery.matches) return;
+          setMenuState(false);
+          localStorage.setItem(MENU_STATE_KEY, "0");
+        });
+
+        if (typeof mobileQuery.addEventListener === "function") {
+          mobileQuery.addEventListener("change", syncMenuState);
+        } else if (typeof mobileQuery.addListener === "function") {
+          mobileQuery.addListener(syncMenuState);
+        }
+
+        syncMenuState();
+      }
     </script>
 
-    <div class="terminal" id="pfvTerminal" data-open="1" data-max="0" data-theme="dark">
+    {% if user %}
+    <div class="terminal" id="pfvTerminal" data-open="1" data-max="0" data-theme="dark" data-status="syncing">
       <div class="terminal-bar">
         <div class="terminal-left">
           <span class="terminal-badge">Live</span>
           <span class="terminal-title">Vault Activity Console</span>
         </div>
         <div class="terminal-actions">
-          <button type="button" class="terminal-control" id="pfvTerminalMinimize" aria-label="Minimize terminal" title="Minimize">_</button>
-          <button type="button" class="terminal-control" id="pfvTerminalMaximize" aria-label="Maximize terminal" title="Maximize">[]</button>
-          <button type="button" class="terminal-control terminal-control-close" id="pfvTerminalClose" aria-label="Close terminal" title="Close">X</button>
+          <button type="button" class="terminal-control" id="pfvTerminalMinimize" aria-label="Minimize terminal" title="Minimize">MIN</button>
+          <button type="button" class="terminal-control" id="pfvTerminalMaximize" aria-label="Maximize terminal" title="Maximize">MAX</button>
+          <button type="button" class="terminal-control terminal-control-close" id="pfvTerminalClose" aria-label="Close terminal" title="Close">CLOSE</button>
           <button type="button" class="ghost" id="pfvTerminalToggle">Hide</button>
           <button type="button" class="ghost" id="pfvTerminalClear">Clear</button>
         </div>
       </div>
+      <div class="terminal-meta">
+        <div class="terminal-metric"><span class="metric-key">Status</span><span class="metric-value" id="pfvTerminalStatus">SYNCING</span></div>
+        <div class="terminal-metric"><span class="metric-key">Events</span><span class="metric-value" id="pfvTerminalEventCount">0</span></div>
+        <div class="terminal-metric"><span class="metric-key">Scroll</span><span class="metric-value" id="pfvTerminalScrollState">AUTO</span></div>
+      </div>
       <div class="terminal-body" id="pfvTerminalBody" role="log" aria-live="polite" aria-relevant="additions"></div>
+      <div class="terminal-shortcuts" id="pfvTerminalShortcuts">
+        <button type="button" class="terminal-shortcut" data-cmd="help">help</button>
+        <button type="button" class="terminal-shortcut" data-cmd="list">list</button>
+        <button type="button" class="terminal-shortcut" data-cmd="tree">tree</button>
+        <button type="button" class="terminal-shortcut" data-cmd="find">find</button>
+        <button type="button" class="terminal-shortcut" data-cmd="stat">stat</button>
+        <button type="button" class="terminal-shortcut" data-cmd="quota">quota</button>
+        <button type="button" class="terminal-shortcut" data-cmd="encstatus">encstatus</button>
+        <button type="button" class="terminal-shortcut" data-cmd="directory">directory</button>
+      </div>
       <form class="terminal-input" id="pfvTerminalForm">
-        <input type="text" id="pfvTerminalCommand" name="command" placeholder="Type: list, move, copy, rename" autocomplete="off" />
-        <button type="submit">Run</button>
+        <span class="terminal-prompt" aria-hidden="true">vault$</span>
+        <input type="text" id="pfvTerminalCommand" name="command" placeholder="Type: help, list, tree, find, stat, view, hash, quota, encstatus" autocomplete="off" />
+        <button type="submit">Execute</button>
       </form>
       <span class="resize-handle handle-e" data-resize="e"></span>
       <span class="resize-handle handle-w" data-resize="w"></span>
@@ -96,11 +230,123 @@
         const navTab = document.getElementById("pfvTerminalNav");
         const termForm = document.getElementById("pfvTerminalForm");
         const termCommand = document.getElementById("pfvTerminalCommand");
+        const terminalStatus = document.getElementById("pfvTerminalStatus");
+        const terminalEventCount = document.getElementById("pfvTerminalEventCount");
+        const terminalScrollState = document.getElementById("pfvTerminalScrollState");
+        const terminalShortcuts = document.querySelectorAll(".terminal-shortcut");
         if (!term || !body || !toggleBtn || !clearBtn || !closeDot || !minDot || !maxDot) return;
+        const VIEW_MARGIN = 12;
+        const DESKTOP_MIN_WIDTH = 360;
+        const DESKTOP_MIN_HEIGHT = 220;
+        const TERMINAL_BODY_MIN_HEIGHT = 64;
+        const TERMINAL_LAYOUT_VERSION = "2";
+
+        if (localStorage.getItem("pfv-terminal-layout-version") !== TERMINAL_LAYOUT_VERSION) {
+          localStorage.removeItem("pfv-terminal-pos");
+          localStorage.removeItem("pfv-terminal-size");
+          localStorage.removeItem("pfv-terminal-max");
+          localStorage.removeItem("pfv-terminal-premax");
+          localStorage.setItem("pfv-terminal-layout-version", TERMINAL_LAYOUT_VERSION);
+        }
+
+        function pxToNumber(value) {
+          if (typeof value !== "string" || !value) return null;
+          const parsed = Number.parseFloat(value);
+          return Number.isFinite(parsed) ? parsed : null;
+        }
+
+        function viewportBounds() {
+          const vv = window.visualViewport;
+          const width = Math.max((vv ? vv.width : window.innerWidth) || 0, 320);
+          const height = Math.max((vv ? vv.height : window.innerHeight) || 0, 240);
+          return {
+            width,
+            height,
+            availableWidth: Math.max(220, width - VIEW_MARGIN * 2),
+            availableHeight: Math.max(160, height - VIEW_MARGIN * 2),
+          };
+        }
+
+        function minTerminalWidth(availableWidth) {
+          return Math.min(DESKTOP_MIN_WIDTH, availableWidth);
+        }
+
+        function terminalChromeHeight() {
+          if (term.dataset.open !== "1") return 0;
+          const barHeight = term.querySelector(".terminal-bar")?.getBoundingClientRect().height || 0;
+          const metaHeight = term.querySelector(".terminal-meta")?.getBoundingClientRect().height || 0;
+          const shortcutsHeight = term.querySelector(".terminal-shortcuts")?.getBoundingClientRect().height || 0;
+          const inputHeight = term.querySelector(".terminal-input")?.getBoundingClientRect().height || 0;
+          return barHeight + metaHeight + shortcutsHeight + inputHeight;
+        }
+
+        function minTerminalHeight(availableHeight) {
+          const dynamic = Math.ceil(terminalChromeHeight() + TERMINAL_BODY_MIN_HEIGHT);
+          const preferred = Math.max(DESKTOP_MIN_HEIGHT, dynamic);
+          return Math.min(preferred, availableHeight);
+        }
+
+        function persistTerminalFrame(rect = term.getBoundingClientRect()) {
+          if (term.dataset.max === "1") return;
+          localStorage.setItem(
+            "pfv-terminal-pos",
+            JSON.stringify({ left: Math.round(rect.left), top: Math.round(rect.top) })
+          );
+          localStorage.setItem(
+            "pfv-terminal-size",
+            JSON.stringify({ width: Math.round(rect.width), height: Math.round(rect.height) })
+          );
+        }
+
+        function clampTerminalFrame({ persist = true } = {}) {
+          if (term.dataset.max === "1") return;
+          const { width: viewportWidth, height: viewportHeight, availableWidth, availableHeight } = viewportBounds();
+          const minWidth = minTerminalWidth(availableWidth);
+          const rect = term.getBoundingClientRect();
+
+          let width = pxToNumber(term.style.width);
+          let height = pxToNumber(term.style.height);
+          if (width === null || width <= 0) {
+            width = rect.width > 0 ? rect.width : Math.min(860, availableWidth);
+          }
+          if (height === null || height <= 0) {
+            height = rect.height > 0 ? rect.height : Math.min(420, availableHeight);
+          }
+
+          width = Math.min(Math.max(width, minWidth), availableWidth);
+          term.style.width = `${Math.round(width)}px`;
+          const minHeight = minTerminalHeight(availableHeight);
+          height = Math.min(Math.max(height, minHeight), availableHeight);
+
+          let left = pxToNumber(term.style.left);
+          let top = pxToNumber(term.style.top);
+          if (left === null) {
+            left = rect.width > 0 ? rect.left : viewportWidth - width - VIEW_MARGIN;
+          }
+          if (top === null) {
+            top = rect.height > 0 ? rect.top : viewportHeight - height - VIEW_MARGIN;
+          }
+
+          const maxLeft = Math.max(VIEW_MARGIN, viewportWidth - width - VIEW_MARGIN);
+          const maxTop = Math.max(VIEW_MARGIN, viewportHeight - height - VIEW_MARGIN);
+          left = Math.min(Math.max(left, VIEW_MARGIN), maxLeft);
+          top = Math.min(Math.max(top, VIEW_MARGIN), maxTop);
+
+          term.style.width = `${Math.round(width)}px`;
+          term.style.height = `${Math.round(height)}px`;
+          term.style.left = `${Math.round(left)}px`;
+          term.style.top = `${Math.round(top)}px`;
+          term.style.right = "auto";
+          term.style.bottom = "auto";
+          if (persist) persistTerminalFrame();
+        }
 
         const openStored = localStorage.getItem("pfv-terminal-open");
         if (openStored === "0" || openStored === "1") {
           term.dataset.open = openStored;
+        } else if (window.matchMedia("(max-width: 760px)").matches) {
+          term.dataset.open = "0";
+          localStorage.setItem("pfv-terminal-open", "0");
         }
         term.dataset.min = term.dataset.open === "1" ? "0" : "1";
         const maxStored = localStorage.getItem("pfv-terminal-max");
@@ -129,18 +375,28 @@
             }
           } catch {}
         }
+        requestAnimationFrame(() => clampTerminalFrame({ persist: false }));
 
         function syncTerminalUi() {
           const isOpen = term.dataset.open === "1";
           toggleBtn.textContent = "Hide";
           toggleBtn.style.display = isOpen ? "inline-flex" : "none";
           term.dataset.min = isOpen ? "0" : "1";
+          if (isOpen && term.dataset.max !== "1") {
+            requestAnimationFrame(() => clampTerminalFrame({ persist: false }));
+          }
           if (navTab) {
             navTab.textContent = isOpen ? "Hide Terminal" : "Terminal";
           }
         }
 
         syncTerminalUi();
+        let renderedEvents = 0;
+        function setStatus(value) {
+          const normalized = (value || "LIVE").toUpperCase();
+          if (terminalStatus) terminalStatus.textContent = normalized;
+          term.dataset.status = normalized.toLowerCase();
+        }
 
         toggleBtn.addEventListener("click", () => {
           term.dataset.open = "0";
@@ -150,6 +406,9 @@
 
         clearBtn.addEventListener("click", () => {
           body.innerHTML = "";
+          renderedEvents = 0;
+          lastDateLabel = "";
+          if (terminalEventCount) terminalEventCount.textContent = "0";
         });
 
         closeDot.addEventListener("click", () => {
@@ -184,7 +443,6 @@
           }
           term.dataset.open = "0";
           term.dataset.min = "1";
-          term.style.height = "";
           localStorage.setItem("pfv-terminal-open", "0");
           syncTerminalUi();
         });
@@ -236,6 +494,9 @@
         let autoScroll = true;
         body.addEventListener("scroll", () => {
           autoScroll = body.scrollTop + body.clientHeight >= body.scrollHeight - 8;
+          if (terminalScrollState) {
+            terminalScrollState.textContent = autoScroll ? "AUTO" : "MANUAL";
+          }
         });
 
         function fmtTs(iso) {
@@ -285,6 +546,8 @@
 
           line.append(ts, action, msg);
           body.appendChild(line);
+          renderedEvents += 1;
+          if (terminalEventCount) terminalEventCount.textContent = String(renderedEvents);
 
           if (autoScroll) {
             body.scrollTop = body.scrollHeight;
@@ -297,6 +560,7 @@
           if (!raw.trim()) return;
           appendEvent({ level: "INFO", action: "cmd", message: raw });
           if (termCommand) termCommand.value = "";
+          setStatus("RUNNING");
           try {
             const res = await fetch("/ui/terminal", {
               method: "POST",
@@ -309,9 +573,21 @@
             } else {
               appendEvent({ level: "SUCCESS", action: "cmd", message: data.message || "OK" });
             }
+            setStatus("LIVE");
           } catch {
             appendEvent({ level: "ERROR", action: "cmd", message: "Terminal command failed to send." });
+            setStatus("OFFLINE");
           }
+        });
+
+        terminalShortcuts.forEach((shortcut) => {
+          shortcut.addEventListener("click", () => {
+            const cmd = shortcut.dataset.cmd || "";
+            if (!termCommand) return;
+            termCommand.value = cmd;
+            termCommand.focus();
+            termCommand.select();
+          });
         });
 
         termCommand?.addEventListener("keydown", async (e) => {
@@ -355,6 +631,7 @@
             });
             if (!res.ok) {
               if (res.status === 401) {
+                setStatus("AUTH");
                 if (!signInNotified) {
                   signInNotified = true;
                   appendEvent({ level: "INFO", action: "system", message: "Sign in to see activity." });
@@ -362,6 +639,7 @@
               }
               return;
             }
+            setStatus("LIVE");
             const data = await res.json();
             const events = data.events || [];
             for (const evt of events) appendEvent(evt);
@@ -374,6 +652,7 @@
             }
           } catch {
             // Ignore transient network errors in the UI terminal.
+            setStatus("OFFLINE");
           }
         }
 
@@ -411,8 +690,14 @@
           if (!dragActive) return;
           const dx = e.clientX - dragStartX;
           const dy = e.clientY - dragStartY;
-          const left = Math.max(8, Math.min(window.innerWidth - 320, originLeft + dx));
-          const top = Math.max(8, Math.min(window.innerHeight - 120, originTop + dy));
+          const rect = term.getBoundingClientRect();
+          const width = rect.width || minTerminalWidth(viewportBounds().availableWidth);
+          const height = rect.height || minTerminalHeight(viewportBounds().availableHeight);
+          const { width: viewportWidth, height: viewportHeight } = viewportBounds();
+          const maxLeft = Math.max(VIEW_MARGIN, viewportWidth - width - VIEW_MARGIN);
+          const maxTop = Math.max(VIEW_MARGIN, viewportHeight - height - VIEW_MARGIN);
+          const left = Math.max(VIEW_MARGIN, Math.min(maxLeft, originLeft + dx));
+          const top = Math.max(VIEW_MARGIN, Math.min(maxTop, originTop + dy));
           term.style.left = `${left}px`;
           term.style.top = `${top}px`;
           term.style.right = "auto";
@@ -424,8 +709,7 @@
           term.classList.remove("dragging");
           document.removeEventListener("mousemove", onDragMove);
           document.removeEventListener("mouseup", onDragEnd);
-          const rect = term.getBoundingClientRect();
-          localStorage.setItem("pfv-terminal-pos", JSON.stringify({ left: rect.left, top: rect.top }));
+          clampTerminalFrame({ persist: true });
         }
 
         term.querySelector(".terminal-bar")?.addEventListener("mousedown", onDragStart);
@@ -460,6 +744,9 @@
 
         function onResizeMove(e) {
           if (!resizeActive) return;
+          const { availableWidth, availableHeight } = viewportBounds();
+          const minWidth = minTerminalWidth(availableWidth);
+          const minHeight = minTerminalHeight(availableHeight);
           const dx = e.clientX - startX;
           const dy = e.clientY - startY;
           let newW = startW;
@@ -468,17 +755,17 @@
           let newTop = startTop;
 
           if (resizeDir.includes("e")) {
-            newW = Math.max(360, startW + dx);
+            newW = Math.max(minWidth, startW + dx);
           }
           if (resizeDir.includes("w")) {
-            newW = Math.max(360, startW - dx);
+            newW = Math.max(minWidth, startW - dx);
             newLeft = startLeft + dx;
           }
           if (resizeDir.includes("s")) {
-            newH = Math.max(180, startH + dy);
+            newH = Math.max(minHeight, startH + dy);
           }
           if (resizeDir.includes("n")) {
-            newH = Math.max(180, startH - dy);
+            newH = Math.max(minHeight, startH - dy);
             newTop = startTop + dy;
           }
 
@@ -488,26 +775,23 @@
           term.style.top = `${newTop}px`;
           term.style.right = "auto";
           term.style.bottom = "auto";
+          clampTerminalFrame({ persist: false });
         }
 
         function onResizeEnd() {
           resizeActive = false;
           document.removeEventListener("mousemove", onResizeMove);
           document.removeEventListener("mouseup", onResizeEnd);
-          const rect = term.getBoundingClientRect();
-          localStorage.setItem(
-            "pfv-terminal-pos",
-            JSON.stringify({ left: rect.left, top: rect.top })
-          );
-          localStorage.setItem(
-            "pfv-terminal-size",
-            JSON.stringify({ width: rect.width, height: rect.height })
-          );
+          clampTerminalFrame({ persist: true });
         }
 
         handles.forEach((h) => h.addEventListener("mousedown", onResizeStart));
+        window.addEventListener("resize", () => {
+          clampTerminalFrame({ persist: true });
+        });
 
         async function bootstrapActivity() {
+          setStatus("SYNCING");
           try {
             const res = await fetch("/ui/activity?no_history=1&redact=1", {
               credentials: "same-origin",
@@ -518,9 +802,11 @@
               const data = await res.json();
               afterId = Number(data.last_id || 0);
               sessionStorage.setItem("pfv-terminal-after", String(afterId));
+              setStatus("LIVE");
             }
           } catch {
             // Ignore bootstrap errors.
+            setStatus("OFFLINE");
           }
         }
 
@@ -531,5 +817,6 @@
         });
       })();
     </script>
+    {% endif %}
   </body>
 </html>

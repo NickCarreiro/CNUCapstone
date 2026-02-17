@@ -119,10 +119,10 @@
       <tbody>
         {% for f in files %}
         <tr class="file-row">
-          <td>{{ f.display_name }}</td>
-          <td>{{ f.record.file_size }}</td>
-          <td>{{ f.record.uploaded_at }}</td>
-          <td>
+          <td data-label="Item">{{ f.display_name }}</td>
+          <td data-label="Size (bytes)">{{ f.record.file_size }}</td>
+          <td data-label="Uploaded">{{ f.record.uploaded_at }}</td>
+          <td data-label="Preview">
             <button
               type="button"
               class="pill preview-btn"
@@ -132,10 +132,10 @@
               Preview
             </button>
           </td>
-          <td>
+          <td data-label="Open">
             <a class="pill" href="/ui/files/{{ f.token }}">Open</a>
           </td>
-          <td>
+          <td data-label="Rename">
             <button
               type="button"
               class="pill rename-btn"
@@ -145,13 +145,13 @@
               Rename
             </button>
           </td>
-          <td>
+          <td data-label="Trash">
             <form method="post" action="/ui/trash" class="inline-form">
               <input type="hidden" name="file_token" value="{{ f.token }}" />
               <button type="submit" class="danger">Trash</button>
             </form>
           </td>
-          <td>
+          <td data-label="Move">
             <button
               type="button"
               class="pill move-btn"

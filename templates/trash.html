@@ -37,15 +37,15 @@
         <tbody>
           {% for f in files %}
           <tr>
-            <td>{{ f.display_name }}</td>
-            <td>{{ f.record.trashed_at }}</td>
-            <td>
+            <td data-label="Item">{{ f.display_name }}</td>
+            <td data-label="Trashed">{{ f.record.trashed_at }}</td>
+            <td data-label="Restore">
               <form method="post" action="/ui/restore" class="inline-form">
                 <input type="hidden" name="file_token" value="{{ f.token }}" />
                 <button type="submit">Restore</button>
               </form>
             </td>
-            <td>
+            <td data-label="Delete Forever">
               <form method="post" action="/ui/delete" class="inline-form" onsubmit="return confirm('Delete permanently? This cannot be undone.');">
                 <input type="hidden" name="file_token" value="{{ f.token }}" />
                 <button type="submit" class="danger">Delete</button>

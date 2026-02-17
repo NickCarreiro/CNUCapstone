@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block body_class %}page-audit{% endblock %}
+{% block content %}
+<section class="card hero-card">
+  <div class="eyebrow">{{ "System Audit" if is_admin_view else "Account Audit" }}</div>
+  <h1>{{ "Audit log for all users" if is_admin_view else "Your account audit log" }}</h1>
+  <p class="muted">
+    {% if is_admin_view %}
+    Account-related sign-in and security events across the system.
+    {% else %}
+    Account-related sign-in and security events for your user.
+    {% endif %}
+  </p>
+  <div class="stat-row">
+    <div class="stat-chip">
+      <div class="stat-number">{{ summary.displayed }}</div>
+      <div class="stat-label">Shown</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ summary.matching }}</div>
+      <div class="stat-label">Matching</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ summary.signin_events }}</div>
+      <div class="stat-label">Sign-ins</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ summary.failed_signins }}</div>
+      <div class="stat-label">Sign-in failures</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ summary.account_events }}</div>
+      <div class="stat-label">Account changes</div>
+    </div>
+    {% if is_admin_view %}
+    <div class="stat-chip">
+      <div class="stat-number">{{ summary.users_seen }}</div>
+      <div class="stat-label">Users shown</div>
+    </div>
+    {% endif %}
+  </div>
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Filters</h2>
+    <div class="card-tools">
+      <a class="pill" href="/ui">Dashboard</a>
+      {% if is_admin_view %}
+      <a class="pill ghost" href="/ui/admin/users">Admin users</a>
+      {% endif %}
+    </div>
+  </div>
+  <form method="get" class="form compact">
+    {% if is_admin_view %}
+    <label>
+      <span>Username contains</span>
+      <input type="text" name="username" value="{{ filters.username }}" placeholder="nick" />
+    </label>
+    {% endif %}
+    <label>
+      <span>Event type contains</span>
+      <input type="text" name="event" value="{{ filters.event }}" placeholder="signin.failed" />
+    </label>
+    <label>
+      <span>Search event or details</span>
+      <input type="text" name="q" value="{{ filters.q }}" placeholder="MFA, admin, revoked" />
+    </label>
+    <label>
+      <span>Limit</span>
+      <input type="number" name="limit" min="1" max="{{ 2000 if is_admin_view else 1000 }}" value="{{ filters.limit }}" />
+    </label>
+    <div class="inline-form">
+      <button type="submit">Apply filters</button>
+      {% if is_admin_view %}
+      <a class="pill ghost" href="/ui/admin/audit">Reset</a>
+      {% else %}
+      <a class="pill ghost" href="/ui/audit">Reset</a>
+      {% endif %}
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Events</h2>
+  </div>
+  {% if rows %}
+  <div class="table-wrap">
+    <table class="table" id="auditTable">
+      <thead>
+        <tr>
+          <th>Timestamp (UTC)</th>
+          {% if is_admin_view %}
+          <th>User</th>
+          {% endif %}
+          <th>Event type</th>
+          <th>Details</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td data-label="Timestamp (UTC)">
+            {% if row.log.event_timestamp %}
+            {{ row.log.event_timestamp.strftime("%Y-%m-%d %H:%M:%S") }}
+            {% else %}
+            -
+            {% endif %}
+          </td>
+          {% if is_admin_view %}
+          <td data-label="User">{{ row.username }}</td>
+          {% endif %}
+          <td data-label="Event type"><code>{{ row.log.event_type }}</code></td>
+          <td data-label="Details">{{ row.log.details or "-" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="muted">No audit events matched the current filters.</p>
+  {% endif %}
+</section>
+{% endblock %}

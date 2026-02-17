@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block body_class %}page-admin-users{% endblock %}
+{% block content %}
+{% set total_users = rows|length %}
+<section class="card hero-card admin-hero">
+  <div class="eyebrow">System Administration</div>
+  <h1>User management console</h1>
+  <p class="muted">Manage user access, reset MFA, and control active sessions.</p>
+  <div class="stat-row">
+    <div class="stat-chip">
+      <div class="stat-number">{{ total_users }}</div>
+      <div class="stat-label">Total users</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ admin_count }}</div>
+      <div class="stat-label">Administrators</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ totp_enabled_count }}</div>
+      <div class="stat-label">MFA enabled</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ active_session_total }}</div>
+      <div class="stat-label">Active sessions</div>
+    </div>
+  </div>
+</section>
+
+{% if error %}
+<div class="alert">{{ error }}</div>
+{% endif %}
+{% if notice %}
+<div class="alert admin-notice">{{ notice }}</div>
+{% endif %}
+
+<section class="card">
+  <div class="card-header">
+    <h2>All users</h2>
+    <div class="card-tools">
+      <input type="text" id="adminUserFilter" placeholder="Search username..." />
+    </div>
+  </div>
+  <p class="muted">Changes apply immediately and are logged in system activity.</p>
+
+  {% if rows %}
+  <div class="table-wrap">
+    <table class="table" id="adminUsersTable">
+      <thead>
+        <tr>
+          <th>Username</th>
+          <th>Role</th>
+          <th>MFA</th>
+          <th>Active sessions</th>
+          <th>Files</th>
+          <th>Groups</th>
+          <th>Created</th>
+          <th>Last login</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        {% set target = row.user %}
+        {% set disable_demotion = target.is_admin and admin_count <= 1 %}
+        <tr class="admin-user-row">
+          <td data-label="Username">{{ target.username }}</td>
+          <td data-label="Role">{{ "Administrator" if target.is_admin else "Standard" }}</td>
+          <td data-label="MFA">{{ "Enabled" if target.totp_enabled else "Disabled" }}</td>
+          <td data-label="Active sessions">{{ row.active_sessions }}</td>
+          <td data-label="Files">{{ row.file_count }}</td>
+          <td data-label="Groups">{{ row.group_count }}</td>
+          <td data-label="Created">{{ target.created_at }}</td>
+          <td data-label="Last login">{{ target.last_login or "Never" }}</td>
+          <td data-label="Actions" class="admin-action-cell">
+            <div class="admin-action-grid">
+              <form method="post" action="/ui/admin/users/{{ target.id }}/revoke-sessions" class="inline-form">
+                <button type="submit" class="ghost">Revoke sessions</button>
+              </form>
+              <form method="post" action="/ui/admin/users/{{ target.id }}/reset-totp" class="inline-form">
+                <button type="submit" class="ghost">Reset MFA</button>
+              </form>
+              <form method="post" action="/ui/admin/users/{{ target.id }}/toggle-admin" class="inline-form">
+                <button type="submit" {% if target.is_admin %}class="danger"{% endif %} {% if disable_demotion %}disabled{% endif %}>
+                  {{ "Remove admin" if target.is_admin else "Make admin" }}
+                </button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="muted">No users found.</p>
+  {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const adminUserFilter = document.getElementById("adminUserFilter");
+  const adminRows = document.querySelectorAll("#adminUsersTable .admin-user-row");
+  adminUserFilter?.addEventListener("input", () => {
+    const query = adminUserFilter.value.trim().toLowerCase();
+    adminRows.forEach((row) => {
+      row.hidden = query.length > 0 && !row.textContent.toLowerCase().includes(query);
+    });
+  });
+</script>
+{% endblock %}
