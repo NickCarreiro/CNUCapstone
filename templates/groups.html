@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <div class="card-header">
+    <h2>Groups</h2>
+  </div>
+  <p class="muted">Create groups, invite members, and exchange direct messages.</p>
+
+  <form method="post" action="/ui/groups/create" class="form compact">
+    <label>
+      <span>New group name</span>
+      <input type="text" name="name" placeholder="engineering-team" required />
+    </label>
+    <button type="submit">Create group</button>
+  </form>
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Your group memberships</h2>
+  </div>
+  {% if memberships %}
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Group</th>
+            <th>Role</th>
+            <th>Joined</th>
+            <th>Open</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for membership in memberships %}
+          <tr>
+            <td>{{ membership.group.name }}</td>
+            <td>{{ membership.role }}</td>
+            <td>{{ membership.joined_at }}</td>
+            <td><a class="pill" href="/ui/groups/{{ membership.group.id }}">Open</a></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted">You are not in any groups yet.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Pending invites</h2>
+  </div>
+  {% if pending_invites %}
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Group</th>
+            <th>Invited by</th>
+            <th>Created</th>
+            <th>Accept</th>
+            <th>Decline</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for invite in pending_invites %}
+          <tr>
+            <td>{{ invite.group.name }}</td>
+            <td>{{ invite.inviter.username }}</td>
+            <td>{{ invite.created_at }}</td>
+            <td>
+              <form method="post" action="/ui/groups/invites/{{ invite.id }}/accept" class="inline-form">
+                <button type="submit">Accept</button>
+              </form>
+            </td>
+            <td>
+              <form method="post" action="/ui/groups/invites/{{ invite.id }}/decline" class="inline-form">
+                <button type="submit" class="danger">Decline</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted">No pending invites.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Direct messages</h2>
+  </div>
+
+  <form method="post" action="/ui/groups/messages/send" class="form compact">
+    <label>
+      <span>Recipient username</span>
+      <input type="text" name="username" required />
+    </label>
+    <label>
+      <span>Message</span>
+      <input type="text" name="message" maxlength="4000" required />
+    </label>
+    <button type="submit">Send</button>
+  </form>
+
+  {% if recent_messages %}
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>From</th>
+            <th>To</th>
+            <th>Message</th>
+            <th>Sent</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in recent_messages %}
+          <tr>
+            <td>{{ item.sender_username }}</td>
+            <td>{{ item.recipient_username }}</td>
+            <td>{{ item.body }}</td>
+            <td>{{ item.created_at }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted">No messages yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

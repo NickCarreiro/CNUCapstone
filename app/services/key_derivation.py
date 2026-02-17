@@ -78,3 +78,19 @@ def totp_fernet_key_str() -> str:
         return base64.urlsafe_b64encode(raw).decode()
 
     return settings.totp_encryption_key
+
+
+@lru_cache(maxsize=1)
+def message_fernet_key_str() -> str:
+    if settings.passphrase_file:
+        root = _root_key_from_passphrase()
+        raw = _hkdf(root, info=b"pfv:messages-fernet:v1", length=32)
+        return base64.urlsafe_b64encode(raw).decode()
+
+    # Derive a dedicated key from PFV_MASTER_KEY so message encryption
+    # is domain-separated from key wrapping.
+    master_raw = base64.urlsafe_b64decode(settings.master_key.encode())
+    if len(master_raw) != 32:
+        raise ValueError("PFV_MASTER_KEY must decode to 32 bytes")
+    raw = _hkdf(master_raw, info=b"pfv:messages-fernet:v1", length=32)
+    return base64.urlsafe_b64encode(raw).decode()

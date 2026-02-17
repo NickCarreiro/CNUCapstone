@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <div class="card-header">
+    <h2>Group: {{ group.name }}</h2>
+    <div class="card-tools">
+      <a class="pill" href="/ui/groups">Back to Groups</a>
+    </div>
+  </div>
+  <p class="muted">This is the group-specific view. Shared vault features can be added here incrementally.</p>
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Shared files</h2>
+  </div>
+  <p class="muted">All group members can upload and download files in this directory.</p>
+  <form method="post" action="/ui/groups/{{ group.id }}/upload" enctype="multipart/form-data" class="form compact">
+    <label>
+      <span>Select file</span>
+      <input type="file" name="file" required />
+    </label>
+    <button type="submit">Upload to group</button>
+  </form>
+  {% if files %}
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>File</th>
+            <th>Size (bytes)</th>
+            <th>Uploaded</th>
+            <th>Open</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in files %}
+          <tr>
+            <td>{{ item.file_name }}</td>
+            <td>{{ item.file_size }}</td>
+            <td>{{ item.uploaded_at }}</td>
+            <td><a class="pill" href="/ui/groups/{{ group.id }}/files/{{ item.id }}">Open</a></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted">No shared files yet.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Members</h2>
+  </div>
+  {% if members %}
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Username</th>
+            <th>Role</th>
+            <th>Joined</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for member in members %}
+          <tr>
+            <td>{{ member.user.username }}</td>
+            <td>{{ member.role }}</td>
+            <td>{{ member.joined_at }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+</section>
+
+{% if is_owner %}
+<section class="card">
+  <div class="card-header">
+    <h2>Invite user</h2>
+  </div>
+  <form method="post" action="/ui/groups/{{ group.id }}/invite" class="form compact">
+    <label>
+      <span>Username</span>
+      <input type="text" name="username" required />
+    </label>
+    <button type="submit">Invite</button>
+  </form>
+</section>
+{% endif %}
+
+<section class="card">
+  <div class="card-header">
+    <h2>Pending invites</h2>
+  </div>
+  {% if pending_invites %}
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Invitee</th>
+            <th>Inviter</th>
+            <th>Created</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for invite in pending_invites %}
+          <tr>
+            <td>{{ invite.invitee.username }}</td>
+            <td>{{ invite.inviter.username }}</td>
+            <td>{{ invite.created_at }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted">No pending invites.</p>
+  {% endif %}
+</section>
+{% endblock %}
