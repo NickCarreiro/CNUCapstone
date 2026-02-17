@@ -37,6 +37,22 @@ def ensure_schema() -> str:
     if "users" in table_names and not has_column("users", "is_admin"):
         stmts.append("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE")
 
+    if "direct_messages" in table_names:
+        if not has_column("direct_messages", "thread_id"):
+            stmts.append("ALTER TABLE direct_messages ADD COLUMN thread_id UUID")
+        if not has_column("direct_messages", "attachment_name"):
+            stmts.append("ALTER TABLE direct_messages ADD COLUMN attachment_name VARCHAR(255)")
+        if not has_column("direct_messages", "attachment_path"):
+            stmts.append("ALTER TABLE direct_messages ADD COLUMN attachment_path TEXT")
+        if not has_column("direct_messages", "attachment_size"):
+            stmts.append("ALTER TABLE direct_messages ADD COLUMN attachment_size INTEGER")
+        if not has_column("direct_messages", "attachment_enc_nonce"):
+            stmts.append("ALTER TABLE direct_messages ADD COLUMN attachment_enc_nonce VARCHAR(64)")
+        if not has_column("direct_messages", "attachment_enc_tag"):
+            stmts.append("ALTER TABLE direct_messages ADD COLUMN attachment_enc_tag VARCHAR(64)")
+        if not has_column("direct_messages", "attachment_mime_type"):
+            stmts.append("ALTER TABLE direct_messages ADD COLUMN attachment_mime_type VARCHAR(255)")
+
     schema_changed = False
     with engine.begin() as conn:
         if stmts:
@@ -48,6 +64,11 @@ def ensure_schema() -> str:
         if "files" in table_names:
             conn.execute(text("UPDATE files SET is_encrypted = FALSE WHERE enc_nonce IS NULL OR enc_tag IS NULL"))
             conn.execute(text("UPDATE files SET is_encrypted = TRUE WHERE enc_nonce IS NOT NULL AND enc_tag IS NOT NULL"))
+
+        if "direct_messages" in table_names:
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_direct_messages_thread_id ON direct_messages (thread_id)"))
+            # Keep legacy rows queryable in threads without destructive rewrites.
+            conn.execute(text("UPDATE direct_messages SET thread_id = id WHERE thread_id IS NULL"))
 
         # Ensure at least one system administrator exists for admin UI bootstrap.
         if "users" in table_names:

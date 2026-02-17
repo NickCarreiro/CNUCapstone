@@ -21,9 +21,11 @@ from app.db import get_db
 from app.models.core import (
     ActivityEvent,
     AuditLog,
+    DirectMessage,
     FileRecord,
     Group,
     GroupFileRecord,
+    GroupInvite,
     GroupKey,
     GroupMembership,
     Session as SessionModel,
@@ -43,10 +45,15 @@ router = APIRouter(prefix="/ui", tags=["ui"])
 templates = Jinja2Templates(directory="templates")
 logger = logging.getLogger("uvicorn.error")
 _FILE_TOKEN_CACHE: dict[str, dict[str, str]] = {}
+_TERMINAL_SCOPE_CACHE: dict[str, dict[str, str]] = {}
 
 _TERMINAL_COMMANDS = [
     "help",
     "pwd",
+    "scope",
+    "groups",
+    "usegroup",
+    "useuser",
     "list",
     "tree",
     "find",
@@ -55,6 +62,8 @@ _TERMINAL_COMMANDS = [
     "hash",
     "quota",
     "encstatus",
+    "gfiles",
+    "gdownload",
     "directory",
     "move",
     "copy",
@@ -100,6 +109,52 @@ def _user_root(user: User) -> Path:
     root = Path(settings.staging_path) / str(user.id)
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def _group_root(group_id: uuid.UUID) -> Path:
+    root = Path(settings.staging_path) / "groups" / str(group_id)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _terminal_scope_key(request: Request) -> str:
+    # Scope is stored per browser session cookie; empty means "no scope".
+    return _get_session_id(request)
+
+
+def _terminal_set_scope_user(request: Request) -> None:
+    key = _terminal_scope_key(request)
+    if not key:
+        return
+    _TERMINAL_SCOPE_CACHE[key] = {"type": "user"}
+
+
+def _terminal_set_scope_group(request: Request, *, group_id: uuid.UUID, group_name: str) -> None:
+    key = _terminal_scope_key(request)
+    if not key:
+        return
+    _TERMINAL_SCOPE_CACHE[key] = {"type": "group", "group_id": str(group_id), "group_name": group_name}
+
+
+def _terminal_get_scope(request: Request) -> dict[str, str]:
+    key = _terminal_scope_key(request)
+    if not key:
+        return {"type": "user"}
+    scope = _TERMINAL_SCOPE_CACHE.get(key)
+    if not scope:
+        scope = {"type": "user"}
+        _TERMINAL_SCOPE_CACHE[key] = scope
+    return scope
+
+
+def _terminal_root_for_scope(user: User, scope: dict[str, str]) -> tuple[Path, str]:
+    if scope.get("type") == "group" and scope.get("group_id"):
+        try:
+            gid = uuid.UUID(scope["group_id"])
+        except ValueError:
+            return _user_root(user), "user"
+        return _group_root(gid), f"group:{scope.get('group_name') or gid}"
+    return _user_root(user), "user"
 
 
 def _admin_redirect(message: str, *, error: bool = False) -> RedirectResponse:
@@ -524,6 +579,39 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
             "error": None,
         },
     )
+
+
+@router.get("/notifications")
+def notifications_state(request: Request, db: Session = Depends(get_db)):
+    user = _get_current_user(db, request)
+    if not user:
+        return Response(status_code=401)
+
+    unread_messages = (
+        db.query(func.count(DirectMessage.id))
+        .filter(
+            DirectMessage.recipient_id == user.id,
+            DirectMessage.read_at.is_(None),
+        )
+        .scalar()
+        or 0
+    )
+    pending_group_invites = (
+        db.query(func.count(GroupInvite.id))
+        .filter(
+            GroupInvite.invitee_id == user.id,
+            GroupInvite.status == "pending",
+        )
+        .scalar()
+        or 0
+    )
+    total_unread = int(unread_messages) + int(pending_group_invites)
+    return {
+        "unread_messages": int(unread_messages),
+        "pending_group_invites": int(pending_group_invites),
+        "groups_badge_total": total_unread,
+        "server_time_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
 
 
 @router.get("/admin/users")
@@ -1384,6 +1472,10 @@ def terminal_command(
             "Commands:\n"
             "  help\n"
             "  pwd\n"
+            "  scope\n"
+            "  groups\n"
+            "  usegroup <group_id|group_name>\n"
+            "  useuser\n"
             "  list [folder]\n"
             "  tree [folder] [depth]\n"
             "  find <pattern> [folder]\n"
@@ -1392,11 +1484,13 @@ def terminal_command(
             "  hash <file>\n"
             "  quota [folder]\n"
             "  encstatus\n"
+            "  gfiles [pattern]\n"
+            "  gdownload <file_id>\n"
             "  move <src> <dst>\n"
             "  copy <src> <dst>\n"
             "  rename <src> <dst>\n"
             "  directory <path>\n"
-            "Paths are relative to your vault."
+            "Paths are relative to the active scope. Use usegroup/useuser to switch."
         )
         add_event(db, user, action="terminal", message=message)
         return {"ok": True, "message": message}
@@ -1404,13 +1498,150 @@ def terminal_command(
     if cmd not in set(_TERMINAL_COMMANDS):
         raise HTTPException(status_code=400, detail="Unsupported command")
 
-    root = _user_root(user)
+    scope = _terminal_get_scope(request)
+    root, scope_label = _terminal_root_for_scope(user, scope)
     safe_args = [_normalize_rel_path(a) for a in args]
 
     if cmd == "pwd":
-        message = "/"
-        add_event(db, user, action="terminal", message="pwd /")
+        message = "/" if scope_label == "user" else f"/  ({scope_label})"
+        add_event(db, user, action="terminal", message=f"pwd {message}")
         return {"ok": True, "message": message}
+
+    if cmd == "scope":
+        if scope_label == "user":
+            message = "Scope: user vault (/)"
+        else:
+            message = f"Scope: {scope_label} (/)"
+        add_event(db, user, action="terminal", message=f"scope\n{message}")
+        return {"ok": True, "message": message}
+
+    if cmd == "groups":
+        rows = (
+            db.query(Group.id, Group.name, GroupMembership.role)
+            .join(GroupMembership, GroupMembership.group_id == Group.id)
+            .filter(GroupMembership.user_id == user.id)
+            .order_by(Group.name.asc())
+            .all()
+        )
+        if not rows:
+            message = "(no group memberships)"
+        else:
+            lines = ["Your groups:"]
+            for gid, name, role in rows[:60]:
+                lines.append(f"  {name}  ({role})  {gid}")
+            if len(rows) > 60:
+                lines.append(f"... (+{len(rows) - 60} more)")
+            lines.append("")
+            lines.append("Tip: usegroup <group_id|group_name>")
+            message = "\n".join(lines)
+        add_event(db, user, action="terminal", message=f"groups\n{message}")
+        return {"ok": True, "message": message}
+
+    if cmd == "useuser":
+        _terminal_set_scope_user(request)
+        message = "Scope set to user vault (/)."
+        add_event(db, user, action="terminal", message=f"useuser\n{message}")
+        return {"ok": True, "message": message}
+
+    if cmd == "usegroup":
+        if not safe_args:
+            raise HTTPException(status_code=400, detail="Missing group identifier")
+        raw = (args[0] or "").strip()
+        if not raw:
+            raise HTTPException(status_code=400, detail="Missing group identifier")
+        group_row = None
+        try:
+            gid = uuid.UUID(raw)
+            group_row = (
+                db.query(Group, GroupMembership.role)
+                .join(GroupMembership, GroupMembership.group_id == Group.id)
+                .filter(Group.id == gid, GroupMembership.user_id == user.id)
+                .first()
+            )
+        except ValueError:
+            group_row = (
+                db.query(Group, GroupMembership.role)
+                .join(GroupMembership, GroupMembership.group_id == Group.id)
+                .filter(Group.name == raw, GroupMembership.user_id == user.id)
+                .first()
+            )
+        if not group_row:
+            raise HTTPException(status_code=404, detail="Group not found or not a member")
+        group, role = group_row
+        _terminal_set_scope_group(request, group_id=group.id, group_name=group.name)
+        message = f"Scope set to group '{group.name}' ({role})."
+        add_event(db, user, action="terminal", message=f"usegroup {group.id}\n{message}")
+        return {"ok": True, "message": message}
+
+    if cmd in {"directory", "move", "copy", "rename"} and scope_label != "user":
+        raise HTTPException(status_code=400, detail="Write commands are disabled in group scope")
+
+    if cmd == "gfiles":
+        if scope.get("type") != "group" or not scope.get("group_id"):
+            raise HTTPException(status_code=400, detail="gfiles requires group scope (usegroup first)")
+        try:
+            gid = uuid.UUID(scope["group_id"])
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid group scope")
+
+        # Confirm membership.
+        membership = (
+            db.query(GroupMembership.role)
+            .filter(GroupMembership.group_id == gid, GroupMembership.user_id == user.id)
+            .first()
+        )
+        if not membership:
+            raise HTTPException(status_code=403, detail="Not a member of this group")
+
+        pattern = (args[0] or "").strip() if args else ""
+        query = db.query(GroupFileRecord).filter(GroupFileRecord.group_id == gid)
+        if pattern:
+            query = query.filter(GroupFileRecord.file_name.ilike(f"%{pattern}%"))
+        rows = query.order_by(GroupFileRecord.uploaded_at.desc()).limit(80).all()
+        if not rows:
+            message = "(no files)"
+        else:
+            lines = ["Group files (id, name, size, uploaded UTC):"]
+            for r in rows:
+                uploaded = r.uploaded_at.isoformat(timespec="seconds") + "Z" if r.uploaded_at else "-"
+                lines.append(f"  {r.id}  {r.file_name}  {r.file_size}  {uploaded}")
+            lines.append("")
+            lines.append("Tip: gdownload <file_id>")
+            message = "\n".join(lines)
+        add_event(db, user, action="terminal", message=f"gfiles {pattern}\n{message}".strip())
+        return {"ok": True, "message": message}
+
+    if cmd == "gdownload":
+        if scope.get("type") != "group" or not scope.get("group_id"):
+            raise HTTPException(status_code=400, detail="gdownload requires group scope (usegroup first)")
+        if not safe_args:
+            raise HTTPException(status_code=400, detail="Missing file id")
+        try:
+            gid = uuid.UUID(scope["group_id"])
+            fid = uuid.UUID(safe_args[0])
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid identifier")
+
+        membership = (
+            db.query(GroupMembership.role)
+            .filter(GroupMembership.group_id == gid, GroupMembership.user_id == user.id)
+            .first()
+        )
+        if not membership:
+            raise HTTPException(status_code=403, detail="Not a member of this group")
+
+        record = (
+            db.query(GroupFileRecord)
+            .filter(GroupFileRecord.group_id == gid, GroupFileRecord.id == fid)
+            .first()
+        )
+        if not record:
+            raise HTTPException(status_code=404, detail="File not found")
+
+        url = f"/ui/groups/{gid}/files/{fid}"
+        message = f"Download URL:\n  {url}"
+        add_event(db, user, action="terminal", message=f"gdownload {fid}\n{message}")
+        return {"ok": True, "message": message, "url": url}
 
     if cmd == "list":
         target = safe_args[0] if safe_args else ""
@@ -1948,7 +2179,8 @@ def terminal_suggest(
     if not user:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
-    root = _user_root(user)
+    scope = _terminal_get_scope(request)
+    root, _ = _terminal_root_for_scope(user, scope)
     raw = (prefix or "").strip()
     raw_norm = _normalize_rel_path(raw)
     base_dir = raw_norm

@@ -12,11 +12,15 @@ from app.models.core import User
 def _get_session_id(request: Request) -> str | None:
     cookie = request.cookies.get("pfv_session")
     if cookie:
-        return cookie
+        cleaned = cookie.strip().strip('"')
+        if cleaned:
+            return cleaned
 
     auth = request.headers.get("authorization")
     if auth and auth.lower().startswith("bearer "):
-        return auth.split(" ", 1)[1].strip()
+        token = auth.split(" ", 1)[1].strip().strip('"')
+        if token:
+            return token
 
     return None
 

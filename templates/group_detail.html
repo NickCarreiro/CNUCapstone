@@ -21,6 +21,10 @@
       <div class="stat-number">{{ invite_count }}</div>
       <div class="stat-label">Pending invites</div>
     </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ membership_role|capitalize }}</div>
+      <div class="stat-label">Your role</div>
+    </div>
   </div>
 </section>
 
@@ -31,14 +35,44 @@
       <a class="pill" href="/ui/groups">Back to Groups</a>
     </div>
   </div>
-  <p class="muted">Review membership and shared files from this group dashboard.</p>
+  <p class="muted">Role-based access is enabled. Owner and admins can manage invites and member permissions.</p>
 </section>
 
 <section class="card">
   <div class="card-header">
     <h2>Shared files</h2>
   </div>
-  <p class="muted">All group members can upload and download files in this directory.</p>
+  <p class="muted">
+    {% if can_upload %}
+      Upload, search, sort, and download files shared with this group.
+    {% else %}
+      Your role is read-only for uploads. You can still browse and download files.
+    {% endif %}
+  </p>
+
+  <form method="get" action="/ui/groups/{{ group.id }}" class="form compact group-file-filter-form">
+    <label>
+      <span>Search files</span>
+      <input type="text" name="file_q" value="{{ file_q }}" placeholder="name contains..." />
+    </label>
+    <label>
+      <span>Sort files</span>
+      <select name="file_sort">
+        <option value="newest" {% if file_sort == "newest" %}selected{% endif %}>Newest first</option>
+        <option value="oldest" {% if file_sort == "oldest" %}selected{% endif %}>Oldest first</option>
+        <option value="name_asc" {% if file_sort == "name_asc" %}selected{% endif %}>Name A-Z</option>
+        <option value="name_desc" {% if file_sort == "name_desc" %}selected{% endif %}>Name Z-A</option>
+        <option value="size_asc" {% if file_sort == "size_asc" %}selected{% endif %}>Size low-high</option>
+        <option value="size_desc" {% if file_sort == "size_desc" %}selected{% endif %}>Size high-low</option>
+      </select>
+    </label>
+    <div class="group-file-filter-actions">
+      <button type="submit">Apply</button>
+      <a class="pill ghost-link" href="/ui/groups/{{ group.id }}">Reset</a>
+    </div>
+  </form>
+
+  {% if can_upload %}
   <form method="post" action="/ui/groups/{{ group.id }}/upload" enctype="multipart/form-data" class="form compact">
     <label>
       <span>Select file</span>
@@ -46,6 +80,8 @@
     </label>
     <button type="submit">Upload to group</button>
   </form>
+  {% endif %}
+
   {% if files %}
     <div class="table-wrap">
       <table class="table" id="groupDetailFilesTable">
@@ -86,6 +122,7 @@
             <th>Username</th>
             <th>Role</th>
             <th>Joined</th>
+            <th>Manage</th>
           </tr>
         </thead>
         <tbody>
@@ -94,6 +131,29 @@
             <td data-label="Username">{{ member.user.username }}</td>
             <td data-label="Role">{{ member.role }}</td>
             <td data-label="Joined">{{ member.joined_at }}</td>
+            <td data-label="Manage">
+              {% if can_manage_members and member.user.id != user.id and member.role != "owner" %}
+                <div class="member-manage">
+                  <form method="post" action="/ui/groups/{{ group.id }}/members/{{ member.user.id }}/role" class="inline-form member-role-form">
+                    <select name="role">
+                      {% for role_option in member_role_options %}
+                      <option value="{{ role_option }}" {% if member.role == role_option %}selected{% endif %}>{{ role_option|capitalize }}</option>
+                      {% endfor %}
+                    </select>
+                    <button type="submit">Update</button>
+                  </form>
+                  <form method="post" action="/ui/groups/{{ group.id }}/members/{{ member.user.id }}/remove" class="inline-form">
+                    <button type="submit" class="danger">Remove</button>
+                  </form>
+                </div>
+              {% elif member.user.id == user.id %}
+                <span class="muted">Current user</span>
+              {% elif member.role == "owner" %}
+                <span class="muted">Owner</span>
+              {% else %}
+                <span class="muted">No access</span>
+              {% endif %}
+            </td>
           </tr>
           {% endfor %}
         </tbody>
@@ -102,7 +162,7 @@
   {% endif %}
 </section>
 
-{% if is_owner %}
+{% if can_invite %}
 <section class="card">
   <div class="card-header">
     <h2>Invite user</h2>
@@ -115,7 +175,6 @@
     <button type="submit">Invite</button>
   </form>
 </section>
-{% endif %}
 
 <section class="card">
   <div class="card-header">
@@ -146,4 +205,5 @@
     <p class="muted">No pending invites.</p>
   {% endif %}
 </section>
+{% endif %}
 {% endblock %}

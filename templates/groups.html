@@ -3,7 +3,8 @@
 {% block content %}
 {% set membership_count = memberships|length %}
 {% set invite_count = pending_invites|length %}
-{% set message_count = recent_messages|length %}
+{% set thread_count = threads|length %}
+{% set unread_count = unread_thread_total or 0 %}
 <section class="card hero-card groups-hero">
   <div class="eyebrow">Collaboration Hub</div>
   <h1>Groups, invites, and secure messaging</h1>
@@ -18,8 +19,12 @@
       <div class="stat-label">Pending invites</div>
     </div>
     <div class="stat-chip">
-      <div class="stat-number">{{ message_count }}</div>
-      <div class="stat-label">Recent messages</div>
+      <div class="stat-number">{{ thread_count }}</div>
+      <div class="stat-label">Conversations</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ unread_count }}</div>
+      <div class="stat-label">Unread messages</div>
     </div>
   </div>
 </section>
@@ -116,45 +121,146 @@
 <section class="card">
   <div class="card-header">
     <h2>Direct messages</h2>
+    <div class="card-tools">
+      <span class="pill ghost">Unread: {{ unread_count }}</span>
+    </div>
   </div>
 
-  <form method="post" action="/ui/groups/messages/send" class="form compact">
-    <label>
-      <span>Recipient username</span>
-      <input type="text" name="username" required />
-    </label>
-    <label>
-      <span>Message</span>
-      <textarea name="message" maxlength="4000" rows="4" placeholder="Write a secure message..." required></textarea>
-    </label>
-    <button type="submit">Send</button>
-  </form>
-
-  {% if recent_messages %}
-    <div class="table-wrap">
-      <table class="table" id="groupsMessagesTable">
-        <thead>
-          <tr>
-            <th>From</th>
-            <th>To</th>
-            <th>Message</th>
-            <th>Sent</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for item in recent_messages %}
-          <tr>
-            <td data-label="From">{{ item.sender_username }}</td>
-            <td data-label="To">{{ item.recipient_username }}</td>
-            <td data-label="Message">{{ item.body }}</td>
-            <td data-label="Sent">{{ item.created_at }}</td>
-          </tr>
+  <div class="dm-layout">
+    <aside class="dm-threads">
+      <h3>Conversations</h3>
+      {% if threads %}
+        <div class="dm-thread-list">
+          {% for item in threads %}
+          <a
+            class="dm-thread{% if item.thread_id == active_thread_id %} active{% endif %}"
+            href="/ui/groups?thread={{ item.thread_id }}"
+          >
+            <div class="dm-thread-head">
+              <span class="dm-thread-user">{{ item.partner_username }}</span>
+              {% if item.unread_count %}
+                <span class="dm-thread-unread">{{ item.unread_count }}</span>
+              {% endif %}
+            </div>
+            <div class="dm-thread-preview">{{ item.latest_preview }}</div>
+            <div class="dm-thread-time">{{ item.latest_created_at_utc }}</div>
+          </a>
           {% endfor %}
-        </tbody>
-      </table>
+        </div>
+      {% else %}
+        <p class="muted">No conversations yet. Start one below.</p>
+      {% endif %}
+    </aside>
+
+    <div class="dm-main">
+      <form
+        method="post"
+        action="/ui/groups/messages/send"
+        enctype="multipart/form-data"
+        class="form compact dm-compose-form"
+        id="dmSendForm"
+        data-active-partner="{{ active_partner_username }}"
+      >
+        <input type="hidden" name="thread_id" id="dmThreadId" value="{{ active_thread_id }}" />
+        <label>
+          <span>Recipient username</span>
+          <input
+            type="text"
+            name="username"
+            id="dmUsername"
+            value="{{ active_partner_username }}"
+            placeholder="teammate"
+            autocomplete="off"
+          />
+        </label>
+        <label>
+          <span>Message</span>
+          <textarea name="message" id="dmMessage" maxlength="4000" rows="4" placeholder="Write a secure message..."></textarea>
+        </label>
+        <label>
+          <span>Attachment (optional, max 10 MB)</span>
+          <input type="file" name="attachment" id="dmAttachment" />
+        </label>
+        <div class="dm-compose-actions">
+          <button type="submit">Send message</button>
+          <button type="button" class="ghost" id="dmNewThread">New conversation</button>
+        </div>
+      </form>
+
+      <div class="dm-stream">
+        {% if thread_messages %}
+          {% for item in thread_messages %}
+          <article class="dm-message{% if item.is_outbound %} outbound{% else %} inbound{% endif %}">
+            <div class="dm-message-meta">
+              <span>{{ item.sender_username }} to {{ item.recipient_username }}</span>
+              <span>{{ item.created_at_utc }}</span>
+            </div>
+            {% if item.body %}
+              <div class="dm-message-body">{{ item.body }}</div>
+            {% endif %}
+            {% if item.has_attachment %}
+              <div class="dm-attachment">
+                <a href="{{ item.attachment_url }}">{{ item.attachment_name }}</a>
+                <span class="muted">({{ item.attachment_size }} bytes)</span>
+              </div>
+            {% endif %}
+            <div class="dm-receipt">{{ item.receipt }}</div>
+          </article>
+          {% endfor %}
+        {% else %}
+          <p class="muted">Select a conversation or start a new one to view messages.</p>
+        {% endif %}
+      </div>
     </div>
-  {% else %}
-    <p class="muted">No messages yet.</p>
-  {% endif %}
+  </div>
 </section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  (function () {
+    const form = document.getElementById("dmSendForm");
+    if (!form) return;
+
+    const threadInput = document.getElementById("dmThreadId");
+    const usernameInput = document.getElementById("dmUsername");
+    const clearButton = document.getElementById("dmNewThread");
+    const stream = document.querySelector(".dm-stream");
+    const activePartner = (form.dataset.activePartner || "").trim().toLowerCase();
+
+    function syncRecipientRequirement() {
+      const hasThread = !!(threadInput && threadInput.value.trim());
+      if (usernameInput) {
+        usernameInput.required = !hasThread;
+      }
+    }
+
+    usernameInput?.addEventListener("input", () => {
+      const currentValue = usernameInput.value.trim().toLowerCase();
+      if (threadInput && threadInput.value && activePartner && currentValue && currentValue !== activePartner) {
+        threadInput.value = "";
+      }
+      syncRecipientRequirement();
+    });
+
+    clearButton?.addEventListener("click", () => {
+      if (threadInput) threadInput.value = "";
+      if (usernameInput) {
+        usernameInput.value = "";
+        usernameInput.focus();
+      }
+      const messageInput = document.getElementById("dmMessage");
+      if (messageInput) messageInput.value = "";
+      const attachmentInput = document.getElementById("dmAttachment");
+      if (attachmentInput) attachmentInput.value = "";
+      syncRecipientRequirement();
+    });
+
+    if (stream) {
+      stream.scrollTop = stream.scrollHeight;
+    }
+
+    syncRecipientRequirement();
+  })();
+</script>
 {% endblock %}

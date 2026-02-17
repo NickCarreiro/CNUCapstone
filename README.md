@@ -1,6 +1,6 @@
-# Personal File Vault – OSI-Layer Implementation Plan
+# FileFort – OSI-Layer Implementation Plan
 
-This document describes the planned implementation of the Personal File Vault system using the **OSI model** as an organizing framework. Each layer maps directly to concrete technologies, configurations, and development tasks required to build the system.
+This document describes the planned implementation of the FileFort system using the **OSI model** as an organizing framework. Each layer maps directly to concrete technologies, configurations, and development tasks required to build the system.
 
 The goal of this document is to provide a clear, structured roadmap for development while ensuring architectural consistency and security across all layers.
 

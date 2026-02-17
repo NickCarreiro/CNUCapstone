@@ -4,14 +4,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="PFV_")
 
-    app_name: str = "Personal File Vault"
+    app_name: str = "FileFort"
     environment: str = "dev"
 
     database_url: str = "postgresql+psycopg://pfv:pfv@localhost:5432/pfv"
 
     # Security
     password_hash_scheme: str = "argon2"
-    totp_issuer: str = "Personal File Vault"
+    totp_issuer: str = "FileFort"
     totp_encryption_key: str = "CHANGE_ME"
     # 32-byte AES key, base64url-encoded (generated). Used to wrap per-user file keys.
     master_key: str = "CHANGE_ME"
