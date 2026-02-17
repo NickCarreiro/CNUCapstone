@@ -94,6 +94,7 @@
           {% if is_admin_view %}
           <th>User</th>
           {% endif %}
+          <th>IP</th>
           <th>Event type</th>
           <th>Details</th>
         </tr>
@@ -111,6 +112,7 @@
           {% if is_admin_view %}
           <td data-label="User">{{ row.username }}</td>
           {% endif %}
+          <td data-label="IP"><code>{{ row.log.ip_address or "-" }}</code></td>
           <td data-label="Event type"><code>{{ row.log.event_type }}</code></td>
           <td data-label="Details">{{ row.log.details or "-" }}</td>
         </tr>

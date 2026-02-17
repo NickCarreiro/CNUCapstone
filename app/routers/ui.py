@@ -34,6 +34,7 @@ from app.models.core import (
 )
 from app.services.crypto import b64d, decrypt_file_iter, encrypt_file_to_path, unwrap_key
 from app.services.key_derivation import master_key_bytes, using_passphrase
+from app.services.group_keystore import ensure_group_key, get_group_dek
 from app.services.keystore import ensure_user_key, get_user_dek
 from app.services.activity import add_event
 from app.services.audit import add_audit_log
@@ -62,6 +63,7 @@ _TERMINAL_COMMANDS = [
     "hash",
     "quota",
     "encstatus",
+    "encproof",
     "gfiles",
     "gdownload",
     "directory",
@@ -73,6 +75,32 @@ _TERMINAL_SCAN_LIMIT = 20000
 _TERMINAL_RESULT_LIMIT = 200
 _TERMINAL_PREVIEW_MAX_BYTES = 256 * 1024
 _TERMINAL_PREVIEW_MAX_LINES = 200
+_TERMINAL_ENCPROOF_MAX_DECRYPT_BYTES = 32 * 1024
+_TERMINAL_ENCPROOF_PREVIEW_LINES = 40
+_TERMINAL_TEXT_EXTS = {
+    ".txt",
+    ".md",
+    ".csv",
+    ".log",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".py",
+    ".js",
+    ".ts",
+    ".html",
+    ".css",
+    ".xml",
+    ".rst",
+}
+
+
+def _hex_bytes(data: bytes, *, limit: int = 64) -> str:
+    view = data[: max(0, int(limit))]
+    return " ".join(f"{b:02x}" for b in view) if view else "(empty)"
 
 
 def _get_session(db: Session, session_id: str | None) -> SessionModel | None:
@@ -444,13 +472,13 @@ def register_action(
 
     ensure_user_key(db, user)
     add_event(db, user, action="auth", message=f"Account created for '{user.username}'.")
-    add_audit_log(db, user=user, event_type="account.registered", details="Account created via web registration.")
+    add_audit_log(db, user=user, event_type="account.registered", details="Account created via web registration.", request=request)
     if user.is_admin:
         add_event(db, user, action="auth", message="System administrator role granted to first account.", level="SUCCESS")
-        add_audit_log(db, user=user, event_type="account.role_admin_granted", details="System administrator role granted.")
+        add_audit_log(db, user=user, event_type="account.role_admin_granted", details="System administrator role granted.", request=request)
     session = create_session(db, user)
     user.last_login = datetime.utcnow()
-    add_audit_log(db, user=user, event_type="signin.success", details="Signed in after registration.")
+    add_audit_log(db, user=user, event_type="signin.success", details="Signed in after registration.", request=request)
     db.commit()
 
     response = RedirectResponse(url="/ui", status_code=303)
@@ -474,7 +502,7 @@ def login_action(
             status_code=401,
         )
     if not verify_password(password, user.password_hash):
-        add_audit_log(db, user=user, event_type="signin.failed_password", details="Password verification failed.")
+        add_audit_log(db, user=user, event_type="signin.failed_password", details="Password verification failed.", request=request)
         db.commit()
         return templates.TemplateResponse(
             "login.html",
@@ -484,7 +512,7 @@ def login_action(
 
     if user.totp_enabled:
         if not totp_code:
-            add_audit_log(db, user=user, event_type="signin.failed_totp_required", details="MFA code required.")
+            add_audit_log(db, user=user, event_type="signin.failed_totp_required", details="MFA code required.", request=request)
             db.commit()
             return templates.TemplateResponse(
                 "login.html",
@@ -493,7 +521,7 @@ def login_action(
             )
         secret = decrypt_totp_secret(user.totp_secret_enc or "")
         if not pyotp.TOTP(secret).verify(totp_code):
-            add_audit_log(db, user=user, event_type="signin.failed_totp_invalid", details="Invalid MFA code.")
+            add_audit_log(db, user=user, event_type="signin.failed_totp_invalid", details="Invalid MFA code.", request=request)
             db.commit()
             return templates.TemplateResponse(
                 "login.html",
@@ -503,7 +531,7 @@ def login_action(
 
     ensure_user_key(db, user)
     add_event(db, user, action="auth", message=f"Signed in as '{user.username}'.")
-    add_audit_log(db, user=user, event_type="signin.success", details="Interactive sign-in completed.")
+    add_audit_log(db, user=user, event_type="signin.success", details="Interactive sign-in completed.", request=request)
     session = create_session(db, user)
     user.last_login = datetime.utcnow()
     db.commit()
@@ -864,12 +892,14 @@ def admin_revoke_sessions(user_id: str, request: Request, db: Session = Depends(
         user=target,
         event_type="account.sessions_revoked_by_admin",
         details=f"Admin '{admin_user.username}' revoked {revoked} active session(s).",
+        request=request,
     )
     add_audit_log(
         db,
         user=admin_user,
         event_type="admin.sessions_revoked",
         details=f"Revoked {revoked} active session(s) for '{target.username}'.",
+        request=request,
     )
     db.commit()
     return _admin_redirect(f"Revoked {revoked} active session(s) for '{target.username}'.")
@@ -906,12 +936,14 @@ def admin_reset_totp(user_id: str, request: Request, db: Session = Depends(get_d
         user=target,
         event_type="mfa.reset_by_admin",
         details=f"Admin '{admin_user.username}' reset MFA enrollment.",
+        request=request,
     )
     add_audit_log(
         db,
         user=admin_user,
         event_type="admin.mfa_reset",
         details=f"Reset MFA enrollment for '{target.username}'.",
+        request=request,
     )
     db.commit()
     return _admin_redirect(f"MFA reset for '{target.username}'.")
@@ -953,12 +985,14 @@ def admin_toggle_role(user_id: str, request: Request, db: Session = Depends(get_
         user=target,
         event_type="account.role_admin_granted_by_admin" if target.is_admin else "account.role_admin_removed_by_admin",
         details=f"Admin '{admin_user.username}' {status_label} administrator role.",
+        request=request,
     )
     add_audit_log(
         db,
         user=admin_user,
         event_type="admin.role_admin_granted" if target.is_admin else "admin.role_admin_removed",
         details=f"Administrator role {status_label} for '{target.username}'.",
+        request=request,
     )
     db.commit()
     return _admin_redirect(f"Administrator role {status_label} for '{target.username}'.")
@@ -996,6 +1030,7 @@ def totp_setup(request: Request, db: Session = Depends(get_db)):
             user=user,
             event_type="mfa.secret_provisioned",
             details="MFA enrollment secret generated.",
+            request=request,
         )
         db.commit()
 
@@ -1036,6 +1071,7 @@ def totp_verify(
             user=user,
             event_type="mfa.verify_failed",
             details="Invalid MFA verification code during enrollment.",
+            request=request,
         )
         db.commit()
         return templates.TemplateResponse(
@@ -1059,6 +1095,7 @@ def totp_verify(
         user=user,
         event_type="mfa.enabled",
         details="MFA enabled after verification.",
+        request=request,
     )
     db.commit()
     return RedirectResponse(url="/ui/totp", status_code=303)
@@ -1077,6 +1114,7 @@ def totp_disable(request: Request, db: Session = Depends(get_db)):
         user=user,
         event_type="mfa.disabled",
         details="MFA disabled by user.",
+        request=request,
     )
     db.commit()
     return RedirectResponse(url="/ui/totp", status_code=303)
@@ -1484,6 +1522,7 @@ def terminal_command(
             "  hash <file>\n"
             "  quota [folder]\n"
             "  encstatus\n"
+            "  encproof <file>\n"
             "  gfiles [pattern]\n"
             "  gdownload <file_id>\n"
             "  move <src> <dst>\n"
@@ -1642,6 +1681,133 @@ def terminal_command(
         message = f"Download URL:\n  {url}"
         add_event(db, user, action="terminal", message=f"gdownload {fid}\n{message}")
         return {"ok": True, "message": message, "url": url}
+
+    if cmd == "encproof":
+        if len(safe_args) < 1:
+            raise HTTPException(status_code=400, detail="Missing file path")
+        target = safe_args[0]
+        path = _safe_join(root, target)
+        _ensure_no_symlink(path, root)
+        if not path.exists() or not path.is_file():
+            raise HTTPException(status_code=400, detail="File not found")
+
+        suffix = path.suffix.lower()
+        if suffix not in _TERMINAL_TEXT_EXTS:
+            mime_type, _ = mimetypes.guess_type(path.name)
+            if not (mime_type or "").startswith("text/"):
+                raise HTTPException(status_code=400, detail="encproof supports text files only (.txt/.md/etc)")
+
+        meta_lines: list[str] = []
+        meta_lines.append(f"Scope: {scope_label}")
+        meta_lines.append(f"Path: {target}")
+        meta_lines.append(f"Ciphertext size on disk: {path.stat().st_size} bytes")
+
+        decrypt_iter = None
+        if scope.get("type") == "group" and scope.get("group_id"):
+            try:
+                gid = uuid.UUID(scope["group_id"])
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid group scope")
+
+            membership = (
+                db.query(GroupMembership.role)
+                .filter(GroupMembership.group_id == gid, GroupMembership.user_id == user.id)
+                .first()
+            )
+            if not membership:
+                raise HTTPException(status_code=403, detail="Not a member of this group")
+
+            group = db.query(Group).filter(Group.id == gid).first()
+            if not group:
+                raise HTTPException(status_code=404, detail="Group not found")
+
+            ensure_group_key(db, group)
+            record = (
+                db.query(GroupFileRecord)
+                .filter(GroupFileRecord.group_id == gid, GroupFileRecord.file_path == str(path))
+                .first()
+            )
+            if not record:
+                raise HTTPException(status_code=400, detail="File is not tracked in group DB metadata")
+            if not record.is_encrypted:
+                raise HTTPException(status_code=400, detail="File is not marked encrypted")
+            if not record.enc_nonce or not record.enc_tag:
+                raise HTTPException(status_code=500, detail="Encrypted metadata missing nonce/tag")
+
+            dek = get_group_dek(db, group)
+            decrypt_iter = decrypt_file_iter(dek, path, record.enc_nonce, record.enc_tag, chunk_size=1024 * 1024)
+            meta_lines.append(f"DB record: group_files id={record.id}")
+            meta_lines.append("Cipher: AES-256-GCM")
+            meta_lines.append(f"Nonce/tag present: yes")
+        else:
+            record = (
+                db.query(FileRecord)
+                .filter(FileRecord.user_id == user.id, FileRecord.file_path == str(path))
+                .first()
+            )
+            if not record:
+                raise HTTPException(status_code=400, detail="File is not tracked in personal DB metadata")
+            if not record.is_encrypted:
+                raise HTTPException(status_code=400, detail="File is not marked encrypted")
+            if not record.enc_nonce or not record.enc_tag:
+                raise HTTPException(status_code=500, detail="Encrypted metadata missing nonce/tag")
+
+            dek = get_user_dek(db, user)
+            decrypt_iter = decrypt_file_iter(dek, path, record.enc_nonce, record.enc_tag, chunk_size=1024 * 1024)
+            meta_lines.append(f"DB record: files id={record.id}")
+            meta_lines.append("Cipher: AES-256-GCM")
+            meta_lines.append("Nonce/tag present: yes")
+
+        # Proof 1: ciphertext preview (scrambled view).
+        with path.open("rb") as fh:
+            head = fh.read(256)
+        head_hex = _hex_bytes(head, limit=64)
+        contains_null = b"\x00" in head
+        naive_text = head.decode("utf-8", errors="replace")
+        naive_lines = naive_text.splitlines()[:6]
+        naive_preview = "\n".join(naive_lines) if naive_lines else "(no visible text)"
+
+        # Proof 2: decrypted preview (plaintext).
+        decrypted = b""
+        if decrypt_iter is None:
+            raise HTTPException(status_code=500, detail="Decrypt pipeline not available")
+        try:
+            for chunk in decrypt_iter:
+                if not chunk:
+                    continue
+                decrypted += chunk
+                if len(decrypted) >= _TERMINAL_ENCPROOF_MAX_DECRYPT_BYTES:
+                    decrypted = decrypted[:_TERMINAL_ENCPROOF_MAX_DECRYPT_BYTES]
+                    break
+        except Exception:
+            raise HTTPException(status_code=400, detail="Decryption failed (invalid tag or key)")
+
+        plain_text = decrypted.decode("utf-8", errors="replace")
+        plain_lines = plain_text.splitlines()
+        preview_lines = plain_lines[:_TERMINAL_ENCPROOF_PREVIEW_LINES]
+        plain_preview = "\n".join(preview_lines) if preview_lines else "(empty)"
+        if len(plain_lines) > len(preview_lines):
+            plain_preview = f"{plain_preview}\n... ({len(plain_lines) - len(preview_lines)} more lines in preview window)"
+
+        out_lines: list[str] = []
+        out_lines.append("Encryption Proof (encproof)")
+        out_lines.append("")
+        out_lines.extend(meta_lines)
+        out_lines.append("")
+        out_lines.append("Proof 1: Encrypted At Rest (ciphertext on disk)")
+        out_lines.append(f"  Ciphertext head (hex, 64 bytes): {head_hex}")
+        out_lines.append(f"  Contains NUL bytes: {'yes' if contains_null else 'no'}")
+        out_lines.append("  Naive UTF-8 decode of ciphertext head (first lines):")
+        out_lines.append(naive_preview)
+        out_lines.append("")
+        out_lines.append("Proof 2: Decryption Output (plaintext preview)")
+        out_lines.append(f"  Decrypted preview bytes shown: {len(decrypted)}")
+        out_lines.append("  Plaintext preview (first lines):")
+        out_lines.append(plain_preview)
+
+        message = "\n".join(out_lines)
+        add_event(db, user, action="terminal", message=f"encproof {target}\n{message}")
+        return {"ok": True, "message": message}
 
     if cmd == "list":
         target = safe_args[0] if safe_args else ""
@@ -2226,7 +2392,7 @@ def logout(request: Request, db: Session = Depends(get_db)):
         session.is_active = False
         if user:
             add_event(db, user, action="auth", message="Signed out.")
-            add_audit_log(db, user=user, event_type="signout", details="Interactive sign-out completed.")
+            add_audit_log(db, user=user, event_type="signout", details="Interactive sign-out completed.", request=request)
         db.commit()
     response = RedirectResponse(url="/ui/login", status_code=303)
     response.delete_cookie("pfv_session")

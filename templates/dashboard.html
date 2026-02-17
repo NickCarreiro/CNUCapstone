@@ -16,27 +16,43 @@
     </details>
   {% endfor %}
 {% endmacro %}
-{% macro render_vault_tree(node) %}
+{% macro render_vault_tree(node, prefix="") %}
   {% for name, children in node.items()|sort if name != "__files__" %}
-    {% set file_count = children.get("__files__")|length if children.get("__files__") else 0 %}
+    {% set path = name if prefix == "" else prefix ~ "/" ~ name %}
+    {% set files_here = children.get("__files__") if children.get("__files__") else [] %}
+    {% set file_count = files_here|length %}
     {% set has_children = children|length > 1 or file_count > 0 %}
     <details class="tree-node" data-has-children="{{ 1 if has_children else 0 }}">
-      <summary class="tree-summary">
+      <summary class="tree-summary" data-folder="{{ path }}">
         <span class="tree-label">{{ name }}</span>
         {% if file_count %}
           <span class="tree-count">{{ file_count }} file{{ "s" if file_count != 1 }}</span>
         {% endif %}
       </summary>
+      {% if has_children %}
       <div class="tree-children">
-        {{ render_vault_tree(children) }}
+        {{ render_vault_tree(children, path) }}
+        {% if files_here %}
+        <div class="tree-files">
+          {% for filename in files_here|sort %}
+          <div
+            class="tree-file"
+            data-rel-path="{{ path }}/{{ filename }}"
+            draggable="true"
+            title="Drag to move. Right click for actions."
+          >{{ filename }}</div>
+          {% endfor %}
+        </div>
+        {% endif %}
       </div>
+      {% endif %}
     </details>
   {% endfor %}
 {% endmacro %}
 {% block content %}
 {% set file_count = files|length %}
 {% set folder_count = (folders|length - 1) if folders|length > 0 else 0 %}
-{% set top_level_count = vault_tree|length %}
+{% set top_level_count = (vault_tree|length - 1) if vault_tree|length > 0 else 0 %}
 <section class="card hero-card dashboard-hero">
   <div class="eyebrow">Vault Cockpit</div>
   <h1>Welcome, {{ user.username }}</h1>
@@ -79,96 +95,136 @@
     </form>
   </div>
 </section>
-<section class="card tree-card">
-  <div class="card-header">
-    <h2>Vault structure</h2>
-  </div>
-  <p class="muted">
-    Browse the folders and files stored in your vault.
-  </p>
-  <div class="folder-tree tree-panel">
-    <div class="tree">
-      <div class="tree-root" aria-hidden="true">/</div>
-      {{ render_vault_tree(vault_tree) }}
+<section class="card explorer-card">
+  <div class="card-header explorer-header">
+    <div class="explorer-title">
+      <h2>Vault explorer</h2>
+      <div class="explorer-path muted" id="explorerPath">Showing: /</div>
     </div>
-  </div>
-</section>
-<section class="card files-card">
-  <div class="card-header">
-    <h2>Your files</h2>
     <div class="card-tools">
       <input type="text" id="fileFilter" placeholder="Search files..." />
     </div>
   </div>
-  <p class="muted">Preview, rename, move, or send files to trash from this list.</p>
-  {% if files %}
-    <div class="table-wrap">
-    <table class="table" id="fileTable">
-      <thead>
-        <tr>
-          <th class="resizable">Item</th>
-          <th class="resizable">Size (bytes)</th>
-          <th class="resizable">Uploaded</th>
-          <th>Preview</th>
-          <th>Open</th>
-          <th>Rename</th>
-          <th>Trash</th>
-          <th>Move</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for f in files %}
-        <tr class="file-row">
-          <td data-label="Item">{{ f.display_name }}</td>
-          <td data-label="Size (bytes)">{{ f.record.file_size }}</td>
-          <td data-label="Uploaded">{{ f.record.uploaded_at }}</td>
-          <td data-label="Preview">
-            <button
-              type="button"
-              class="pill preview-btn"
-              data-file-token="{{ f.token }}"
-              data-display-name="{{ f.display_name }}"
-            >
-              Preview
-            </button>
-          </td>
-          <td data-label="Open">
-            <a class="pill" href="/ui/files/{{ f.token }}">Open</a>
-          </td>
-          <td data-label="Rename">
-            <button
-              type="button"
-              class="pill rename-btn"
-              data-file-token="{{ f.token }}"
-              data-display-name="{{ f.display_name }}"
-            >
-              Rename
-            </button>
-          </td>
-          <td data-label="Trash">
-            <form method="post" action="/ui/trash" class="inline-form">
-              <input type="hidden" name="file_token" value="{{ f.token }}" />
-              <button type="submit" class="danger">Trash</button>
-            </form>
-          </td>
-          <td data-label="Move">
-            <button
-              type="button"
-              class="pill move-btn"
-              data-file-token="{{ f.token }}"
-              data-display-name="{{ f.display_name }}"
-            >
-              Move
-            </button>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+  <p class="muted explorer-help">
+    Drag files onto folders to move them. Right click folders and files for actions.
+  </p>
+  <div class="explorer-layout">
+    <div class="explorer-pane explorer-pane-tree">
+      <div class="label explorer-pane-label">Vault structure</div>
+      <div class="folder-tree tree-panel">
+        <div class="tree-pins" id="vaultTreePins" hidden>
+          <div class="tree-pins-head">
+            <span class="muted">Pinned folders</span>
+            <button type="button" class="ghost tree-pins-clear" id="vaultPinsClear">Clear</button>
+          </div>
+          <div class="tree-pins-list" id="vaultPinsList"></div>
+        </div>
+        <div class="tree" id="vaultTree">
+          <div class="tree-root tree-root-drop" data-folder="" title="Drop here to target the vault root">/</div>
+          {% set root_files = vault_tree.get("__files__") if vault_tree.get("__files__") else [] %}
+          {% if root_files %}
+          <div class="tree-files tree-root-files">
+            {% for filename in root_files|sort %}
+            <div class="tree-file" data-rel-path="{{ filename }}" draggable="true" title="Drag to move. Right click for actions.">{{ filename }}</div>
+            {% endfor %}
+          </div>
+          {% endif %}
+          {{ render_vault_tree(vault_tree) }}
+        </div>
+      </div>
     </div>
-  {% else %}
-    <p class="muted">No files yet.</p>
-  {% endif %}
+    <div class="explorer-pane explorer-pane-files">
+      <div class="explorer-files-head">
+        <div class="label explorer-pane-label">Files</div>
+        <button type="button" class="ghost explorer-clear-filter" id="explorerClearFilter" hidden>
+          Clear folder filter
+        </button>
+      </div>
+      <p class="muted">Preview, rename, move, or send files to trash from this list.</p>
+      {% if files %}
+        <div class="table-wrap">
+        <table class="table" id="fileTable">
+          <thead>
+            <tr>
+              <th class="resizable">Item</th>
+              <th class="resizable">Size (bytes)</th>
+              <th class="resizable">Uploaded</th>
+              <th>Preview</th>
+              <th>Open</th>
+              <th>Rename</th>
+              <th>Trash</th>
+              <th>Move</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for f in files %}
+            <tr
+              class="file-row"
+              data-file-token="{{ f.token }}"
+              data-display-name="{{ f.display_name }}"
+              data-rel-path="{{ f.rel_path }}"
+            >
+              <td data-label="Item">
+                <span
+                  class="file-drag-handle"
+                  draggable="true"
+                  title="Drag to move this file into a folder"
+                  data-file-token="{{ f.token }}"
+                  data-display-name="{{ f.display_name }}"
+                ></span>
+                {{ f.display_name }}
+              </td>
+              <td data-label="Size (bytes)">{{ f.record.file_size }}</td>
+              <td data-label="Uploaded">{{ f.record.uploaded_at }}</td>
+              <td data-label="Preview">
+                <button
+                  type="button"
+                  class="pill preview-btn"
+                  data-file-token="{{ f.token }}"
+                  data-display-name="{{ f.display_name }}"
+                >
+                  Preview
+                </button>
+              </td>
+              <td data-label="Open">
+                <a class="pill" href="/ui/files/{{ f.token }}">Open</a>
+              </td>
+              <td data-label="Rename">
+                <button
+                  type="button"
+                  class="pill rename-btn"
+                  data-file-token="{{ f.token }}"
+                  data-display-name="{{ f.display_name }}"
+                >
+                  Rename
+                </button>
+              </td>
+              <td data-label="Trash">
+                <form method="post" action="/ui/trash" class="inline-form">
+                  <input type="hidden" name="file_token" value="{{ f.token }}" />
+                  <button type="submit" class="danger">Trash</button>
+                </form>
+              </td>
+              <td data-label="Move">
+                <button
+                  type="button"
+                  class="pill move-btn"
+                  data-file-token="{{ f.token }}"
+                  data-display-name="{{ f.display_name }}"
+                >
+                  Move
+                </button>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        </div>
+      {% else %}
+        <p class="muted">No files yet.</p>
+      {% endif %}
+    </div>
+  </div>
 </section>
 {% endblock %}
 
@@ -240,15 +296,93 @@
   </form>
 </dialog>
 
-<script>
-  const dialog = document.getElementById("moveDialog");
-  const moveFileId = document.getElementById("moveFileId");
-  const moveTitle = document.getElementById("moveTitle");
+<div class="context-menu" id="vaultCtxMenu" hidden role="menu" aria-label="Vault folder actions">
+  <div class="context-menu-header">
+    <div class="context-menu-title" id="vaultCtxTitle">Folder</div>
+    <button type="button" class="ghost context-menu-close" data-action="close" aria-label="Close menu">Esc</button>
+  </div>
+	  <div class="context-menu-body">
+	    <div class="context-menu-section">
+	      <div class="context-menu-kicker">Expand / collapse</div>
+	      <button type="button" class="context-menu-item" data-action="expand">Expand</button>
+	      <button type="button" class="context-menu-item" data-action="expand_children">Expand recursively</button>
+	      <button type="button" class="context-menu-item" data-action="collapse">Collapse</button>
+	      <button type="button" class="context-menu-item" data-action="collapse_children">Collapse recursively</button>
+	    </div>
+
+	    <div class="context-menu-sep" role="separator"></div>
+
+	    <div class="context-menu-section">
+	      <div class="context-menu-kicker">Path</div>
+	      <button type="button" class="context-menu-item" data-action="copy_path_slash">Copy folder path</button>
+	    </div>
+
+	    <div class="context-menu-sep" role="separator"></div>
+
+	    <div class="context-menu-section">
+	      <div class="context-menu-kicker">Create</div>
+	      <button type="button" class="context-menu-item" data-action="prefill_create">Set create-folder input</button>
+	      <button type="button" class="context-menu-item" data-action="new_subfolder">New subfolder here...</button>
+	    </div>
+
+	    <div class="context-menu-sep" role="separator"></div>
+
+	    <div class="context-menu-section">
+	      <div class="context-menu-kicker">Upload</div>
+	      <button type="button" class="context-menu-item" data-action="upload_here">Upload file here...</button>
+	    </div>
+
+	    <div class="context-menu-sep" role="separator"></div>
+
+	    <div class="context-menu-section">
+	      <div class="context-menu-kicker">Files</div>
+	      <button type="button" class="context-menu-item" data-action="filter_folder">Show files in this folder</button>
+	      <button type="button" class="context-menu-item" data-action="clear_folder_filter">Show all files</button>
+	    </div>
+
+	    <div class="context-menu-sep" role="separator"></div>
+
+	    <div class="context-menu-section">
+	      <div class="context-menu-kicker">Personalize</div>
+	      <button type="button" class="context-menu-item" data-action="pin_toggle" id="vaultCtxPinToggle">Pin folder</button>
+	    </div>
+	  </div>
+	</div>
+
+  <div class="context-menu context-menu-file" id="fileCtxMenu" hidden role="menu" aria-label="File actions">
+    <div class="context-menu-header">
+      <div class="context-menu-title" id="fileCtxTitle">File</div>
+      <button type="button" class="ghost context-menu-close" data-action="close" aria-label="Close menu">Esc</button>
+    </div>
+    <div class="context-menu-body">
+      <div class="context-menu-section">
+        <div class="context-menu-kicker">Actions</div>
+        <button type="button" class="context-menu-item" data-action="preview">Preview</button>
+        <button type="button" class="context-menu-item" data-action="download">Download (decrypt)</button>
+        <button type="button" class="context-menu-item" data-action="rename">Rename</button>
+        <button type="button" class="context-menu-item" data-action="move">Move</button>
+        <button type="button" class="context-menu-item danger" data-action="trash">Trash</button>
+      </div>
+
+      <div class="context-menu-sep" role="separator"></div>
+
+      <div class="context-menu-section">
+        <div class="context-menu-kicker">Path</div>
+        <button type="button" class="context-menu-item" data-action="copy_rel">Copy vault path</button>
+      </div>
+    </div>
+  </div>
+
+	<script>
+	  const dialog = document.getElementById("moveDialog");
+	  const moveFileId = document.getElementById("moveFileId");
+	  const moveTitle = document.getElementById("moveTitle");
   const moveSubtitle = document.getElementById("moveSubtitle");
   const cancelMove = document.getElementById("cancelMove");
   const moveFolderInput = document.getElementById("moveFolderInput");
   const treeRoot = document.getElementById("treeRoot");
-  const treeSummaries = document.querySelectorAll(".tree-summary");
+  const treeSummaries = dialog ? dialog.querySelectorAll(".tree-summary") : [];
+  const moveDialogTree = dialog ? dialog.querySelector(".tree") : null;
 
   const previewDialog = document.getElementById("previewDialog");
   const previewFrame = document.getElementById("previewFrame");
@@ -259,22 +393,16 @@
   const closePreview = document.getElementById("closePreview");
 
   const renameDialog = document.getElementById("renameDialog");
-  const renameFileId = document.getElementById("renameFileId");
-  const renameTitle = document.getElementById("renameTitle");
-  const renameInput = document.getElementById("renameInput");
-  const cancelRename = document.getElementById("cancelRename");
-  document.querySelectorAll(".move-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      moveFileId.value = btn.dataset.fileToken;
-      moveTitle.textContent = `Move ${btn.dataset.displayName || "file"}`;
-      moveSubtitle.textContent = "";
-      if (typeof dialog.showModal === "function") {
-        dialog.showModal();
-      } else {
-        dialog.setAttribute("open", "open");
-      }
-    });
-  });
+	  const renameFileId = document.getElementById("renameFileId");
+	  const renameTitle = document.getElementById("renameTitle");
+	  const renameInput = document.getElementById("renameInput");
+	  const cancelRename = document.getElementById("cancelRename");
+	  document.querySelectorAll(".move-btn").forEach((btn) => {
+	    btn.addEventListener("click", () => {
+	      const row = btn.closest("tr.file-row");
+	      openMoveByToken(btn.dataset.fileToken || "", btn.dataset.displayName || "file", row?.dataset.relPath || "");
+	    });
+	  });
 
   cancelMove.addEventListener("click", () => {
     if (typeof dialog.close === "function") {
@@ -286,7 +414,7 @@
 
   function setMoveFolder(value, el) {
     moveFolderInput.value = value || "";
-    document.querySelectorAll(".tree-summary.selected").forEach((n) => n.classList.remove("selected"));
+    (moveDialogTree || dialog || document).querySelectorAll(".tree-summary.selected").forEach((n) => n.classList.remove("selected"));
     if (el) el.classList.add("selected");
   }
 
@@ -296,17 +424,1024 @@
     item.addEventListener("click", () => setMoveFolder(item.dataset.folder, item));
   });
 
-  const fileFilter = document.getElementById("fileFilter");
-  const fileRows = document.querySelectorAll("#fileTable .file-row");
-  fileFilter?.addEventListener("input", () => {
-    const q = fileFilter.value.trim().toLowerCase();
-    fileRows.forEach((row) => {
-      row.hidden = q.length > 0 && !row.textContent.toLowerCase().includes(q);
+  function openMoveDialog(fileToken, displayName, folderPath) {
+    moveFileId.value = fileToken;
+    moveTitle.textContent = `Move ${displayName || "file"}`;
+    moveSubtitle.textContent = folderPath ? `Drop target: /${folderPath}` : "Drop target: /";
+    setMoveFolder(folderPath || "", null);
+    if (typeof dialog.showModal === "function") {
+      dialog.showModal();
+    } else {
+      dialog.setAttribute("open", "open");
+    }
+  }
+
+  // Drag and drop: drag a file onto a folder summary to auto-expand and prefill the move dialog.
+  const expandTimers = new WeakMap();
+
+  function clearExpandTimer(detailsEl) {
+    const t = expandTimers.get(detailsEl);
+    if (t) window.clearTimeout(t);
+    expandTimers.delete(detailsEl);
+  }
+
+  function scheduleExpand(detailsEl) {
+    if (!detailsEl || detailsEl.open) return;
+    if (detailsEl.dataset.hasChildren !== "1") return;
+    if (expandTimers.has(detailsEl)) return;
+    const t = window.setTimeout(() => {
+      detailsEl.open = true;
+      expandTimers.delete(detailsEl);
+    }, 420);
+    expandTimers.set(detailsEl, t);
+  }
+
+  function addFolderDropBehavior(el) {
+    if (!el) return;
+    el.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      try {
+        e.dataTransfer.dropEffect = "move";
+      } catch {}
+      el.classList.add("drag-over");
+      scheduleExpand(el.closest("details"));
     });
+
+    el.addEventListener("dragleave", () => {
+      el.classList.remove("drag-over");
+      clearExpandTimer(el.closest("details"));
+    });
+
+    el.addEventListener("drop", (e) => {
+      e.preventDefault();
+      el.classList.remove("drag-over");
+      clearExpandTimer(el.closest("details"));
+      const fileToken = (e.dataTransfer && e.dataTransfer.getData("application/x-filefort-file-token")) || "";
+      const displayName = (e.dataTransfer && e.dataTransfer.getData("application/x-filefort-display-name")) || "";
+      if (!fileToken) return;
+      const folderPath = el.dataset.folder || "";
+      openMoveDialog(fileToken, displayName, folderPath);
+    });
+  }
+
+  // Drag handles on the file list.
+  document.querySelectorAll(".file-drag-handle[draggable='true']").forEach((handle) => {
+    handle.addEventListener("dragstart", (e) => {
+      const token = handle.dataset.fileToken || "";
+      const name = handle.dataset.displayName || "";
+      if (!token || !e.dataTransfer) return;
+      e.dataTransfer.setData("application/x-filefort-file-token", token);
+      e.dataTransfer.setData("application/x-filefort-display-name", name);
+      e.dataTransfer.setData("text/plain", token);
+      e.dataTransfer.effectAllowed = "move";
+      handle.classList.add("dragging");
+    });
+    handle.addEventListener("dragend", () => handle.classList.remove("dragging"));
   });
 
-  const fileTable = document.getElementById("fileTable");
-  if (fileTable) {
+  // Drop targets: move dialog folder tree + the vault structure tree.
+  addFolderDropBehavior(treeRoot);
+  treeSummaries.forEach(addFolderDropBehavior);
+	  document.querySelectorAll("#vaultTree .tree-root-drop").forEach(addFolderDropBehavior);
+	  document.querySelectorAll("#vaultTree .tree-summary").forEach(addFolderDropBehavior);
+	
+	  function normalizeRelPath(value) {
+	    return (value || "")
+	      .trim()
+	      .replace(/\\/g, "/")
+	      .replace(/^\/+/, "")
+	      .replace(/\/{2,}/g, "/")
+	      .replace(/\/+$/, "");
+	  }
+	
+	  function joinRelPath(base, tail) {
+	    const a = normalizeRelPath(base);
+	    const b = normalizeRelPath(tail);
+	    if (!a) return b;
+	    if (!b) return a;
+	    return `${a}/${b}`;
+	  }
+	
+	  async function copyToClipboard(text) {
+	    const payload = String(text || "");
+	    try {
+	      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+	        await navigator.clipboard.writeText(payload);
+	        return true;
+	      }
+	    } catch {}
+	    try {
+	      window.prompt("Copy to clipboard:", payload);
+	      return true;
+	    } catch {
+	      return false;
+	    }
+	  }
+	
+		  const fileFilter = document.getElementById("fileFilter");
+		  const fileRows = document.querySelectorAll("#fileTable .file-row");
+		  const fileTable = document.getElementById("fileTable");
+		  const explorerPath = document.getElementById("explorerPath");
+		  const explorerClearFilter = document.getElementById("explorerClearFilter");
+		  const fileRowByToken = new Map();
+		  const fileTokenByRelPath = new Map();
+		  fileRows.forEach((row) => {
+		    const token = row.dataset.fileToken || "";
+		    const rel = normalizeRelPath(row.dataset.relPath || "");
+	    if (token) fileRowByToken.set(token, row);
+	    if (token && rel) fileTokenByRelPath.set(rel, token);
+	  });
+	  const FILE_FOLDER_FILTER_KEY = "pfv-vault-folder-filter";
+		  let activeFolderFilter = "";
+		  try {
+		    activeFolderFilter = normalizeRelPath(localStorage.getItem(FILE_FOLDER_FILTER_KEY) || "");
+		  } catch {}
+		
+		  function updateExplorerFolderUi() {
+		    const folder = normalizeRelPath(activeFolderFilter);
+		    if (explorerPath) {
+		      explorerPath.textContent = folder ? `Showing: /${folder}` : "Showing: /";
+		    }
+		    if (explorerClearFilter) explorerClearFilter.hidden = !folder;
+		  }
+		
+		  function applyFileFilters() {
+		    const q = (fileFilter?.value || "").trim().toLowerCase();
+		    const folder = normalizeRelPath(activeFolderFilter);
+	    fileRows.forEach((row) => {
+	      const relPath = normalizeRelPath(row.dataset.relPath || "");
+	      let matches = true;
+	      if (folder) {
+	        matches = relPath.startsWith(`${folder}/`);
+	      }
+	      if (matches && q) {
+	        const content = `${row.textContent || ""} ${relPath}`.toLowerCase();
+	        matches = content.includes(q);
+	      }
+	      row.hidden = !matches;
+	    });
+	    if (fileFilter) {
+	      fileFilter.placeholder = folder ? `Search files in /${folder}...` : "Search files...";
+	    }
+	  }
+	
+		  fileFilter?.addEventListener("input", applyFileFilters);
+		  applyFileFilters();
+		  explorerClearFilter?.addEventListener("click", () => selectVaultFolder(""));
+		
+		  const vaultTree = document.getElementById("vaultTree");
+		  const vaultPinsWrap = document.getElementById("vaultTreePins");
+		  const vaultPinsList = document.getElementById("vaultPinsList");
+	  const vaultPinsClear = document.getElementById("vaultPinsClear");
+	  const vaultCtxMenu = document.getElementById("vaultCtxMenu");
+	  const vaultCtxTitle = document.getElementById("vaultCtxTitle");
+	  const vaultCtxPinToggle = document.getElementById("vaultCtxPinToggle");
+	  const fileCtxMenu = document.getElementById("fileCtxMenu");
+	  const fileCtxTitle = document.getElementById("fileCtxTitle");
+	  const createFolderForm = document.querySelector("form[action='/ui/folder']");
+	  const createFolderInput = createFolderForm?.querySelector("input[name='folder']");
+	  const uploadForm = document.querySelector("form[action='/ui/upload']");
+	  const uploadFolderInput = uploadForm?.querySelector("input[name='folder']");
+	  const uploadFileInput = uploadForm?.querySelector("input[type='file'][name='file']");
+	  const OPEN_STATE_KEY = "pfv-vault-tree-open";
+	  const PINNED_KEY = "pfv-vault-tree-pins";
+	  const UPLOAD_FOLDER_KEY = "pfv-vault-upload-folder";
+	  const CTX_TARGET_CLASS = "ctx-target";
+	  const FILE_CTX_TARGET_CLASS = "ctx-file-target";
+	  let ctxState = null;
+	  let fileCtxState = null;
+	  let pinnedFolders = [];
+	
+	  function loadPinned() {
+	    try {
+	      const raw = localStorage.getItem(PINNED_KEY);
+	      const parsed = raw ? JSON.parse(raw) : [];
+	      if (Array.isArray(parsed)) {
+	        pinnedFolders = parsed.map((p) => normalizeRelPath(p)).filter(Boolean);
+	      } else {
+	        pinnedFolders = [];
+	      }
+	    } catch {
+	      pinnedFolders = [];
+	    }
+	  }
+	
+	  function savePinned() {
+	    try {
+	      localStorage.setItem(PINNED_KEY, JSON.stringify(pinnedFolders));
+	    } catch {}
+	  }
+	
+	  function renderPins() {
+	    if (!vaultPinsWrap || !vaultPinsList) return;
+	    vaultPinsList.innerHTML = "";
+	    const unique = Array.from(new Set(pinnedFolders)).filter(Boolean);
+	    pinnedFolders = unique;
+	    if (!unique.length) {
+	      vaultPinsWrap.hidden = true;
+	      return;
+	    }
+	    vaultPinsWrap.hidden = false;
+	    unique.forEach((path) => {
+	      const btn = document.createElement("button");
+	      btn.type = "button";
+	      btn.className = "tree-pin";
+	      btn.dataset.folder = path;
+	      btn.title = `Jump to /${path}`;
+	      const last = path.split("/").filter(Boolean).pop() || path;
+	      btn.textContent = last;
+	      btn.addEventListener("click", () => {
+	        jumpToFolder(path);
+	      });
+	      vaultPinsList.appendChild(btn);
+	    });
+	  }
+	
+	  function collectOpenFolders() {
+	    if (!vaultTree) return [];
+	    const open = [];
+	    vaultTree.querySelectorAll("details.tree-node[open]").forEach((details) => {
+	      const summary = details.querySelector("summary.tree-summary");
+	      const path = summary?.dataset.folder || "";
+	      if (path) open.push(path);
+	    });
+	    return open;
+	  }
+	
+	  function persistOpenFolders() {
+	    try {
+	      localStorage.setItem(OPEN_STATE_KEY, JSON.stringify(collectOpenFolders()));
+	    } catch {}
+	  }
+	
+	  function restoreOpenFolders() {
+	    if (!vaultTree) return;
+	    let open = [];
+	    try {
+	      const raw = localStorage.getItem(OPEN_STATE_KEY);
+	      const parsed = raw ? JSON.parse(raw) : [];
+	      if (Array.isArray(parsed)) open = parsed.map((p) => normalizeRelPath(p)).filter(Boolean);
+	    } catch {}
+	    if (!open.length) return;
+	    const openSet = new Set(open);
+	    vaultTree.querySelectorAll("details.tree-node").forEach((details) => {
+	      const summary = details.querySelector("summary.tree-summary");
+	      const path = normalizeRelPath(summary?.dataset.folder || "");
+	      if (path && openSet.has(path)) {
+	        details.open = true;
+	      }
+	    });
+	  }
+	
+	  function closeAllFolders() {
+	    if (!vaultTree) return;
+	    vaultTree.querySelectorAll("details.tree-node").forEach((d) => {
+	      d.open = false;
+	    });
+	  }
+	
+	  function openToDepth(detailsEl, depth) {
+	    if (!detailsEl) return;
+	    detailsEl.open = true;
+	    if (depth <= 0) return;
+	    const wrap = Array.from(detailsEl.children).find((el) => el.classList && el.classList.contains("tree-children"));
+	    if (!wrap) return;
+	    Array.from(wrap.children).forEach((child) => {
+	      if (child && child.tagName === "DETAILS" && child.classList.contains("tree-node")) {
+	        openToDepth(child, depth - 1);
+	      }
+	    });
+	  }
+	
+	  function cssEscape(value) {
+	    const raw = String(value || "");
+	    try {
+	      if (window.CSS && typeof CSS.escape === "function") return CSS.escape(raw);
+	    } catch {}
+	    return raw.replace(/[\"\\]/g, "\\$&");
+	  }
+	
+	  function openAncestors(path) {
+	    if (!vaultTree) return;
+	    const normalized = normalizeRelPath(path);
+	    if (!normalized) return;
+	    const parts = normalized.split("/").filter(Boolean);
+	    let prefix = "";
+	    for (const part of parts) {
+	      prefix = prefix ? `${prefix}/${part}` : part;
+	      const summary = vaultTree.querySelector(`.tree-summary[data-folder="${cssEscape(prefix)}"]`);
+	      const details = summary?.closest("details.tree-node");
+	      if (details) details.open = true;
+	    }
+	  }
+	
+	  function jumpToFolder(path) {
+	    if (!vaultTree) return;
+	    const normalized = normalizeRelPath(path);
+	    if (!normalized) return;
+	    openAncestors(normalized);
+	    const summary = vaultTree.querySelector(`.tree-summary[data-folder="${cssEscape(normalized)}"]`);
+	    if (!summary) return;
+	    summary.scrollIntoView({ block: "center", behavior: "smooth" });
+	    summary.classList.add("pulse");
+	    window.setTimeout(() => summary.classList.remove("pulse"), 650);
+	  }
+
+	  function dirnameRelPath(relPath) {
+	    const normalized = normalizeRelPath(relPath);
+	    if (!normalized) return "";
+	    const idx = normalized.lastIndexOf("/");
+	    return idx >= 0 ? normalized.slice(0, idx) : "";
+	  }
+
+	  function setVaultSelection(path) {
+	    if (!vaultTree) return;
+	    const normalized = normalizeRelPath(path);
+	    vaultTree.querySelectorAll(".tree-summary.vault-selected").forEach((el) => el.classList.remove("vault-selected"));
+	    vaultTree.querySelectorAll(".tree-root-drop.vault-selected").forEach((el) => el.classList.remove("vault-selected"));
+	    if (!normalized) {
+	      const rootEl = vaultTree.querySelector(".tree-root-drop");
+	      if (rootEl) rootEl.classList.add("vault-selected");
+	      return;
+	    }
+	    const summary = vaultTree.querySelector(`.tree-summary[data-folder="${cssEscape(normalized)}"]`);
+	    if (summary) summary.classList.add("vault-selected");
+	  }
+
+		  function selectVaultFolder(path, { persist = true, ensureVisible = true } = {}) {
+		    const normalized = normalizeRelPath(path);
+		    activeFolderFilter = normalized;
+		    try {
+	      if (!persist) {
+	        // no-op
+	      } else if (normalized) {
+	        localStorage.setItem(FILE_FOLDER_FILTER_KEY, normalized);
+	      } else {
+	        localStorage.removeItem(FILE_FOLDER_FILTER_KEY);
+	      }
+	    } catch {}
+		    if (normalized && ensureVisible) openAncestors(normalized);
+		    applyFileFilters();
+		    setVaultSelection(normalized);
+		    updateExplorerFolderUi();
+		  }
+
+	  function flashRow(row) {
+	    if (!row) return;
+	    row.classList.remove("reveal");
+	    // Force reflow so the animation can re-trigger.
+	    void row.offsetWidth;
+	    row.classList.add("reveal");
+	    window.setTimeout(() => row.classList.remove("reveal"), 650);
+	  }
+
+	  function revealFileByToken(token) {
+	    const row = fileRowByToken.get(token);
+	    if (!row) return;
+	    const rel = normalizeRelPath(row.dataset.relPath || "");
+	    const folder = dirnameRelPath(rel);
+	    if (fileFilter) fileFilter.value = "";
+	    selectVaultFolder(folder);
+	    row.hidden = false;
+	    row.scrollIntoView({ block: "center", behavior: "smooth" });
+	    flashRow(row);
+	  }
+
+	  function setCtxHighlight(el) {
+	    document.querySelectorAll(`.${CTX_TARGET_CLASS}`).forEach((n) => n.classList.remove(CTX_TARGET_CLASS));
+	    if (el) el.classList.add(CTX_TARGET_CLASS);
+	  }
+	
+	  function setFileCtxHighlight(el) {
+	    document
+	      .querySelectorAll(`.${FILE_CTX_TARGET_CLASS}`)
+	      .forEach((n) => n.classList.remove(FILE_CTX_TARGET_CLASS));
+	    if (el) el.classList.add(FILE_CTX_TARGET_CLASS);
+	  }
+	
+	  function closeCtxMenu() {
+	    if (!vaultCtxMenu) return;
+	    vaultCtxMenu.hidden = true;
+	    vaultCtxMenu.style.left = "";
+	    vaultCtxMenu.style.top = "";
+	    ctxState = null;
+	    setCtxHighlight(null);
+	    document.removeEventListener("mousedown", onCtxDocMouseDown, true);
+	    document.removeEventListener("keydown", onCtxKeyDown, true);
+	  }
+	
+	  function closeFileCtxMenu() {
+	    if (!fileCtxMenu) return;
+	    fileCtxMenu.hidden = true;
+	    fileCtxMenu.style.left = "";
+	    fileCtxMenu.style.top = "";
+	    fileCtxState = null;
+	    setFileCtxHighlight(null);
+	    document.removeEventListener("mousedown", onFileCtxDocMouseDown, true);
+	    document.removeEventListener("keydown", onFileCtxKeyDown, true);
+	  }
+	
+	  function onCtxDocMouseDown(e) {
+	    if (!vaultCtxMenu || vaultCtxMenu.hidden) return;
+	    if (e.target instanceof Element && vaultCtxMenu.contains(e.target)) return;
+	    closeCtxMenu();
+	  }
+	
+	  function onFileCtxDocMouseDown(e) {
+	    if (!fileCtxMenu || fileCtxMenu.hidden) return;
+	    if (e.target instanceof Element && fileCtxMenu.contains(e.target)) return;
+	    closeFileCtxMenu();
+	  }
+	
+	  function onCtxKeyDown(e) {
+	    if (e.key === "Escape") closeCtxMenu();
+	  }
+	
+	  function onFileCtxKeyDown(e) {
+	    if (e.key === "Escape") closeFileCtxMenu();
+	  }
+	
+	  function openCtxMenu({ anchorEl, path, clientX, clientY }) {
+	    if (!vaultCtxMenu || !vaultCtxTitle) return;
+	    closeFileCtxMenu();
+	    ctxState = {
+	      path: normalizeRelPath(path),
+	      anchorEl,
+	      detailsEl: anchorEl?.closest ? anchorEl.closest("details.tree-node") : null,
+	    };
+	    setCtxHighlight(anchorEl);
+	    const display = ctxState.path ? `/${ctxState.path}` : "/";
+	    vaultCtxTitle.textContent = display;
+	    if (vaultCtxPinToggle) {
+	      const canPin = !!ctxState.path;
+	      vaultCtxPinToggle.disabled = !canPin;
+	      const pinned = canPin && pinnedFolders.includes(ctxState.path);
+	      vaultCtxPinToggle.textContent = pinned ? "Unpin folder" : "Pin folder";
+	    }
+	
+	    vaultCtxMenu.hidden = false;
+	    vaultCtxMenu.style.left = `${clientX}px`;
+	    vaultCtxMenu.style.top = `${clientY}px`;
+	
+	    requestAnimationFrame(() => {
+	      const rect = vaultCtxMenu.getBoundingClientRect();
+	      const pad = 10;
+	      const maxLeft = Math.max(pad, window.innerWidth - rect.width - pad);
+	      const maxTop = Math.max(pad, window.innerHeight - rect.height - pad);
+	      const left = Math.min(Math.max(clientX, pad), maxLeft);
+	      const top = Math.min(Math.max(clientY, pad), maxTop);
+	      vaultCtxMenu.style.left = `${left}px`;
+	      vaultCtxMenu.style.top = `${top}px`;
+	    });
+	
+	    document.addEventListener("mousedown", onCtxDocMouseDown, true);
+	    document.addEventListener("keydown", onCtxKeyDown, true);
+	  }
+	
+	  function openFileCtxMenu({ anchorEl, token, relPath, displayName, clientX, clientY }) {
+	    if (!fileCtxMenu || !fileCtxTitle) return;
+	    closeCtxMenu();
+	    const safeToken = String(token || "");
+	    const safeRel = normalizeRelPath(relPath);
+	    if (!safeToken) return;
+	
+	    fileCtxState = {
+	      token: safeToken,
+	      relPath: safeRel,
+	      displayName: String(displayName || ""),
+	      anchorEl,
+	    };
+	    setFileCtxHighlight(anchorEl);
+	    fileCtxTitle.textContent = fileCtxState.displayName || (safeRel.split("/").pop() || "File");
+	    fileCtxMenu.hidden = false;
+	    fileCtxMenu.style.left = `${clientX}px`;
+	    fileCtxMenu.style.top = `${clientY}px`;
+	
+	    requestAnimationFrame(() => {
+	      const rect = fileCtxMenu.getBoundingClientRect();
+	      const pad = 10;
+	      const maxLeft = Math.max(pad, window.innerWidth - rect.width - pad);
+	      const maxTop = Math.max(pad, window.innerHeight - rect.height - pad);
+	      const left = Math.min(Math.max(clientX, pad), maxLeft);
+	      const top = Math.min(Math.max(clientY, pad), maxTop);
+	      fileCtxMenu.style.left = `${left}px`;
+	      fileCtxMenu.style.top = `${top}px`;
+	    });
+	
+	    document.addEventListener("mousedown", onFileCtxDocMouseDown, true);
+	    document.addEventListener("keydown", onFileCtxKeyDown, true);
+	  }
+	
+	  function submitCreateFolder(path) {
+	    const target = normalizeRelPath(path);
+	    if (!createFolderForm || !createFolderInput) return;
+	    createFolderInput.value = target;
+	    if (typeof createFolderForm.requestSubmit === "function") {
+	      createFolderForm.requestSubmit();
+	    } else {
+	      createFolderForm.submit();
+	    }
+	  }
+	
+	  function prefillUploadFolder(path) {
+	    const target = normalizeRelPath(path);
+	    if (uploadFolderInput) uploadFolderInput.value = target;
+	    try {
+	      localStorage.setItem(UPLOAD_FOLDER_KEY, target);
+	    } catch {}
+	  }
+	
+	  function restoreUploadFolder() {
+	    if (!uploadFolderInput) return;
+	    try {
+	      const stored = normalizeRelPath(localStorage.getItem(UPLOAD_FOLDER_KEY) || "");
+	      if (stored) uploadFolderInput.value = stored;
+	    } catch {}
+	  }
+	
+	  function resetUploadFolder() {
+	    if (uploadFolderInput) uploadFolderInput.value = "";
+	    try {
+	      localStorage.removeItem(UPLOAD_FOLDER_KEY);
+	    } catch {}
+	  }
+	
+	  if (vaultPinsClear) {
+	    vaultPinsClear.addEventListener("click", () => {
+	      pinnedFolders = [];
+	      savePinned();
+	      renderPins();
+	    });
+	  }
+	
+	  if (vaultTree) {
+	    restoreOpenFolders();
+	    vaultTree.querySelectorAll("details.tree-node").forEach((details) => {
+	      details.addEventListener("toggle", () => persistOpenFolders());
+	    });
+	  }
+	
+	  if (vaultTree && vaultCtxMenu) {
+	    loadPinned();
+	    renderPins();
+	    restoreUploadFolder();
+	    selectVaultFolder(activeFolderFilter, { persist: false });
+	
+	    vaultTree.addEventListener("contextmenu", (e) => {
+	      if (!(e.target instanceof Element)) return;
+	      const fileEl = e.target.closest(".tree-file");
+	      if (fileEl) {
+	        const rel = normalizeRelPath(fileEl.dataset.relPath || "");
+	        const token = fileTokenByRelPath.get(rel) || "";
+	        if (token) {
+	          e.preventDefault();
+	          openFileCtxMenu({
+	            anchorEl: fileEl,
+	            token,
+	            relPath: rel,
+	            displayName: fileEl.textContent || rel.split("/").pop() || "file",
+	            clientX: e.clientX,
+	            clientY: e.clientY,
+	          });
+	          return;
+	        }
+	      }
+	      const target =
+	        e.target.closest(".tree-summary[data-folder]") ||
+	        e.target.closest(".tree-root-drop") ||
+	        vaultTree.querySelector(".tree-root-drop");
+	      if (!target) return;
+	      e.preventDefault();
+	      openCtxMenu({
+	        anchorEl: target,
+	        path: target.dataset.folder || "",
+	        clientX: e.clientX,
+	        clientY: e.clientY,
+	      });
+	    });
+	
+	    vaultCtxMenu.addEventListener("click", async (e) => {
+	      const btn = e.target instanceof Element ? e.target.closest("button[data-action]") : null;
+	      if (!btn || !ctxState) return;
+	      const action = btn.dataset.action || "";
+	      const path = normalizeRelPath(ctxState.path);
+	      const detailsEl = ctxState.detailsEl;
+	
+	      if (action === "close") {
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "focus") {
+	        closeAllFolders();
+	        if (path) {
+	          openAncestors(path);
+	          if (detailsEl) detailsEl.open = true;
+	        }
+	        persistOpenFolders();
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "expand") {
+	        if (detailsEl) {
+	          detailsEl.open = true;
+	        } else if (vaultTree) {
+	          Array.from(vaultTree.children).forEach((child) => {
+	            if (child && child.tagName === "DETAILS" && child.classList.contains("tree-node")) {
+	              child.open = true;
+	            }
+	          });
+	        }
+	        persistOpenFolders();
+	        closeCtxMenu();
+	        return;
+	      }
+
+	      if (action === "collapse") {
+	        if (detailsEl) {
+	          detailsEl.open = false;
+	        } else {
+	          closeAllFolders();
+	        }
+	        persistOpenFolders();
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "toggle") {
+	        if (detailsEl) detailsEl.open = !detailsEl.open;
+	        persistOpenFolders();
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "expand_children") {
+	        if (detailsEl) {
+	          detailsEl.open = true;
+	          detailsEl.querySelectorAll("details.tree-node").forEach((d) => (d.open = true));
+	        } else if (vaultTree) {
+	          vaultTree.querySelectorAll("details.tree-node").forEach((d) => (d.open = true));
+	        }
+	        persistOpenFolders();
+	        closeCtxMenu();
+	        return;
+	      }
+
+	      if (action === "collapse_children") {
+	        if (detailsEl) {
+	          detailsEl.querySelectorAll("details.tree-node").forEach((d) => (d.open = false));
+	          detailsEl.open = false;
+	        } else {
+	          closeAllFolders();
+	        }
+	        persistOpenFolders();
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "expand_siblings" || action === "collapse_siblings") {
+	        if (detailsEl && detailsEl.parentElement) {
+	          Array.from(detailsEl.parentElement.children).forEach((el) => {
+	            if (el && el.tagName === "DETAILS" && el.classList.contains("tree-node")) {
+	              el.open = action === "expand_siblings";
+	            }
+	          });
+	          detailsEl.open = true;
+	        }
+	        persistOpenFolders();
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "expand_depth_2" || action === "expand_depth_3") {
+	        const depth = action === "expand_depth_2" ? 2 : 3;
+	        if (detailsEl) {
+	          openToDepth(detailsEl, depth);
+	        } else if (vaultTree) {
+	          // Root request: expand the whole tree to a given depth.
+	          Array.from(vaultTree.children).forEach((top) => {
+	            if (top && top.tagName === "DETAILS" && top.classList.contains("tree-node")) {
+	              openToDepth(top, depth - 1);
+	            }
+	          });
+	        }
+	        persistOpenFolders();
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "expand_all") {
+	        if (vaultTree) vaultTree.querySelectorAll("details.tree-node").forEach((d) => (d.open = true));
+	        persistOpenFolders();
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "collapse_all") {
+	        closeAllFolders();
+	        persistOpenFolders();
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "copy_path") {
+	        await copyToClipboard(path || "/");
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "copy_path_slash") {
+	        await copyToClipboard(path ? `/${path}` : "/");
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "copy_find_cmd") {
+	        const cmd = path ? `tree \"${path}\" 3` : "tree / 3";
+	        await copyToClipboard(cmd);
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "prefill_create") {
+	        if (createFolderInput) {
+	          createFolderInput.value = path ? `${path}/` : "";
+	          createFolderInput.focus();
+	          createFolderInput.setSelectionRange(createFolderInput.value.length, createFolderInput.value.length);
+	          createFolderInput.scrollIntoView({ block: "center", behavior: "smooth" });
+	        }
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "new_subfolder") {
+	        const name = normalizeRelPath(window.prompt("Subfolder name:", "") || "");
+	        if (name) {
+	          submitCreateFolder(joinRelPath(path, name));
+	        }
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "new_path") {
+	        const suggested = path ? `${path}/` : "";
+	        const full = normalizeRelPath(window.prompt("Folder path (relative to your vault):", suggested) || "");
+	        if (full) submitCreateFolder(full);
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "prefill_upload") {
+	        prefillUploadFolder(path);
+	        uploadForm?.scrollIntoView({ block: "center", behavior: "smooth" });
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "upload_here") {
+	        prefillUploadFolder(path);
+	        uploadForm?.scrollIntoView({ block: "center", behavior: "smooth" });
+	        if (uploadFileInput) uploadFileInput.click();
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "reset_upload") {
+	        resetUploadFolder();
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "filter_folder") {
+	        selectVaultFolder(path);
+	        fileTable?.scrollIntoView({ block: "start", behavior: "smooth" });
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "clear_folder_filter") {
+	        selectVaultFolder("");
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "clear_search") {
+	        if (fileFilter) fileFilter.value = "";
+	        applyFileFilters();
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "pin_toggle") {
+	        if (!path) {
+	          closeCtxMenu();
+	          return;
+	        }
+	        const idx = pinnedFolders.indexOf(path);
+	        if (idx >= 0) {
+	          pinnedFolders.splice(idx, 1);
+	        } else {
+	          pinnedFolders.push(path);
+	        }
+	        savePinned();
+	        renderPins();
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "pins_clear") {
+	        pinnedFolders = [];
+	        savePinned();
+	        renderPins();
+	        closeCtxMenu();
+	        return;
+	      }
+	
+	      if (action === "open_state_clear") {
+	        try {
+	          localStorage.removeItem(OPEN_STATE_KEY);
+	        } catch {}
+	        closeAllFolders();
+	        persistOpenFolders();
+	        closeCtxMenu();
+	        return;
+	      }
+	    });
+	
+	    // Drag files from the tree itself.
+	    vaultTree.addEventListener("dragstart", (e) => {
+	      if (!(e.target instanceof Element) || !e.dataTransfer) return;
+	      const fileEl = e.target.closest(".tree-file[draggable='true']");
+	      if (!fileEl) return;
+	      const rel = normalizeRelPath(fileEl.dataset.relPath || "");
+	      const token = fileTokenByRelPath.get(rel) || "";
+	      if (!token) return;
+	      e.dataTransfer.setData("application/x-filefort-file-token", token);
+	      e.dataTransfer.setData("application/x-filefort-display-name", fileEl.textContent || rel.split("/").pop() || "file");
+	      e.dataTransfer.setData("text/plain", token);
+	      e.dataTransfer.effectAllowed = "move";
+	      fileEl.classList.add("dragging");
+	    });
+	
+	    vaultTree.addEventListener("dragend", (e) => {
+	      if (!(e.target instanceof Element)) return;
+	      const fileEl = e.target.closest(".tree-file.dragging");
+	      if (fileEl) fileEl.classList.remove("dragging");
+	    });
+	
+	    // Left click binds the folder selection to the file list.
+	    vaultTree.addEventListener("click", (e) => {
+	      if (!(e.target instanceof Element)) return;
+	      const fileEl = e.target.closest(".tree-file");
+	      if (fileEl) {
+	        const rel = normalizeRelPath(fileEl.dataset.relPath || "");
+	        const token = fileTokenByRelPath.get(rel) || "";
+	        if (token) revealFileByToken(token);
+	        return;
+	      }
+	      const folderEl = e.target.closest(".tree-summary[data-folder]");
+	      if (folderEl) {
+	        selectVaultFolder(folderEl.dataset.folder || "", { ensureVisible: false });
+	        return;
+	      }
+	      const rootEl = e.target.closest(".tree-root-drop");
+	      if (rootEl) {
+	        selectVaultFolder("", { ensureVisible: false });
+	      }
+	    });
+	
+	    // Double click on a file in the tree opens the preview dialog.
+	    vaultTree.addEventListener("dblclick", (e) => {
+	      if (!(e.target instanceof Element)) return;
+	      const fileEl = e.target.closest(".tree-file");
+	      if (!fileEl) return;
+	      const rel = normalizeRelPath(fileEl.dataset.relPath || "");
+	      const token = fileTokenByRelPath.get(rel) || "";
+	      if (!token) return;
+	      const row = fileRowByToken.get(token);
+	      const displayName = (row && row.dataset.displayName) || fileEl.textContent || rel.split("/").pop() || "file";
+	      openPreviewByToken(token, displayName);
+	    });
+	  }
+	
+	  function openPreviewByToken(token, displayName) {
+	    const url = `/ui/preview/${token}?v=${Date.now()}`;
+	    previewTitle.textContent = `Preview ${displayName || "file"}`;
+	    previewSubtitle.textContent = "";
+	    previewOpen.href = url;
+	    previewDownload.href = `/ui/files/${token}?v=${Date.now()}`;
+	    previewFrame.src = url;
+	    if (typeof previewDialog.showModal === "function") {
+	      previewDialog.showModal();
+	    } else {
+	      previewDialog.setAttribute("open", "open");
+	    }
+	  }
+	
+	  function openRenameByToken(token, displayName) {
+	    renameFileId.value = token;
+	    renameTitle.textContent = `Rename ${displayName || "file"}`;
+	    renameInput.value = "";
+	    if (typeof renameDialog.showModal === "function") {
+	      renameDialog.showModal();
+	    } else {
+	      renameDialog.setAttribute("open", "open");
+	    }
+	    renameInput.focus();
+	    renameInput.select();
+	  }
+	
+	  function openMoveByToken(token, displayName, relPath) {
+	    const folder = dirnameRelPath(relPath);
+	    openMoveDialog(token, displayName, folder);
+	  }
+	
+	  function submitTrashByToken(token) {
+	    const row = fileRowByToken.get(token);
+	    if (!row) return;
+	    const form = row.querySelector("form[action='/ui/trash']");
+	    if (!form) return;
+	    if (!window.confirm("Move this file to trash?")) return;
+	    if (typeof form.requestSubmit === "function") {
+	      form.requestSubmit();
+	    } else {
+	      form.submit();
+	    }
+	  }
+
+	  if (fileTable && fileCtxMenu) {
+	    fileTable.addEventListener("contextmenu", (e) => {
+	      if (!(e.target instanceof Element)) return;
+	      const row = e.target.closest("tr.file-row");
+	      if (!row) return;
+	      const token = row.dataset.fileToken || "";
+	      if (!token) return;
+	      e.preventDefault();
+	      openFileCtxMenu({
+	        anchorEl: row,
+	        token,
+	        relPath: row.dataset.relPath || "",
+	        displayName: row.dataset.displayName || row.textContent || "file",
+	        clientX: e.clientX,
+	        clientY: e.clientY,
+	      });
+	    });
+	  }
+
+	  if (fileCtxMenu) {
+	    fileCtxMenu.addEventListener("click", async (e) => {
+	      const btn = e.target instanceof Element ? e.target.closest("button[data-action]") : null;
+	      if (!btn || !fileCtxState) return;
+	      const action = btn.dataset.action || "";
+	      const token = String(fileCtxState.token || "");
+	      const relPath = normalizeRelPath(fileCtxState.relPath || "");
+	      const displayName = String(fileCtxState.displayName || "");
+
+	      if (action === "close") {
+	        closeFileCtxMenu();
+	        return;
+	      }
+
+	      if (action === "preview") {
+	        openPreviewByToken(token, displayName);
+	        closeFileCtxMenu();
+	        return;
+	      }
+
+	      if (action === "download") {
+	        window.open(`/ui/files/${token}?v=${Date.now()}`, "_blank", "noopener");
+	        closeFileCtxMenu();
+	        return;
+	      }
+
+	      if (action === "rename") {
+	        openRenameByToken(token, displayName);
+	        closeFileCtxMenu();
+	        return;
+	      }
+
+	      if (action === "move") {
+	        openMoveByToken(token, displayName, relPath);
+	        closeFileCtxMenu();
+	        return;
+	      }
+
+	      if (action === "trash") {
+	        submitTrashByToken(token);
+	        closeFileCtxMenu();
+	        return;
+	      }
+
+	      if (action === "copy_rel") {
+	        await copyToClipboard(relPath ? `/${relPath}` : "/");
+	        closeFileCtxMenu();
+	        return;
+	      }
+	    });
+	  }
+
+	  if (fileTable) {
     const headers = fileTable.querySelectorAll("th.resizable");
     headers.forEach((th) => {
       const handle = document.createElement("span");
@@ -342,21 +1477,11 @@
     });
   }
 
-  document.querySelectorAll(".preview-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const url = `/ui/preview/${btn.dataset.fileToken}?v=${Date.now()}`;
-      previewTitle.textContent = `Preview ${btn.dataset.displayName || "file"}`;
-      previewSubtitle.textContent = "";
-      previewOpen.href = url;
-      previewDownload.href = `/ui/files/${btn.dataset.fileToken}?v=${Date.now()}`;
-      previewFrame.src = url;
-      if (typeof previewDialog.showModal === "function") {
-        previewDialog.showModal();
-      } else {
-        previewDialog.setAttribute("open", "open");
-      }
-    });
-  });
+	  document.querySelectorAll(".preview-btn").forEach((btn) => {
+	    btn.addEventListener("click", () => {
+	      openPreviewByToken(btn.dataset.fileToken || "", btn.dataset.displayName || "file");
+	    });
+	  });
 
   closePreview.addEventListener("click", () => {
     previewFrame.src = "";
@@ -367,20 +1492,11 @@
     }
   });
 
-  document.querySelectorAll(".rename-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      renameFileId.value = btn.dataset.fileToken;
-      renameTitle.textContent = `Rename ${btn.dataset.displayName || "file"}`;
-      renameInput.value = "";
-      if (typeof renameDialog.showModal === "function") {
-        renameDialog.showModal();
-      } else {
-        renameDialog.setAttribute("open", "open");
-      }
-      renameInput.focus();
-      renameInput.select();
-    });
-  });
+	  document.querySelectorAll(".rename-btn").forEach((btn) => {
+	    btn.addEventListener("click", () => {
+	      openRenameByToken(btn.dataset.fileToken || "", btn.dataset.displayName || "file");
+	    });
+	  });
 
   cancelRename.addEventListener("click", () => {
     if (typeof renameDialog.close === "function") {

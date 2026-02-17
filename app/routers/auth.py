@@ -22,7 +22,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.post("/register", response_model=UserOut)
-def register(payload: UserCreate, db: Session = Depends(get_db)):
+def register(payload: UserCreate, request: Request, db: Session = Depends(get_db)):
     existing = db.query(User).filter(User.username == payload.username).first()
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already exists")
@@ -37,38 +37,74 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
     ensure_user_key(db, user)
-    add_audit_log(db, user=user, event_type="account.registered", details="Account created via API registration.")
+    add_audit_log(
+        db,
+        user=user,
+        event_type="account.registered",
+        details="Account created via API registration.",
+        request=request,
+    )
     if user.is_admin:
-        add_audit_log(db, user=user, event_type="account.role_admin_granted", details="System administrator role granted.")
+        add_audit_log(
+            db,
+            user=user,
+            event_type="account.role_admin_granted",
+            details="System administrator role granted.",
+            request=request,
+        )
     db.commit()
     return user
 
 
 @router.post("/login", response_model=SessionOut)
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
+def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == payload.username).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     if not verify_password(payload.password, user.password_hash):
-        add_audit_log(db, user=user, event_type="signin.failed_password", details="API login password verification failed.")
+        add_audit_log(
+            db,
+            user=user,
+            event_type="signin.failed_password",
+            details="API login password verification failed.",
+            request=request,
+        )
         db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     if user.totp_enabled:
         if not payload.totp_code:
-            add_audit_log(db, user=user, event_type="signin.failed_totp_required", details="API MFA code required.")
+            add_audit_log(
+                db,
+                user=user,
+                event_type="signin.failed_totp_required",
+                details="API MFA code required.",
+                request=request,
+            )
             db.commit()
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="TOTP required")
         secret = decrypt_totp_secret(user.totp_secret_enc or "")
         if not pyotp.TOTP(secret).verify(payload.totp_code):
-            add_audit_log(db, user=user, event_type="signin.failed_totp_invalid", details="API MFA verification failed.")
+            add_audit_log(
+                db,
+                user=user,
+                event_type="signin.failed_totp_invalid",
+                details="API MFA verification failed.",
+                request=request,
+            )
             db.commit()
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid TOTP")
 
     ensure_user_key(db, user)
     session = create_session(db, user)
     user.last_login = datetime.utcnow()
-    add_audit_log(db, user=user, event_type="signin.success", details="API sign-in completed.")
+    add_audit_log(
+        db,
+        user=user,
+        event_type="signin.success",
+        details="API sign-in completed.",
+        request=request,
+    )
     db.commit()
     db.refresh(session)
     return session
@@ -96,13 +132,13 @@ def logout(request: Request, db: Session = Depends(get_db)):
         user = db.query(User).filter(User.id == session.user_id).first()
         session.is_active = False
         if user:
-            add_audit_log(db, user=user, event_type="signout", details="API sign-out completed.")
+            add_audit_log(db, user=user, event_type="signout", details="API sign-out completed.", request=request)
         db.commit()
     return {"status": "ok"}
 
 
 @router.post("/totp/enroll")
-def enroll_totp(user_id: str, db: Session = Depends(get_db)):
+def enroll_totp(user_id: str, request: Request, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
@@ -110,6 +146,6 @@ def enroll_totp(user_id: str, db: Session = Depends(get_db)):
     totp = pyotp.TOTP(pyotp.random_base32())
     user.totp_secret_enc = encrypt_totp_secret(totp.secret)
     user.totp_enabled = True
-    add_audit_log(db, user=user, event_type="mfa.enabled", details="MFA enabled via API enrollment.")
+    add_audit_log(db, user=user, event_type="mfa.enabled", details="MFA enabled via API enrollment.", request=request)
     db.commit()
     return {"provisioning_uri": totp.provisioning_uri(name=user.username)}

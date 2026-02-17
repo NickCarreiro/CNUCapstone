@@ -205,6 +205,7 @@ class AuditLog(Base):
     user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     event_type: Mapped[str] = mapped_column(String(120))
     event_timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
     details: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 

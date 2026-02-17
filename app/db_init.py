@@ -53,6 +53,10 @@ def ensure_schema() -> str:
         if not has_column("direct_messages", "attachment_mime_type"):
             stmts.append("ALTER TABLE direct_messages ADD COLUMN attachment_mime_type VARCHAR(255)")
 
+    if "audit_logs" in table_names:
+        if not has_column("audit_logs", "ip_address"):
+            stmts.append("ALTER TABLE audit_logs ADD COLUMN ip_address VARCHAR(64)")
+
     schema_changed = False
     with engine.begin() as conn:
         if stmts:

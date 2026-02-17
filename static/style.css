@@ -676,6 +676,67 @@ body[data-theme="dark"] .stat-chip {
   margin-top: 0.25rem;
 }
 
+.explorer-header {
+  align-items: flex-start;
+}
+
+.explorer-title {
+  display: grid;
+  gap: 0.18rem;
+}
+
+.explorer-path {
+  font-size: 0.84rem;
+  font-weight: 750;
+  letter-spacing: 0.01em;
+}
+
+.explorer-help {
+  margin-top: 0.1rem;
+}
+
+.explorer-layout {
+  margin-top: 0.9rem;
+  display: grid;
+  grid-template-columns: minmax(240px, 360px) minmax(0, 1fr);
+  gap: 0.85rem;
+  align-items: start;
+}
+
+.explorer-pane {
+  min-width: 0;
+}
+
+.explorer-pane-files > .muted {
+  margin-top: 0.25rem;
+}
+
+.explorer-files-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.explorer-clear-filter {
+  padding: 0.25rem 0.55rem;
+  font-size: 0.78rem;
+  border-radius: 999px;
+}
+
+@media (max-width: 980px) {
+  .explorer-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (min-width: 761px) {
+  .explorer-pane-files .table-wrap {
+    max-height: 62vh;
+    overflow: auto;
+  }
+}
+
 .auth-card {
   border-color: color-mix(in srgb, var(--accent) 22%, var(--edge-soft));
   background: linear-gradient(
@@ -983,6 +1044,12 @@ body.resizing {
   overflow: auto;
 }
 
+.tree-card .tree,
+.explorer-card .tree {
+  max-height: none;
+  overflow: visible;
+}
+
 .tree-node {
   margin: 0;
 }
@@ -1040,9 +1107,293 @@ body.resizing {
   gap: 0.24rem;
 }
 
+.tree-files {
+  display: grid;
+  gap: 0.18rem;
+}
+
+.tree-root-files {
+  margin-left: 0.55rem;
+  padding-left: 0.8rem;
+  border-left: 1px dashed var(--edge);
+}
+
+.tree-file {
+  width: 100%;
+  border-radius: 10px;
+  padding: 0.32rem 0.5rem;
+  color: var(--ink-muted);
+  font-weight: 650;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  transition: background 130ms ease, color 130ms ease;
+}
+
+.tree-file::before {
+  content: "";
+  width: 12px;
+  height: 14px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent-2) 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--edge) 70%, transparent);
+}
+
+.tree-file:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--ink);
+}
+
+.tree-file.dragging {
+  opacity: 0.75;
+  cursor: grabbing;
+}
+
 .tree-summary.selected {
   background: color-mix(in srgb, var(--accent) 18%, transparent);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 46%, transparent);
+}
+
+.tree-summary.vault-selected,
+.tree-root-drop.vault-selected {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 42%, transparent);
+}
+
+.tree-file.ctx-file-target {
+  background: color-mix(in srgb, var(--accent-2) 16%, transparent);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-2) 45%, transparent);
+}
+
+.table tbody tr.file-row.ctx-file-target {
+  background: color-mix(in srgb, var(--accent-2) 12%, transparent) !important;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-2) 38%, transparent);
+}
+
+.table tbody tr.file-row.reveal {
+  animation: file-row-reveal 650ms ease both;
+}
+
+@keyframes file-row-reveal {
+  0% {
+    background: color-mix(in srgb, var(--accent-2) 20%, transparent);
+  }
+  100% {
+    background: inherit;
+  }
+}
+
+.tree-summary.drag-over,
+.tree-root.drag-over {
+  background: color-mix(in srgb, var(--accent-2) 22%, transparent);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-2) 55%, transparent);
+}
+
+.tree-summary.ctx-target,
+.tree-root.ctx-target {
+  background: color-mix(in srgb, var(--accent-2) 18%, transparent);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-2) 46%, transparent);
+}
+
+.tree-summary.pulse {
+  animation: tree-pulse 650ms ease both;
+}
+
+@keyframes tree-pulse {
+  0% {
+    background: color-mix(in srgb, var(--accent-2) 26%, transparent);
+  }
+  60% {
+    background: color-mix(in srgb, var(--accent-2) 14%, transparent);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
+.tree-pins {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  border-bottom: 1px solid var(--edge-soft);
+  padding: 0.4rem 0.45rem 0.55rem;
+  background: color-mix(in srgb, var(--card-strong) 92%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+.tree-pins-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+}
+
+.tree-pins-clear {
+  padding: 0.2rem 0.45rem;
+  font-size: 0.78rem;
+  border-radius: 999px;
+}
+
+.tree-pins-list {
+  margin-top: 0.45rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.tree-pin {
+  border: 1px solid var(--edge-soft);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--ink-soft);
+  border-radius: 999px;
+  padding: 0.25rem 0.55rem;
+  font-weight: 800;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: background 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+}
+
+.tree-pin:hover {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--ink);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+
+.context-menu {
+  position: fixed;
+  z-index: 4000;
+  width: min(340px, calc(100vw - 22px));
+  max-height: min(72vh, 560px);
+  overflow: auto;
+  border: 1px solid var(--edge-soft);
+  border-radius: 18px;
+  padding: 0.5rem;
+  background: color-mix(in srgb, var(--card-strong) 92%, transparent);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(12px);
+}
+
+.context-menu-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+  padding: 0.2rem 0.35rem 0.35rem;
+}
+
+.context-menu-title {
+  font-weight: 900;
+  font-size: 0.92rem;
+  color: var(--ink);
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-menu-close {
+  padding: 0.25rem 0.5rem;
+  border-radius: 999px;
+}
+
+.context-menu-body {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.1rem 0.1rem 0.25rem;
+}
+
+.context-menu-section {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.context-menu-kicker {
+  padding: 0 0.45rem;
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-weight: 900;
+  color: var(--ink-muted);
+}
+
+.context-menu-item {
+  width: 100%;
+  text-align: left;
+  border: none;
+  border-radius: 14px;
+  padding: 0.45rem 0.55rem;
+  background: transparent;
+  color: var(--ink-soft);
+  font-weight: 800;
+  cursor: pointer;
+  transition: background 130ms ease, color 130ms ease;
+}
+
+.context-menu-item:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--ink);
+}
+
+.context-menu-item.danger {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: color-mix(in srgb, var(--danger) 78%, var(--ink));
+  box-shadow: none;
+}
+
+.context-menu-item.danger:hover {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  color: color-mix(in srgb, var(--danger) 88%, var(--ink));
+}
+
+.context-menu-item:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.context-menu-sep {
+  height: 1px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--edge) 70%, transparent);
+  margin: 0 0.25rem;
+}
+
+.file-drag-handle {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  margin-right: 0.5rem;
+  border-radius: 6px;
+  vertical-align: -3px;
+  background: color-mix(in srgb, var(--ink-muted) 22%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--edge) 65%, transparent);
+  cursor: grab;
+}
+
+.file-drag-handle::before {
+  content: "";
+  display: block;
+  width: 10px;
+  height: 10px;
+  margin: 3px;
+  border-radius: 4px;
+  background: repeating-linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--ink-muted) 70%, transparent) 0px,
+    color-mix(in srgb, var(--ink-muted) 70%, transparent) 2px,
+    transparent 2px,
+    transparent 4px
+  );
+  opacity: 0.9;
+}
+
+.file-drag-handle.dragging {
+  cursor: grabbing;
+  opacity: 0.75;
 }
 
 .totp-box {
@@ -1655,7 +2006,11 @@ body.resizing {
 }
 
 .terminal-msg {
+  display: block;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-word;
+  tab-size: 2;
 }
 
 .terminal-line.level-success .terminal-action {
@@ -1716,11 +2071,7 @@ body.page-dashboard .content > .card:nth-of-type(1) {
 }
 
 body.page-dashboard .content > .card:nth-of-type(2) {
-  grid-column: span 4;
-}
-
-body.page-dashboard .content > .card:nth-of-type(3) {
-  grid-column: span 8;
+  grid-column: 1 / -1;
 }
 
 body.page-groups .content,
@@ -1816,6 +2167,7 @@ a:hover {
   }
 
   body.page-dashboard .content > .card:nth-of-type(1),
+  body.page-dashboard .content > .card:nth-of-type(2),
   body.page-groups .content > .card:last-child,
   body.page-group-detail .content > .card:last-child {
     grid-column: 1 / -1;
