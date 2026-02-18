@@ -1,0 +1,275 @@
+{% extends "base.html" %}
+{% block body_class %}page-messages{% endblock %}
+{% block content %}
+{% set thread_count = threads|length %}
+{% set unread_count = unread_thread_total or 0 %}
+<section class="card hero-card">
+  <div class="eyebrow">Messages</div>
+  <h1>Direct messages</h1>
+  <p class="muted">Secure, encrypted conversations between users.</p>
+  <div class="stat-row">
+    <div class="stat-chip">
+      <div class="stat-number">{{ thread_count }}</div>
+      <div class="stat-label">Conversations</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ unread_count }}</div>
+      <div class="stat-label">Unread</div>
+    </div>
+  </div>
+</section>
+
+{% if error %}
+<div class="alert">{{ error }}</div>
+{% endif %}
+{% if notice %}
+<div class="alert admin-notice">{{ notice }}</div>
+{% endif %}
+
+<section class="card">
+  <div class="card-header">
+    <h2>Inbox</h2>
+    <div class="card-tools">
+      <span class="pill ghost">Unread: {{ unread_count }}</span>
+    </div>
+  </div>
+
+  <div class="dm-layout">
+    <aside class="dm-threads">
+      <h3>Conversations</h3>
+      {% if threads %}
+        <div class="dm-thread-list">
+          {% for item in threads %}
+          <a
+            class="dm-thread{% if item.thread_id == active_thread_id %} active{% endif %}"
+            href="/ui/messages?thread={{ item.thread_id }}"
+          >
+            <div class="dm-thread-head">
+              <span class="dm-thread-user">{{ item.partner_username }}</span>
+              {% if item.unread_count %}
+                <span class="dm-thread-unread">{{ item.unread_count }}</span>
+              {% endif %}
+            </div>
+            {% if item.partner_email %}
+            <div class="muted dm-thread-contact">{{ item.partner_email }}</div>
+            {% endif %}
+            <div class="dm-thread-preview">{{ item.latest_preview }}</div>
+            <div class="dm-thread-time">{{ item.latest_created_at_utc }}</div>
+          </a>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="muted">No conversations yet. Start one below.</p>
+      {% endif %}
+    </aside>
+
+    <div class="dm-main">
+      <form
+        method="post"
+        action="/ui/messages/send"
+        enctype="multipart/form-data"
+        class="form compact dm-compose-form"
+        id="dmSendForm"
+        data-active-partner="{{ active_partner_username }}"
+      >
+        <input type="hidden" name="thread_id" id="dmThreadId" value="{{ active_thread_id }}" />
+        <label>
+          <span>Recipient username</span>
+          <input
+            type="text"
+            name="username"
+            id="dmUsername"
+            value="{{ active_partner_username }}"
+            placeholder="teammate"
+            autocomplete="off"
+          />
+        </label>
+        <label>
+          <span>Message</span>
+          <textarea name="message" id="dmMessage" maxlength="4000" rows="4" placeholder="Write a secure message..."></textarea>
+        </label>
+        <label>
+          <span>Attachment (optional, max 10 MB)</span>
+          <input type="file" name="attachment" id="dmAttachment" />
+        </label>
+        <div class="dm-compose-actions">
+          <button type="submit">Send message</button>
+          <button type="button" class="ghost" id="dmNewThread">New conversation</button>
+        </div>
+      </form>
+
+      <div class="dm-stream">
+        {% if thread_messages %}
+          {% for item in thread_messages %}
+          <article class="dm-message{% if item.is_outbound %} outbound{% else %} inbound{% endif %}">
+            <div class="dm-message-meta">
+              <span>{{ item.sender_username }} to {{ item.recipient_username }}</span>
+              <div class="dm-message-meta-right">
+                <span>{{ item.created_at_utc }}</span>
+                {% if not item.is_outbound %}
+                <button
+                  type="button"
+                  class="ghost dm-report-btn"
+                  data-message-id="{{ item.id }}"
+                  data-sender="{{ item.sender_username }}"
+                >
+                  Report
+                </button>
+                {% endif %}
+              </div>
+            </div>
+            {% if item.body %}
+              <div class="dm-message-body">{{ item.body }}</div>
+            {% endif %}
+            {% if item.has_attachment %}
+              <div class="dm-attachment">
+                <a href="{{ item.attachment_url }}">{{ item.attachment_name }}</a>
+                <span class="muted">({{ item.attachment_size }} bytes)</span>
+              </div>
+            {% endif %}
+            <div class="dm-receipt">{{ item.receipt }}</div>
+          </article>
+          {% endfor %}
+        {% else %}
+          <p class="muted">Select a conversation or start a new one to view messages.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<dialog id="dmReportDialog" class="modal">
+  <form method="post" action="/ui/messages/report" class="form compact" id="dmReportForm">
+    <input type="hidden" name="message_id" id="dmReportMessageId" />
+    <h2>Report direct message</h2>
+    <p class="muted" id="dmReportSubtitle">An administrator will review this report. No automatic action is taken.</p>
+    <label>
+      <span>Reason</span>
+      <select name="reason" id="dmReportReason" required>
+        <option value="spam">Spam / unsolicited advertising</option>
+        <option value="harassment">Harassment or hate speech</option>
+        <option value="threat">Threats or violence</option>
+        <option value="impersonation">Impersonation / fraud</option>
+        <option value="sexual">Sexual content</option>
+        <option value="other" selected>Other</option>
+      </select>
+    </label>
+    <label>
+      <span>Details (optional)</span>
+      <textarea
+        name="details"
+        id="dmReportDetails"
+        rows="4"
+        maxlength="2000"
+        placeholder="Optional context for the administrator..."
+      ></textarea>
+    </label>
+    <div class="modal-actions">
+      <button type="submit">Submit report</button>
+      <button type="button" class="ghost" id="dmReportCancel">Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+  (function () {
+    const form = document.getElementById("dmSendForm");
+    if (!form) return;
+
+    const threadInput = document.getElementById("dmThreadId");
+    const usernameInput = document.getElementById("dmUsername");
+    const clearButton = document.getElementById("dmNewThread");
+    const stream = document.querySelector(".dm-stream");
+    const activePartner = (form.dataset.activePartner || "").trim().toLowerCase();
+
+    function syncRecipientRequirement() {
+      const hasThread = !!(threadInput && threadInput.value.trim());
+      if (usernameInput) {
+        usernameInput.required = !hasThread;
+      }
+    }
+
+    usernameInput?.addEventListener("input", () => {
+      const currentValue = usernameInput.value.trim().toLowerCase();
+      if (threadInput && threadInput.value && activePartner && currentValue && currentValue !== activePartner) {
+        threadInput.value = "";
+      }
+      syncRecipientRequirement();
+    });
+
+    clearButton?.addEventListener("click", () => {
+      if (threadInput) threadInput.value = "";
+      if (usernameInput) {
+        usernameInput.value = "";
+        usernameInput.focus();
+      }
+      const messageInput = document.getElementById("dmMessage");
+      if (messageInput) messageInput.value = "";
+      const attachmentInput = document.getElementById("dmAttachment");
+      if (attachmentInput) attachmentInput.value = "";
+      syncRecipientRequirement();
+    });
+
+    if (stream) {
+      stream.scrollTop = stream.scrollHeight;
+    }
+
+    syncRecipientRequirement();
+  })();
+
+  (function () {
+    const dialog = document.getElementById("dmReportDialog");
+    const form = document.getElementById("dmReportForm");
+    const messageIdInput = document.getElementById("dmReportMessageId");
+    const subtitle = document.getElementById("dmReportSubtitle");
+    const reasonInput = document.getElementById("dmReportReason");
+    const detailsInput = document.getElementById("dmReportDetails");
+    const cancel = document.getElementById("dmReportCancel");
+
+    if (!dialog || !form || !messageIdInput || !subtitle || !reasonInput || !detailsInput) return;
+
+    function closeDialog() {
+      if (typeof dialog.close === "function") {
+        dialog.close();
+      } else {
+        dialog.removeAttribute("open");
+      }
+    }
+
+    cancel?.addEventListener("click", closeDialog);
+
+    function openDialog(btn) {
+      const messageId = (btn?.dataset?.messageId || "").trim();
+      if (!messageId) return;
+      const sender = (btn?.dataset?.sender || "user").trim();
+
+      messageIdInput.value = messageId;
+      reasonInput.value = "other";
+      detailsInput.value = "";
+
+      let snippet = "";
+      const article = btn.closest(".dm-message");
+      const bodyEl = article ? article.querySelector(".dm-message-body") : null;
+      if (bodyEl && bodyEl.textContent) {
+        snippet = bodyEl.textContent.trim().replace(/\s+/g, " ");
+        if (snippet.length > 180) snippet = `${snippet.slice(0, 177)}...`;
+      }
+      subtitle.textContent = snippet
+        ? `Reporting message from ${sender}: "${snippet}"`
+        : `Reporting message from ${sender}. No automatic action is taken.`;
+
+      if (typeof dialog.showModal === "function") {
+        dialog.showModal();
+      } else {
+        dialog.setAttribute("open", "open");
+      }
+    }
+
+    document.querySelectorAll(".dm-report-btn").forEach((btn) => {
+      btn.addEventListener("click", () => openDialog(btn));
+    });
+  })();
+</script>
+{% endblock %}

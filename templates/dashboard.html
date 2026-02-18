@@ -16,6 +16,65 @@
     </details>
   {% endfor %}
 {% endmacro %}
+{% macro render_tree_file_row(file_row, rel_path) %}
+  {% if file_row %}
+  <article
+    class="tree-file file-row"
+    data-file-token="{{ file_row.token }}"
+    data-display-name="{{ file_row.display_name }}"
+    data-rel-path="{{ rel_path }}"
+    draggable="true"
+    title="Drag to move. Right click for actions."
+  >
+    <div class="file-row-main">
+      <span
+        class="file-drag-handle"
+        draggable="true"
+        title="Drag to move this file into a folder"
+        data-file-token="{{ file_row.token }}"
+        data-display-name="{{ file_row.display_name }}"
+      ></span>
+      <div class="file-row-main-text">
+        <div class="file-row-name">{{ file_row.display_name }}</div>
+        <div class="file-row-path">/{{ rel_path }}</div>
+      </div>
+    </div>
+    <div class="file-row-size">{{ file_row.record.file_size }}</div>
+    <div class="file-row-uploaded">{{ file_row.record.uploaded_at }}</div>
+    <div class="file-row-actions">
+      <button
+        type="button"
+        class="pill preview-btn"
+        data-file-token="{{ file_row.token }}"
+        data-display-name="{{ file_row.display_name }}"
+      >
+        Preview
+      </button>
+      <a class="pill" href="/ui/files/{{ file_row.token }}">Open</a>
+      <button
+        type="button"
+        class="pill rename-btn"
+        data-file-token="{{ file_row.token }}"
+        data-display-name="{{ file_row.display_name }}"
+      >
+        Rename
+      </button>
+      <button
+        type="button"
+        class="pill move-btn"
+        data-file-token="{{ file_row.token }}"
+        data-display-name="{{ file_row.display_name }}"
+      >
+        Move
+      </button>
+      <form method="post" action="/ui/trash" class="inline-form">
+        <input type="hidden" name="file_token" value="{{ file_row.token }}" />
+        <button type="submit" class="danger">Trash</button>
+      </form>
+    </div>
+  </article>
+  {% endif %}
+{% endmacro %}
 {% macro render_vault_tree(node, prefix="") %}
   {% for name, children in node.items()|sort if name != "__files__" %}
     {% set path = name if prefix == "" else prefix ~ "/" ~ name %}
@@ -33,14 +92,17 @@
       <div class="tree-children">
         {{ render_vault_tree(children, path) }}
         {% if files_here %}
-        <div class="tree-files">
+        <div class="tree-files tree-files-details">
+          <div class="file-explorer-head tree-file-head">
+            <span>Item</span>
+            <span>Size</span>
+            <span>Uploaded</span>
+            <span>Actions</span>
+          </div>
           {% for filename in files_here|sort %}
-          <div
-            class="tree-file"
-            data-rel-path="{{ path }}/{{ filename }}"
-            draggable="true"
-            title="Drag to move. Right click for actions."
-          >{{ filename }}</div>
+          {% set rel_path = path ~ "/" ~ filename %}
+          {% set file_row = (files | selectattr("rel_path", "equalto", rel_path) | list | first) %}
+          {{ render_tree_file_row(file_row, rel_path) }}
           {% endfor %}
         </div>
         {% endif %}
@@ -53,18 +115,21 @@
 {% set file_count = files|length %}
 {% set folder_count = (folders|length - 1) if folders|length > 0 else 0 %}
 {% set top_level_count = (vault_tree|length - 1) if vault_tree|length > 0 else 0 %}
-<section class="card hero-card dashboard-hero">
+<section class="card hero-card dashboard-hero cockpit-panel" id="cockpitPanel" hidden>
   <div class="cockpit-top">
     <div class="eyebrow">Vault Cockpit</div>
-    <button
-      type="button"
-      class="ghost cockpit-toggle"
-      id="cockpitToggle"
-      aria-expanded="true"
-      aria-controls="cockpitBody"
-    >
-      Minimize
-    </button>
+    <div class="cockpit-actions">
+      <button
+        type="button"
+        class="ghost cockpit-toggle"
+        id="cockpitToggle"
+        aria-expanded="true"
+        aria-controls="cockpitBody"
+      >
+        Minimize
+      </button>
+      <button type="button" class="ghost cockpit-toggle" id="cockpitHide">Hide</button>
+    </div>
   </div>
   <h1>Welcome, {{ user.username }}</h1>
   <div id="cockpitBody" class="cockpit-body">
@@ -84,7 +149,7 @@
       </div>
     </div>
     <div class="actions">
-      <a class="pill" href="/ui/totp">Manage TOTP</a>
+      <a class="pill" href="/ui/mfa">Manage MFA</a>
     </div>
     <div class="two-col-forms">
       <form method="post" action="/ui/folder" class="form compact soft-panel">
@@ -108,20 +173,24 @@
     </div>
   </div>
 </section>
-<section class="card explorer-card">
+<section class="card explorer-card explorer-card-full">
   <div class="card-header explorer-header">
     <div class="explorer-title">
       <h2>Vault explorer</h2>
       <div class="explorer-path muted" id="explorerPath">Showing: /</div>
     </div>
     <div class="card-tools">
+      <button type="button" class="ghost" id="explorerQuickAdd" aria-expanded="false" aria-controls="explorerQuickMenu">+</button>
       <input type="text" id="fileFilter" placeholder="Search files..." />
+      <button type="button" class="ghost explorer-clear-filter" id="explorerClearFilter" hidden>
+        Clear folder filter
+      </button>
     </div>
   </div>
   <p class="muted explorer-help">
     Drag files onto folders to move them. Right click folders and files for actions.
   </p>
-  <div class="explorer-layout">
+  <div class="explorer-layout explorer-layout-integrated">
     <div class="explorer-pane explorer-pane-tree">
       <div class="label explorer-pane-label">Vault structure</div>
       <div class="folder-tree tree-panel">
@@ -136,9 +205,16 @@
           <div class="tree-root tree-root-drop" data-folder="" title="Drop here to target the vault root">/</div>
           {% set root_files = vault_tree.get("__files__") if vault_tree.get("__files__") else [] %}
           {% if root_files %}
-          <div class="tree-files tree-root-files">
+          <div class="tree-files tree-root-files tree-files-details">
+            <div class="file-explorer-head tree-file-head">
+              <span>Item</span>
+              <span>Size</span>
+              <span>Uploaded</span>
+              <span>Actions</span>
+            </div>
             {% for filename in root_files|sort %}
-            <div class="tree-file" data-rel-path="{{ filename }}" draggable="true" title="Drag to move. Right click for actions.">{{ filename }}</div>
+            {% set root_row = (files | selectattr("rel_path", "equalto", filename) | list | first) %}
+            {{ render_tree_file_row(root_row, filename) }}
             {% endfor %}
           </div>
           {% endif %}
@@ -146,99 +222,18 @@
         </div>
       </div>
     </div>
-    <div class="explorer-pane explorer-pane-files">
-      <div class="explorer-files-head">
-        <div class="label explorer-pane-label">Files</div>
-        <button type="button" class="ghost explorer-clear-filter" id="explorerClearFilter" hidden>
-          Clear folder filter
-        </button>
-      </div>
-      <p class="muted">Preview, rename, move, or send files to trash from this list.</p>
-      {% if files %}
-        <div class="table-wrap">
-        <table class="table" id="fileTable">
-          <thead>
-            <tr>
-              <th class="resizable">Item</th>
-              <th class="resizable">Size (bytes)</th>
-              <th class="resizable">Uploaded</th>
-              <th>Preview</th>
-              <th>Open</th>
-              <th>Rename</th>
-              <th>Trash</th>
-              <th>Move</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for f in files %}
-            <tr
-              class="file-row"
-              data-file-token="{{ f.token }}"
-              data-display-name="{{ f.display_name }}"
-              data-rel-path="{{ f.rel_path }}"
-            >
-              <td data-label="Item">
-                <span
-                  class="file-drag-handle"
-                  draggable="true"
-                  title="Drag to move this file into a folder"
-                  data-file-token="{{ f.token }}"
-                  data-display-name="{{ f.display_name }}"
-                ></span>
-                {{ f.display_name }}
-              </td>
-              <td data-label="Size (bytes)">{{ f.record.file_size }}</td>
-              <td data-label="Uploaded">{{ f.record.uploaded_at }}</td>
-              <td data-label="Preview">
-                <button
-                  type="button"
-                  class="pill preview-btn"
-                  data-file-token="{{ f.token }}"
-                  data-display-name="{{ f.display_name }}"
-                >
-                  Preview
-                </button>
-              </td>
-              <td data-label="Open">
-                <a class="pill" href="/ui/files/{{ f.token }}">Open</a>
-              </td>
-              <td data-label="Rename">
-                <button
-                  type="button"
-                  class="pill rename-btn"
-                  data-file-token="{{ f.token }}"
-                  data-display-name="{{ f.display_name }}"
-                >
-                  Rename
-                </button>
-              </td>
-              <td data-label="Trash">
-                <form method="post" action="/ui/trash" class="inline-form">
-                  <input type="hidden" name="file_token" value="{{ f.token }}" />
-                  <button type="submit" class="danger">Trash</button>
-                </form>
-              </td>
-              <td data-label="Move">
-                <button
-                  type="button"
-                  class="pill move-btn"
-                  data-file-token="{{ f.token }}"
-                  data-display-name="{{ f.display_name }}"
-                >
-                  Move
-                </button>
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        </div>
-      {% else %}
-        <p class="muted">No files yet.</p>
-      {% endif %}
-    </div>
   </div>
 </section>
+<div class="context-menu explorer-quick-menu" id="explorerQuickMenu" hidden role="menu" aria-label="Vault quick actions">
+  <div class="context-menu-body">
+    <div class="context-menu-section">
+      <div class="context-menu-kicker">Quick Actions</div>
+      <button type="button" class="context-menu-item" data-action="show_cockpit">Show vault cockpit</button>
+      <button type="button" class="context-menu-item" data-action="new_folder">Create folder</button>
+      <button type="button" class="context-menu-item" data-action="upload_file">Create file (upload)</button>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -387,27 +382,47 @@
   </div>
 
 		<script>
+		  const COCKPIT_VISIBLE_KEY = "pfv-cockpit-visible";
 		  const COCKPIT_COLLAPSED_KEY = "pfv-cockpit-collapsed";
+		  const cockpitPanel = document.getElementById("cockpitPanel");
 		  const cockpitToggle = document.getElementById("cockpitToggle");
+		  const cockpitHide = document.getElementById("cockpitHide");
 		  const cockpitBody = document.getElementById("cockpitBody");
+
+		  function setCockpitVisible(visible, { persist = true } = {}) {
+		    if (!cockpitPanel) return;
+		    cockpitPanel.hidden = !visible;
+		    if (persist) {
+		      try {
+		        localStorage.setItem(COCKPIT_VISIBLE_KEY, visible ? "1" : "0");
+		      } catch {}
+		    }
+		  }
 		
-		  function setCockpitCollapsed(collapsed) {
+		  function setCockpitCollapsed(collapsed, { persist = true } = {}) {
 		    if (!cockpitToggle || !cockpitBody) return;
 		    cockpitBody.hidden = !!collapsed;
 		    cockpitToggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
 		    cockpitToggle.textContent = collapsed ? "Expand" : "Minimize";
-		    try {
-		      localStorage.setItem(COCKPIT_COLLAPSED_KEY, collapsed ? "1" : "0");
-		    } catch {}
+		    if (persist) {
+		      try {
+		        localStorage.setItem(COCKPIT_COLLAPSED_KEY, collapsed ? "1" : "0");
+		      } catch {}
+		    }
 		  }
 		
-		  if (cockpitToggle && cockpitBody) {
+		  if (cockpitPanel && cockpitToggle && cockpitBody) {
+		    let visible = false;
 		    let collapsed = false;
 		    try {
-		      collapsed = localStorage.getItem(COCKPIT_COLLAPSED_KEY) === "1";
+		      visible = localStorage.getItem(COCKPIT_VISIBLE_KEY) === "1";
+		      const storedCollapsed = localStorage.getItem(COCKPIT_COLLAPSED_KEY);
+		      collapsed = storedCollapsed === null ? false : storedCollapsed === "1";
 		    } catch {}
-		    setCockpitCollapsed(collapsed);
+		    setCockpitVisible(visible, { persist: false });
+		    setCockpitCollapsed(collapsed, { persist: false });
 		    cockpitToggle.addEventListener("click", () => setCockpitCollapsed(!cockpitBody.hidden));
+		    cockpitHide?.addEventListener("click", () => setCockpitVisible(false));
 		  }
 
 		  const dialog = document.getElementById("moveDialog");
@@ -435,7 +450,7 @@
 	  const cancelRename = document.getElementById("cancelRename");
 	  document.querySelectorAll(".move-btn").forEach((btn) => {
 	    btn.addEventListener("click", () => {
-	      const row = btn.closest("tr.file-row");
+	      const row = btn.closest(".file-row");
 	      openMoveByToken(btn.dataset.fileToken || "", btn.dataset.displayName || "file", row?.dataset.relPath || "");
 	    });
 	  });
@@ -575,10 +590,10 @@
 	  }
 	
 		  const fileFilter = document.getElementById("fileFilter");
-		  const fileRows = document.querySelectorAll("#fileTable .file-row");
-		  const fileTable = document.getElementById("fileTable");
 		  const explorerPath = document.getElementById("explorerPath");
 		  const explorerClearFilter = document.getElementById("explorerClearFilter");
+		  const vaultTree = document.getElementById("vaultTree");
+		  const fileRows = vaultTree ? vaultTree.querySelectorAll(".tree-file") : [];
 		  const fileRowByToken = new Map();
 		  const fileTokenByRelPath = new Map();
 		  fileRows.forEach((row) => {
@@ -601,7 +616,7 @@
 		    if (explorerClearFilter) explorerClearFilter.hidden = !folder;
 		  }
 		
-		  function applyFileFilters() {
+	  function applyFileFilters() {
 		    const q = (fileFilter?.value || "").trim().toLowerCase();
 		    const folder = normalizeRelPath(activeFolderFilter);
 	    fileRows.forEach((row) => {
@@ -611,7 +626,7 @@
 	        matches = relPath.startsWith(`${folder}/`);
 	      }
 	      if (matches && q) {
-	        const content = `${row.textContent || ""} ${relPath}`.toLowerCase();
+	        const content = `${row.dataset.displayName || ""} ${relPath}`.toLowerCase();
 	        matches = content.includes(q);
 	      }
 	      row.hidden = !matches;
@@ -625,7 +640,6 @@
 		  applyFileFilters();
 		  explorerClearFilter?.addEventListener("click", () => selectVaultFolder(""));
 		
-		  const vaultTree = document.getElementById("vaultTree");
 		  const vaultPinsWrap = document.getElementById("vaultTreePins");
 		  const vaultPinsList = document.getElementById("vaultPinsList");
 	  const vaultPinsClear = document.getElementById("vaultPinsClear");
@@ -639,6 +653,8 @@
 	  const uploadForm = document.querySelector("form[action='/ui/upload']");
 	  const uploadFolderInput = uploadForm?.querySelector("input[name='folder']");
 	  const uploadFileInput = uploadForm?.querySelector("input[type='file'][name='file']");
+	  const explorerQuickAdd = document.getElementById("explorerQuickAdd");
+	  const explorerQuickMenu = document.getElementById("explorerQuickMenu");
 	  const OPEN_STATE_KEY = "pfv-vault-tree-open";
 	  const PINNED_KEY = "pfv-vault-tree-pins";
 	  const UPLOAD_FOLDER_KEY = "pfv-vault-upload-folder";
@@ -647,6 +663,26 @@
 	  let ctxState = null;
 	  let fileCtxState = null;
 	  let pinnedFolders = [];
+	  let quickMenuOpen = false;
+
+	  function setQuickMenu(open) {
+	    if (!explorerQuickAdd || !explorerQuickMenu) return;
+	    quickMenuOpen = !!open;
+	    explorerQuickAdd.setAttribute("aria-expanded", quickMenuOpen ? "true" : "false");
+	    explorerQuickMenu.hidden = !quickMenuOpen;
+	  }
+
+	  function openQuickMenu() {
+	    if (!explorerQuickAdd || !explorerQuickMenu) return;
+	    const rect = explorerQuickAdd.getBoundingClientRect();
+	    explorerQuickMenu.style.left = `${Math.round(rect.left)}px`;
+	    explorerQuickMenu.style.top = `${Math.round(rect.bottom + 8)}px`;
+	    setQuickMenu(true);
+	  }
+
+	  function closeQuickMenu() {
+	    setQuickMenu(false);
+	  }
 	
 	  function loadPinned() {
 	    try {
@@ -1001,7 +1037,60 @@
 	      localStorage.removeItem(UPLOAD_FOLDER_KEY);
 	    } catch {}
 	  }
-	
+
+	  if (explorerQuickAdd && explorerQuickMenu) {
+	    explorerQuickAdd.addEventListener("click", () => {
+	      if (quickMenuOpen) {
+	        closeQuickMenu();
+	      } else {
+	        openQuickMenu();
+	      }
+	    });
+
+	    explorerQuickMenu.addEventListener("click", (event) => {
+	      const btn = event.target instanceof Element ? event.target.closest("button[data-action]") : null;
+	      if (!btn) return;
+	      const action = btn.dataset.action || "";
+
+	      if (action === "show_cockpit") {
+	        setCockpitVisible(true);
+	        setCockpitCollapsed(false);
+	        cockpitPanel?.scrollIntoView({ block: "start", behavior: "smooth" });
+	        closeQuickMenu();
+	        return;
+	      }
+
+	      if (action === "new_folder") {
+	        setCockpitVisible(true);
+	        setCockpitCollapsed(false);
+	        createFolderInput?.scrollIntoView({ block: "center", behavior: "smooth" });
+	        requestAnimationFrame(() => createFolderInput?.focus());
+	        closeQuickMenu();
+	        return;
+	      }
+
+	      if (action === "upload_file") {
+	        setCockpitVisible(true);
+	        setCockpitCollapsed(false);
+	        uploadForm?.scrollIntoView({ block: "center", behavior: "smooth" });
+	        if (uploadFileInput) requestAnimationFrame(() => uploadFileInput.click());
+	        closeQuickMenu();
+	        return;
+	      }
+	    });
+
+	    document.addEventListener("mousedown", (event) => {
+	      if (!quickMenuOpen) return;
+	      if (!(event.target instanceof Element)) return;
+	      if (explorerQuickAdd.contains(event.target) || explorerQuickMenu.contains(event.target)) return;
+	      closeQuickMenu();
+	    });
+
+	    document.addEventListener("keydown", (event) => {
+	      if (event.key === "Escape" && quickMenuOpen) closeQuickMenu();
+	    });
+	  }
+
 	  if (vaultPinsClear) {
 	    vaultPinsClear.addEventListener("click", () => {
 	      pinnedFolders = [];
@@ -1035,7 +1124,7 @@
 	            anchorEl: fileEl,
 	            token,
 	            relPath: rel,
-	            displayName: fileEl.textContent || rel.split("/").pop() || "file",
+	            displayName: fileEl.dataset.displayName || rel.split("/").pop() || "file",
 	            clientX: e.clientX,
 	            clientY: e.clientY,
 	          });
@@ -1251,7 +1340,7 @@
 	
 	      if (action === "filter_folder") {
 	        selectVaultFolder(path);
-	        fileTable?.scrollIntoView({ block: "start", behavior: "smooth" });
+	        vaultTree?.scrollIntoView({ block: "start", behavior: "smooth" });
 	        closeCtxMenu();
 	        return;
 	      }
@@ -1314,7 +1403,10 @@
 	      const token = fileTokenByRelPath.get(rel) || "";
 	      if (!token) return;
 	      e.dataTransfer.setData("application/x-filefort-file-token", token);
-	      e.dataTransfer.setData("application/x-filefort-display-name", fileEl.textContent || rel.split("/").pop() || "file");
+	      e.dataTransfer.setData(
+	        "application/x-filefort-display-name",
+	        fileEl.dataset.displayName || rel.split("/").pop() || "file"
+	      );
 	      e.dataTransfer.setData("text/plain", token);
 	      e.dataTransfer.effectAllowed = "move";
 	      fileEl.classList.add("dragging");
@@ -1356,7 +1448,7 @@
 	      const token = fileTokenByRelPath.get(rel) || "";
 	      if (!token) return;
 	      const row = fileRowByToken.get(token);
-	      const displayName = (row && row.dataset.displayName) || fileEl.textContent || rel.split("/").pop() || "file";
+	      const displayName = (row && row.dataset.displayName) || fileEl.dataset.displayName || rel.split("/").pop() || "file";
 	      openPreviewByToken(token, displayName);
 	    });
 	  }
@@ -1404,25 +1496,6 @@
 	    } else {
 	      form.submit();
 	    }
-	  }
-
-	  if (fileTable && fileCtxMenu) {
-	    fileTable.addEventListener("contextmenu", (e) => {
-	      if (!(e.target instanceof Element)) return;
-	      const row = e.target.closest("tr.file-row");
-	      if (!row) return;
-	      const token = row.dataset.fileToken || "";
-	      if (!token) return;
-	      e.preventDefault();
-	      openFileCtxMenu({
-	        anchorEl: row,
-	        token,
-	        relPath: row.dataset.relPath || "",
-	        displayName: row.dataset.displayName || row.textContent || "file",
-	        clientX: e.clientX,
-	        clientY: e.clientY,
-	      });
-	    });
 	  }
 
 	  if (fileCtxMenu) {
@@ -1476,42 +1549,6 @@
 	      }
 	    });
 	  }
-
-	  if (fileTable) {
-    const headers = fileTable.querySelectorAll("th.resizable");
-    headers.forEach((th) => {
-      const handle = document.createElement("span");
-      handle.className = "col-resizer";
-      th.appendChild(handle);
-
-      handle.addEventListener("mousedown", (e) => {
-        e.preventDefault();
-        const startX = e.clientX;
-        const startWidth = th.offsetWidth;
-        const index = Array.from(th.parentNode.children).indexOf(th);
-        document.body.classList.add("resizing");
-
-        function onMove(ev) {
-          const delta = ev.clientX - startX;
-          const nextWidth = Math.max(120, startWidth + delta);
-          const cells = fileTable.querySelectorAll(`tr > *:nth-child(${index + 1})`);
-          cells.forEach((cell) => {
-            cell.style.width = `${nextWidth}px`;
-            cell.style.maxWidth = `${nextWidth}px`;
-          });
-        }
-
-        function onUp() {
-          document.body.classList.remove("resizing");
-          document.removeEventListener("mousemove", onMove);
-          document.removeEventListener("mouseup", onUp);
-        }
-
-        document.addEventListener("mousemove", onMove);
-        document.addEventListener("mouseup", onUp);
-      });
-    });
-  }
 
 	  document.querySelectorAll(".preview-btn").forEach((btn) => {
 	    btn.addEventListener("click", () => {

@@ -35,6 +35,46 @@ def ensure_schema() -> str:
             stmts.append("ALTER TABLE files ADD COLUMN mime_type VARCHAR(255)")
 
     if "users" in table_names:
+        if not has_column("users", "email"):
+            stmts.append("ALTER TABLE users ADD COLUMN email VARCHAR(320)")
+        if not has_column("users", "email_visible"):
+            stmts.append("ALTER TABLE users ADD COLUMN email_visible BOOLEAN NOT NULL DEFAULT FALSE")
+        if not has_column("users", "email_verified"):
+            stmts.append("ALTER TABLE users ADD COLUMN email_verified BOOLEAN NOT NULL DEFAULT FALSE")
+        if not has_column("users", "email_verification_token_hash"):
+            stmts.append("ALTER TABLE users ADD COLUMN email_verification_token_hash VARCHAR(128)")
+        if not has_column("users", "email_verification_sent_at"):
+            stmts.append("ALTER TABLE users ADD COLUMN email_verification_sent_at TIMESTAMP")
+        if not has_column("users", "email_verification_expires_at"):
+            stmts.append("ALTER TABLE users ADD COLUMN email_verification_expires_at TIMESTAMP")
+        if not has_column("users", "phone_number"):
+            stmts.append("ALTER TABLE users ADD COLUMN phone_number VARCHAR(48)")
+        if not has_column("users", "sms_carrier"):
+            stmts.append("ALTER TABLE users ADD COLUMN sms_carrier VARCHAR(32)")
+        if not has_column("users", "email_mfa_enabled"):
+            stmts.append("ALTER TABLE users ADD COLUMN email_mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE")
+        if not has_column("users", "sms_mfa_enabled"):
+            stmts.append("ALTER TABLE users ADD COLUMN sms_mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE")
+        if not has_column("users", "mfa_preferred_method"):
+            stmts.append("ALTER TABLE users ADD COLUMN mfa_preferred_method VARCHAR(16)")
+        if not has_column("users", "mfa_challenge_method"):
+            stmts.append("ALTER TABLE users ADD COLUMN mfa_challenge_method VARCHAR(16)")
+        if not has_column("users", "mfa_challenge_code_hash"):
+            stmts.append("ALTER TABLE users ADD COLUMN mfa_challenge_code_hash VARCHAR(128)")
+        if not has_column("users", "mfa_challenge_expires_at"):
+            stmts.append("ALTER TABLE users ADD COLUMN mfa_challenge_expires_at TIMESTAMP")
+        if not has_column("users", "mfa_challenge_sent_at"):
+            stmts.append("ALTER TABLE users ADD COLUMN mfa_challenge_sent_at TIMESTAMP")
+        if not has_column("users", "mfa_challenge_attempts"):
+            stmts.append("ALTER TABLE users ADD COLUMN mfa_challenge_attempts INTEGER NOT NULL DEFAULT 0")
+        if not has_column("users", "profile_image_path"):
+            stmts.append("ALTER TABLE users ADD COLUMN profile_image_path TEXT")
+        if not has_column("users", "profile_image_nonce"):
+            stmts.append("ALTER TABLE users ADD COLUMN profile_image_nonce VARCHAR(64)")
+        if not has_column("users", "profile_image_tag"):
+            stmts.append("ALTER TABLE users ADD COLUMN profile_image_tag VARCHAR(64)")
+        if not has_column("users", "profile_image_mime_type"):
+            stmts.append("ALTER TABLE users ADD COLUMN profile_image_mime_type VARCHAR(255)")
         if not has_column("users", "is_admin"):
             stmts.append("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE")
         if not has_column("users", "is_disabled"):

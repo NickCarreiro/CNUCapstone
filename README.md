@@ -146,3 +146,44 @@ The goal of this document is to provide a clear, structured roadmap for developm
 - Minimal dependencies
 - Defense in depth
 - Security over scalability
+
+---
+
+## MFA Transport Configuration
+
+FileFort now supports three MFA methods:
+- TOTP (authenticator app)
+- Email OTP (SMTP delivery)
+- SMS OTP (carrier email gateway via SMTP, with optional Twilio fallback)
+
+Set these environment variables in `.env` for transport-backed MFA:
+
+```env
+PFV_MFA_CODE_TTL_SECONDS=300
+PFV_MFA_RESEND_COOLDOWN_SECONDS=30
+PFV_MFA_MAX_ATTEMPTS=5
+
+PFV_SMTP_HOST="smtp.example.com"
+PFV_SMTP_PORT=587
+PFV_SMTP_USERNAME="smtp-user"
+PFV_SMTP_PASSWORD="smtp-pass"
+PFV_SMTP_FROM="no-reply@example.com"
+PFV_SMTP_USE_TLS=true
+PFV_SMTP_USE_SSL=false
+
+PFV_SMS_PROVIDER="smtp_gateway"   # smtp_gateway, twilio, or auto
+PFV_TWILIO_ACCOUNT_SID="ACxxxxxxxx"
+PFV_TWILIO_AUTH_TOKEN="xxxxxxxx"
+PFV_TWILIO_FROM_NUMBER="+15551234567"
+```
+
+When `PFV_SMS_PROVIDER="smtp_gateway"`, users must set a phone number and supported carrier in Profile:
+- AT&T
+- AT&T (MMS)
+- Verizon
+- Verizon (MMS)
+- T-Mobile
+- Sprint
+- Cricket
+- Metro by T-Mobile
+- US Cellular

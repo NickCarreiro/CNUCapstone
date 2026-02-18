@@ -1,0 +1,335 @@
+{% extends "base.html" %}
+{% block body_class %}page-profile{% endblock %}
+{% block content %}
+<section class="card hero-card">
+  <div class="eyebrow">Account</div>
+  <h1>Profile</h1>
+  <p class="muted">Manage identity, profile visibility, MFA, and security controls for your FileFort account.</p>
+</section>
+
+{% if error %}
+<div class="alert">{{ error }}</div>
+{% endif %}
+{% if notice %}
+<div class="alert admin-notice">{{ notice }}</div>
+{% endif %}
+
+<section class="card">
+  <div class="card-header">
+    <h2>Profile picture</h2>
+  </div>
+  <div class="profile-avatar-section">
+    <div class="profile-avatar-large" aria-hidden="true">
+      {% if user.profile_image_path %}
+      <img src="/ui/profile/avatar" alt="" class="profile-avatar-large-img" />
+      {% else %}
+      {{ user.username[:1]|upper }}
+      {% endif %}
+    </div>
+    <div class="profile-avatar-forms">
+      <form method="post" action="/ui/profile/avatar" enctype="multipart/form-data" class="form compact">
+        <label>
+          <span>Upload profile picture</span>
+          <input type="file" name="avatar" accept="image/png,image/jpeg,image/webp,image/gif" required />
+        </label>
+        <button type="submit">Upload profile picture</button>
+      </form>
+      {% if user.profile_image_path %}
+      <form method="post" action="/ui/profile/avatar/remove" class="inline-form">
+        <button type="submit" class="ghost">Remove picture</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Contact and visibility</h2>
+  </div>
+  <p class="muted">Manage contact visibility and MFA delivery channels (SMTP email and SMS).</p>
+  <form method="post" action="/ui/profile/preferences" class="form compact">
+    <label>
+      <span>Email</span>
+      <input type="email" name="email" value="{{ user.email or '' }}" placeholder="you@example.com" />
+    </label>
+    <label class="toggle-row">
+      <input type="checkbox" name="email_visible" {% if user.email_visible %}checked{% endif %} />
+      <span>Allow other users to see my verified email</span>
+    </label>
+    <div class="muted">
+      Email status:
+      {% if user.email and user.email_verified %}
+      Verified
+      {% elif user.email %}
+      Not verified
+      {% else %}
+      Not set
+      {% endif %}
+    </div>
+    <label class="toggle-row">
+      <input type="checkbox" name="email_mfa_enabled" {% if user.email_mfa_enabled %}checked{% endif %} />
+      <span>Enable email MFA codes (via SMTP)</span>
+    </label>
+    <div class="muted">
+      SMTP status:
+      {% if smtp_ready %}
+      Ready
+      {% else %}
+      Not configured
+      {% endif %}
+    </div>
+    <label>
+      <span>Phone number (for SMS MFA option)</span>
+      <input type="text" name="phone_number" value="{{ user.phone_number or '' }}" placeholder="+1 555 555 5555" />
+    </label>
+    <label>
+      <span>Carrier (supported gateways)</span>
+      <select name="sms_carrier">
+        <option value="">Select carrier</option>
+        {% for carrier in sms_carrier_options %}
+        <option value="{{ carrier.value }}" {% if user.sms_carrier == carrier.value %}selected{% endif %}>{{ carrier.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="toggle-row">
+      <input type="checkbox" name="sms_mfa_enabled" {% if user.sms_mfa_enabled %}checked{% endif %} />
+      <span>Enable SMS MFA option for this account</span>
+    </label>
+    <div class="muted">
+      SMS delivery mode: {{ sms_provider_label }}
+    </div>
+    <div class="muted">
+      SMS transport status:
+      {% if sms_ready %}
+      Ready
+      {% else %}
+      Not configured
+      {% endif %}
+    </div>
+    <label>
+      <span>Preferred MFA method</span>
+      <select name="mfa_method">
+        <option value="totp" {% if mfa_method_preferred == "totp" %}selected{% endif %}>Authenticator app (TOTP)</option>
+        <option value="email" {% if mfa_method_preferred == "email" %}selected{% endif %}>Email code (SMTP)</option>
+        <option value="sms" {% if mfa_method_preferred == "sms" %}selected{% endif %}>SMS code</option>
+      </select>
+    </label>
+    <div class="modal-actions">
+      <button type="submit">Save contact settings</button>
+      <button
+        type="submit"
+        formaction="/ui/profile/email/send-verification"
+        formmethod="post"
+        class="ghost"
+        {% if not user.email %}disabled{% endif %}
+      >
+        Send verification email
+      </button>
+    </div>
+    <p class="muted">
+      {% if smtp_ready %}
+      Verification emails are delivered through the configured SMTP relay.
+      {% else %}
+      SMTP is not configured yet. Verification can still be generated as a manual link for development.
+      {% endif %}
+    </p>
+    {% if mfa_methods_active %}
+    <p class="muted">
+      Active MFA methods:
+      {% for method in mfa_methods_active %}
+      <code>{{ mfa_method_labels.get(method, method) }}</code>{% if not loop.last %}, {% endif %}
+      {% endfor %}
+    </p>
+    {% endif %}
+  </form>
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Identity</h2>
+  </div>
+  <p class="muted">Change your username. Password is required. If MFA is enabled, you must provide a code.</p>
+  <form method="post" action="/ui/profile/username" class="form compact">
+    <label>
+      <span>New username</span>
+      <input type="text" name="username" value="{{ user.username }}" required />
+    </label>
+    <label>
+      <span>Current password</span>
+      <input type="password" name="password" required />
+    </label>
+    {% if user.totp_enabled %}
+    <label>
+      <span>MFA code</span>
+      <input type="text" name="mfa_code" inputmode="numeric" pattern="[0-9]*" required />
+    </label>
+    {% endif %}
+    <button type="submit">Update username</button>
+  </form>
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Security</h2>
+    <div class="card-tools">
+      <a class="pill" href="/ui/mfa">Manage MFA</a>
+    </div>
+  </div>
+  <p class="muted">Change your password. MFA is required when enabled. All sessions are revoked and you stay signed in.</p>
+  <form method="post" action="/ui/profile/password" class="form compact">
+    <label>
+      <span>Current password</span>
+      <input type="password" name="current_password" required />
+    </label>
+    <label>
+      <span>New password</span>
+      <input type="password" name="new_password" minlength="10" required />
+    </label>
+    <label>
+      <span>Confirm new password</span>
+      <input type="password" name="confirm_password" minlength="10" required />
+    </label>
+    {% if user.totp_enabled %}
+    <label>
+      <span>MFA code</span>
+      <input type="text" name="mfa_code" inputmode="numeric" pattern="[0-9]*" required />
+    </label>
+    {% endif %}
+    <button type="submit" class="danger">Update password</button>
+  </form>
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Theme</h2>
+  </div>
+  <p class="muted">Theme and background are stored in this browser. System mode follows your device preference.</p>
+  <div class="actions">
+    <button type="button" class="pill" id="profileThemeSystem">System</button>
+    <button type="button" class="pill" id="profileThemeLight">Light</button>
+    <button type="button" class="pill" id="profileThemeDark">Dark</button>
+  </div>
+  <div class="actions">
+    <button type="button" class="ghost" data-bg-preset="aurora">Aurora preset</button>
+    <button type="button" class="ghost" data-bg-preset="slate">Slate preset</button>
+    <button type="button" class="ghost" data-bg-preset="ember">Ember preset</button>
+    <button type="button" class="ghost" id="profileBgReset">Reset background</button>
+  </div>
+  <details class="soft-panel">
+    <summary>Advanced background controls</summary>
+    <form class="form compact" id="profileBgForm">
+      <label>
+        <span>Mode</span>
+        <select id="profileBgMode">
+          <option value="gradient">Gradient</option>
+          <option value="solid">Solid color</option>
+        </select>
+      </label>
+      <label>
+        <span>Primary color</span>
+        <input type="color" id="profileBgColorA" value="#0a152d" />
+      </label>
+      <label>
+        <span>Secondary color</span>
+        <input type="color" id="profileBgColorB" value="#001f2d" />
+      </label>
+      <button type="submit">Apply background</button>
+    </form>
+  </details>
+</section>
+
+<script>
+  (function () {
+    const root = document.body;
+    const prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+    const themeToggle = document.getElementById("themeToggle");
+    const sys = document.getElementById("profileThemeSystem");
+    const light = document.getElementById("profileThemeLight");
+    const dark = document.getElementById("profileThemeDark");
+    const bgPresetButtons = document.querySelectorAll("[data-bg-preset]");
+    const bgReset = document.getElementById("profileBgReset");
+    const bgForm = document.getElementById("profileBgForm");
+    const bgMode = document.getElementById("profileBgMode");
+    const bgColorA = document.getElementById("profileBgColorA");
+    const bgColorB = document.getElementById("profileBgColorB");
+    const BG_STORAGE_KEY = "pfv-custom-bg";
+    if (!sys || !light || !dark) return;
+
+    function applyTheme(next) {
+      root.dataset.theme = next;
+      if (themeToggle) themeToggle.textContent = next === "dark" ? "Light mode" : "Dark mode";
+      try {
+        const term = document.getElementById("pfvTerminal");
+        if (term) term.dataset.theme = next === "dark" ? "dark" : "light";
+      } catch {}
+    }
+
+    function setStoredTheme(value) {
+      try {
+        if (!value) {
+          localStorage.removeItem("pfv-theme");
+          applyTheme(prefersDark ? "dark" : "light");
+        } else {
+          localStorage.setItem("pfv-theme", value);
+          applyTheme(value);
+        }
+      } catch {
+        applyTheme(value || (prefersDark ? "dark" : "light"));
+      }
+    }
+
+    sys.addEventListener("click", () => setStoredTheme(""));
+    light.addEventListener("click", () => setStoredTheme("light"));
+    dark.addEventListener("click", () => setStoredTheme("dark"));
+
+    function setBackgroundCss(css) {
+      const value = String(css || "").trim();
+      try {
+        if (value) {
+          localStorage.setItem(BG_STORAGE_KEY, value);
+          root.style.setProperty("--pfv-custom-bg", value);
+        } else {
+          localStorage.removeItem(BG_STORAGE_KEY);
+          root.style.removeProperty("--pfv-custom-bg");
+        }
+      } catch {
+        if (value) root.style.setProperty("--pfv-custom-bg", value);
+      }
+    }
+
+    const PRESETS = {
+      aurora:
+        "radial-gradient(1100px at 14% 0%, rgba(0,199,255,0.20), rgba(0,0,0,0) 54%), radial-gradient(980px at 98% 8%, rgba(255,191,60,0.18), rgba(0,0,0,0) 56%), linear-gradient(180deg, #050913 0%, #070d1b 56%, #050812 100%)",
+      slate:
+        "radial-gradient(980px at 6% 0%, rgba(115,172,255,0.14), rgba(0,0,0,0) 58%), linear-gradient(180deg, #0b1324 0%, #101a2d 54%, #0d1727 100%)",
+      ember:
+        "radial-gradient(900px at 96% 4%, rgba(255,143,69,0.22), rgba(0,0,0,0) 54%), radial-gradient(820px at 0% 100%, rgba(255,208,92,0.12), rgba(0,0,0,0) 56%), linear-gradient(180deg, #13090a 0%, #1a0e12 56%, #12080a 100%)",
+    };
+
+    bgPresetButtons.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const preset = btn.dataset.bgPreset || "";
+        if (!preset || !PRESETS[preset]) return;
+        setBackgroundCss(PRESETS[preset]);
+      });
+    });
+
+    bgReset?.addEventListener("click", () => setBackgroundCss(""));
+
+    bgForm?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const mode = (bgMode?.value || "gradient").trim();
+      const a = (bgColorA?.value || "#0a152d").trim();
+      const b = (bgColorB?.value || "#001f2d").trim();
+      if (mode === "solid") {
+        setBackgroundCss(`linear-gradient(180deg, ${a} 0%, ${a} 100%)`);
+      } else {
+        setBackgroundCss(
+          `radial-gradient(1000px at 10% 0%, color-mix(in srgb, ${a} 42%, transparent), rgba(0,0,0,0) 56%), radial-gradient(900px at 98% 8%, color-mix(in srgb, ${b} 34%, transparent), rgba(0,0,0,0) 58%), linear-gradient(180deg, ${a} 0%, ${b} 100%)`
+        );
+      }
+    });
+  })();
+</script>
+{% endblock %}

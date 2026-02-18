@@ -4,24 +4,38 @@
 <section class="card auth-card">
   <div class="eyebrow">Secure Access</div>
   <h1>Sign in</h1>
-  <p class="muted">Enter your username, password, and TOTP code if enabled.</p>
+  <p class="muted">Enter your username/password. If MFA is enabled, choose a method and provide a code.</p>
+  {% if notice %}
+  <div class="alert admin-notice">{{ notice }}</div>
+  {% endif %}
   {% if error %}
   <div class="alert">{{ error }}</div>
   {% endif %}
   <form method="post" action="/ui/login" class="form">
     <label>
       <span>Username</span>
-      <input type="text" name="username" required />
+      <input type="text" name="username" value="{{ username or '' }}" required />
     </label>
     <label>
       <span>Password</span>
       <input type="password" name="password" required />
     </label>
     <label>
-      <span>TOTP code (if enabled)</span>
-      <input type="text" name="totp_code" inputmode="numeric" pattern="[0-9]*" />
+      <span>MFA method</span>
+      <select name="mfa_method">
+        {% for method in mfa_methods %}
+        <option value="{{ method.value }}" {% if mfa_method == method.value %}selected{% endif %}>{{ method.label }}</option>
+        {% endfor %}
+      </select>
     </label>
-    <button type="submit">Sign in</button>
+    <label>
+      <span>MFA code (if required)</span>
+      <input type="text" name="mfa_code" inputmode="numeric" pattern="[0-9]*" />
+    </label>
+    <div class="modal-actions">
+      <button type="submit">Sign in</button>
+      <button type="submit" class="ghost" name="send_mfa_code" value="1">Send code</button>
+    </div>
   </form>
   <p class="muted helper-link">
     New here? <a href="/ui/register">Create an account</a>

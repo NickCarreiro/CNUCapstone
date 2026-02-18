@@ -1,36 +1,108 @@
 {% extends "base.html" %}
-{% block body_class %}page-totp{% endblock %}
+{% block body_class %}page-mfa{% endblock %}
 {% block content %}
 <section class="card auth-card">
   <div class="eyebrow">Account Security</div>
-  <h1>TOTP Setup</h1>
-  {% if enabled %}
-    <p class="muted">TOTP is currently enabled for your account.</p>
-    <form method="post" action="/ui/totp/disable">
-      <button type="submit" class="danger">Disable TOTP</button>
-    </form>
-  {% else %}
-    <p class="muted">Scan the secret in your authenticator app or enter it manually.</p>
-    {% if error %}
-      <div class="alert">{{ error }}</div>
-    {% endif %}
-    <div class="totp-box">
-      <div>
-        <div class="label">Manual secret</div>
-        <div class="secret">{{ secret }}</div>
-      </div>
-      <div>
-        <div class="label">Provisioning URI</div>
-        <div class="secret">{{ provisioning_uri }}</div>
-      </div>
-    </div>
-    <form method="post" action="/ui/totp/verify" class="form">
-      <label>
-        <span>Enter current code</span>
-        <input type="text" name="code" inputmode="numeric" pattern="[0-9]*" required />
-      </label>
-      <button type="submit">Verify and Enable</button>
-    </form>
+  <h1>MFA Setup</h1>
+  <p class="muted">Use authenticator app, email (SMTP), or SMS as your second-factor method.</p>
+  {% if notice %}
+  <div class="alert admin-notice">{{ notice }}</div>
   {% endif %}
+  {% if error %}
+  <div class="alert">{{ error }}</div>
+  {% endif %}
+
+  <div class="two-col-forms">
+    <div class="soft-panel">
+      <h2>Authenticator app (TOTP)</h2>
+      {% if enabled %}
+        <p class="muted">TOTP is enabled for your account.</p>
+        <form method="post" action="/ui/mfa/disable">
+          <button type="submit" class="danger">Disable authenticator MFA</button>
+        </form>
+      {% else %}
+        <p class="muted">Scan this secret in your authenticator app, then verify one code.</p>
+        <div class="totp-box">
+          <div>
+            <div class="label">Manual secret</div>
+            <div class="secret">{{ secret }}</div>
+          </div>
+          <div>
+            <div class="label">Provisioning URI</div>
+            <div class="secret">{{ provisioning_uri }}</div>
+          </div>
+        </div>
+        <form method="post" action="/ui/mfa/verify" class="form">
+          <label>
+            <span>Enter current code</span>
+            <input type="text" name="code" inputmode="numeric" pattern="[0-9]*" required />
+          </label>
+          <button type="submit">Verify and enable</button>
+        </form>
+      {% endif %}
+    </div>
+
+    <div class="soft-panel">
+      <h2>Delivery MFA</h2>
+      <p class="muted">Email and SMS MFA channels are configured in your profile settings.</p>
+      <div class="form compact">
+        <div class="muted">
+          Email MFA:
+          {% if email_mfa_enabled %}
+          Enabled
+          {% else %}
+          Disabled
+          {% endif %}
+          {% if not smtp_ready %}
+          (SMTP unavailable)
+          {% endif %}
+        </div>
+        <div class="muted">
+          SMS MFA:
+          {% if sms_mfa_enabled %}
+          Enabled
+          {% else %}
+          Disabled
+          {% endif %}
+          {% if not sms_ready %}
+          (SMS transport unavailable)
+          {% endif %}
+        </div>
+        <div class="muted">SMS delivery mode: {{ sms_provider_label }}</div>
+        {% if sms_carrier_label %}
+        <div class="muted">Selected carrier: {{ sms_carrier_label }}</div>
+        {% endif %}
+        {% if email_mfa_enabled %}
+        <form method="post" action="/ui/mfa/challenge/send" class="inline-form">
+          <input type="hidden" name="method" value="email" />
+          <button type="submit" class="ghost">Send test email code</button>
+        </form>
+        {% endif %}
+        {% if sms_mfa_enabled %}
+        <form method="post" action="/ui/mfa/challenge/send" class="inline-form">
+          <input type="hidden" name="method" value="sms" />
+          <button type="submit" class="ghost">Send test SMS code</button>
+        </form>
+        {% endif %}
+      </div>
+      <p class="muted">
+        Preferred method:
+        {% if preferred_method %}
+        <code>{{ mfa_method_labels.get(preferred_method, preferred_method) }}</code>
+        {% else %}
+        none
+        {% endif %}
+      </p>
+      {% if active_methods %}
+      <p class="muted">
+        Active methods:
+        {% for method in active_methods %}
+        <code>{{ mfa_method_labels.get(method, method) }}</code>{% if not loop.last %}, {% endif %}
+        {% endfor %}
+      </p>
+      {% endif %}
+      <a class="pill" href="/ui/profile">Manage contact + MFA channels</a>
+    </div>
+  </div>
 </section>
 {% endblock %}

@@ -16,7 +16,7 @@
       <div class="stat-label">Administrators</div>
     </div>
     <div class="stat-chip">
-      <div class="stat-number">{{ totp_enabled_count }}</div>
+      <div class="stat-number">{{ mfa_enabled_count }}</div>
       <div class="stat-label">MFA enabled</div>
     </div>
     <div class="stat-chip">
@@ -65,7 +65,7 @@
         <tr class="admin-user-row">
           <td data-label="Username">{{ target.username }}</td>
           <td data-label="Role">{{ "Administrator" if target.is_admin else "Standard" }}</td>
-          <td data-label="MFA">{{ "Enabled" if target.totp_enabled else "Disabled" }}</td>
+          <td data-label="MFA">{{ row.mfa_summary }}</td>
           <td data-label="Active sessions">{{ row.active_sessions }}</td>
           <td data-label="Files">{{ row.file_count }}</td>
           <td data-label="Groups">{{ row.group_count }}</td>

@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 import mimetypes
+import os
 from urllib.parse import quote_plus
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
@@ -30,7 +31,7 @@ from app.services.audit import add_audit_log
 from app.services.crypto import decrypt_file_iter, encrypt_file_to_path
 from app.services.group_keystore import ensure_group_key, get_group_dek
 from app.services.keystore import get_user_dek
-from app.services.message_crypto import decrypt_message, encrypt_message
+from app.services.message_crypto import encrypt_message
 
 router = APIRouter(prefix="/ui/groups", tags=["groups"])
 templates = Jinja2Templates(directory="templates")
@@ -149,6 +150,76 @@ def _safe_group_path(group: Group, path_str: str) -> Path:
     return candidate
 
 
+def _safe_group_join(group: Group, rel_path: str) -> Path:
+    root = _group_root(group).resolve()
+    rel = (rel_path or "").strip().lstrip("/").replace("\\", "/")
+    candidate = (root / rel).resolve()
+    if not candidate.is_relative_to(root):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    return candidate
+
+
+def _group_detail_redirect(group: Group, message: str, *, error: bool = False) -> RedirectResponse:
+    key = "error" if error else "notice"
+    return RedirectResponse(url=f"/ui/groups/{group.id}?{key}={quote_plus(message)}", status_code=303)
+
+
+def _can_edit_group_file(user: User, membership: GroupMembership, record: GroupFileRecord) -> bool:
+    role = _normalize_role(membership.role)
+    if not _role_at_least(role, ROLE_MEMBER):
+        return False
+    if _role_at_least(role, ROLE_ADMIN):
+        return True
+    return record.uploader_id == user.id
+
+
+def _ensure_tree_node(node: dict) -> dict:
+    if "__files__" not in node:
+        node["__files__"] = []
+    return node
+
+
+def _build_group_vault_tree(root: Path, files: list[GroupFileRecord]) -> dict:
+    tree: dict[str, dict] = {}
+    _ensure_tree_node(tree)
+
+    for dirpath, dirnames, _ in os.walk(root):
+        rel = Path(dirpath).resolve().relative_to(root)
+        if str(rel) == ".":
+            node = tree
+        else:
+            node = tree
+            for part in rel.parts:
+                node = node.setdefault(part, {})
+                _ensure_tree_node(node)
+        dirnames.sort()
+
+    for record in files:
+        try:
+            rel = Path(record.file_path).resolve().relative_to(root)
+        except ValueError:
+            continue
+        parts = rel.parts
+        if not parts:
+            continue
+        *folders, filename = parts
+        node = tree
+        for part in folders:
+            node = node.setdefault(part, {})
+            _ensure_tree_node(node)
+        _ensure_tree_node(node)
+        node["__files__"].append(filename)
+
+    def _sort_tree(node: dict) -> None:
+        if "__files__" in node:
+            node["__files__"].sort()
+        for key in sorted(k for k in node.keys() if k != "__files__"):
+            _sort_tree(node[key])
+
+    _sort_tree(tree)
+    return tree
+
+
 def _message_attachment_root() -> Path:
     root = Path(settings.staging_path) / "messages"
     root.mkdir(parents=True, exist_ok=True)
@@ -203,16 +274,9 @@ def _resolve_thread_id(
     return latest_thread or uuid.uuid4()
 
 
-def _format_utc(value: datetime | None) -> str:
-    if not value:
-        return "-"
-    return value.strftime("%Y-%m-%d %H:%M:%S UTC")
-
-
 @router.get("")
 def groups_home(
     request: Request,
-    thread: str | None = None,
     notice: str | None = None,
     error: str | None = None,
     db: Session = Depends(get_db),
@@ -237,104 +301,6 @@ def groups_home(
         .all()
     )
 
-    messages = (
-        db.query(DirectMessage)
-        .options(joinedload(DirectMessage.sender), joinedload(DirectMessage.recipient))
-        .filter(or_(DirectMessage.sender_id == user.id, DirectMessage.recipient_id == user.id))
-        .order_by(DirectMessage.created_at.desc())
-        .limit(300)
-        .all()
-    )
-
-    thread_buckets: dict[uuid.UUID, list[DirectMessage]] = {}
-    thread_summaries: dict[uuid.UUID, dict] = {}
-    for row in messages:
-        thread_id = row.thread_id or row.id
-        thread_buckets.setdefault(thread_id, []).append(row)
-
-        partner = row.recipient if row.sender_id == user.id else row.sender
-        preview = decrypt_message(row.body).replace("\n", " ").strip()
-        if len(preview) > 82:
-            preview = f"{preview[:79]}..."
-
-        if thread_id not in thread_summaries:
-            thread_summaries[thread_id] = {
-                "thread_uuid": thread_id,
-                "thread_id": str(thread_id),
-                "partner_username": partner.username,
-                "latest_preview": preview or "(attachment)",
-                "latest_created_at": row.created_at,
-                "latest_created_at_utc": _format_utc(row.created_at),
-                "unread_count": 0,
-            }
-
-        if row.recipient_id == user.id and row.read_at is None:
-            thread_summaries[thread_id]["unread_count"] += 1
-
-    threads = sorted(
-        thread_summaries.values(),
-        key=lambda item: item["latest_created_at"] or datetime.min,
-        reverse=True,
-    )
-
-    active_thread_uuid: uuid.UUID | None = None
-    if thread:
-        try:
-            requested = uuid.UUID(thread)
-            if requested in thread_buckets:
-                active_thread_uuid = requested
-        except ValueError:
-            active_thread_uuid = None
-    if not active_thread_uuid and threads:
-        active_thread_uuid = threads[0]["thread_uuid"]
-
-    active_thread_messages: list[DirectMessage] = []
-    active_thread_summary: dict | None = None
-    if active_thread_uuid:
-        active_thread_messages = sorted(
-            thread_buckets.get(active_thread_uuid, []),
-            key=lambda row: row.created_at or datetime.min,
-        )
-        active_thread_summary = thread_summaries.get(active_thread_uuid)
-
-    read_updates = 0
-    for row in active_thread_messages:
-        if row.recipient_id == user.id and row.read_at is None:
-            row.read_at = datetime.utcnow()
-            read_updates += 1
-    if read_updates:
-        db.commit()
-        if active_thread_summary:
-            active_thread_summary["unread_count"] = 0
-
-    thread_messages = []
-    for row in active_thread_messages:
-        outbound = row.sender_id == user.id
-        thread_messages.append(
-            {
-                "id": str(row.id),
-                "thread_id": str(row.thread_id or row.id),
-                "sender_username": row.sender.username,
-                "recipient_username": row.recipient.username,
-                "body": decrypt_message(row.body),
-                "created_at": row.created_at,
-                "created_at_utc": _format_utc(row.created_at),
-                "direction": "Sent" if outbound else "Received",
-                "is_outbound": outbound,
-                "receipt": (
-                    f"Read {_format_utc(row.read_at)}"
-                    if outbound and row.read_at
-                    else ("Delivered" if outbound else ("Read" if row.read_at else "Unread"))
-                ),
-                "has_attachment": bool(row.attachment_name and row.attachment_path),
-                "attachment_name": row.attachment_name,
-                "attachment_size": row.attachment_size,
-                "attachment_url": f"/ui/groups/messages/{row.id}/attachment"
-                if row.attachment_name and row.attachment_path
-                else None,
-            }
-        )
-
     return templates.TemplateResponse(
         "groups.html",
         {
@@ -342,11 +308,6 @@ def groups_home(
             "user": user,
             "memberships": memberships,
             "pending_invites": pending_invites,
-            "threads": threads,
-            "thread_messages": thread_messages,
-            "active_thread_id": str(active_thread_uuid) if active_thread_uuid else "",
-            "active_partner_username": active_thread_summary["partner_username"] if active_thread_summary else "",
-            "unread_thread_total": sum(item["unread_count"] for item in threads),
             "notice": notice,
             "error": error,
         },
@@ -860,6 +821,8 @@ def group_detail(
     request: Request,
     file_q: str = "",
     file_sort: str = "newest",
+    notice: str | None = None,
+    error: str | None = None,
     db: Session = Depends(get_db),
 ):
     user = _get_current_user(db, request)
@@ -913,7 +876,44 @@ def group_detail(
         normalized_file_sort = "newest"
         files_query = files_query.order_by(GroupFileRecord.uploaded_at.desc())
 
-    files = files_query.all()
+    file_records = files_query.all()
+
+    root = _group_root(group).resolve()
+    file_rows: list[dict] = []
+    for record in file_records:
+        try:
+            rel = Path(record.file_path).resolve().relative_to(root)
+            rel_path = str(rel)
+        except ValueError:
+            rel_path = record.file_name
+        file_rows.append(
+            {
+                "record": record,
+                "rel_path": rel_path,
+                "id": str(record.id),
+                "display_name": record.file_name,
+                "can_edit": _can_edit_group_file(user, membership, record),
+            }
+        )
+
+    folder_rows = []
+    for dirpath, dirnames, _ in os.walk(root):
+        rel = Path(dirpath).resolve().relative_to(root)
+        rel_path = "" if str(rel) == "." else str(rel)
+        depth = 0 if rel_path == "" else len(Path(rel_path).parts)
+        folder_rows.append({"path": rel_path, "depth": depth})
+        dirnames.sort()
+    folder_rows.sort(key=lambda item: (item["depth"], item["path"]))
+
+    folder_tree: dict[str, dict] = {}
+    for folder in folder_rows:
+        if not folder["path"]:
+            continue
+        node = folder_tree
+        for part in Path(folder["path"]).parts:
+            node = node.setdefault(part, {})
+
+    vault_tree = _build_group_vault_tree(root, file_records)
 
     return templates.TemplateResponse(
         "group_detail.html",
@@ -923,7 +923,10 @@ def group_detail(
             "group": group,
             "members": members,
             "pending_invites": pending_invites,
-            "files": files,
+            "files": file_rows,
+            "folders": folder_rows,
+            "folder_tree": folder_tree,
+            "vault_tree": vault_tree,
             "is_owner": normalized_role == ROLE_OWNER,
             "membership_role": normalized_role,
             "can_invite": can_invite,
@@ -932,6 +935,8 @@ def group_detail(
             "member_role_options": MANAGE_MEMBER_ROLES,
             "file_q": normalized_file_q,
             "file_sort": normalized_file_sort,
+            "notice": notice or request.query_params.get("notice"),
+            "error": error or request.query_params.get("error"),
         },
     )
 
@@ -940,6 +945,7 @@ def group_detail(
 def upload_group_file(
     group_id: str,
     request: Request,
+    folder: str = Form(""),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
@@ -950,7 +956,9 @@ def upload_group_file(
     dek = get_group_dek(db, group)
 
     safe_name = Path(file.filename).name
-    dest = _group_root(group) / safe_name
+    dest_dir = _safe_group_join(group, folder)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / safe_name
     nonce_b64, tag_b64, plain_size = encrypt_file_to_path(dek, file.file, dest)
     mime_type, _ = mimetypes.guess_type(safe_name)
 
@@ -970,11 +978,204 @@ def upload_group_file(
         db,
         user,
         action="group",
-        message=f"Uploaded file '{safe_name}' to group '{group.name}'.",
+        message=f"Uploaded file '{safe_name}' to group '{group.name}' -> '{folder or '/'}'.",
         level="SUCCESS",
     )
     db.commit()
     return RedirectResponse(url=f"/ui/groups/{group.id}", status_code=303)
+
+
+@router.post("/{group_id}/folder")
+def create_group_folder(
+    group_id: str,
+    request: Request,
+    folder: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    user = _must_user(db, request)
+    group, membership = _must_group_role(db, user, group_id, ROLE_VIEWER)
+
+    normalized_role = _normalize_role(membership.role)
+    if not _role_at_least(normalized_role, ROLE_MEMBER):
+        return _group_detail_redirect(group, "Your role is read-only for creating folders.", error=True)
+
+    folder_path = (folder or "").strip()
+    if not folder_path:
+        return _group_detail_redirect(group, "Folder path is required.", error=True)
+
+    dest_dir = _safe_group_join(group, folder_path)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    add_event(db, user, action="group", message=f"Created group folder '{folder_path}' in '{group.name}'.", level="SUCCESS")
+    db.commit()
+    return _group_detail_redirect(group, f"Folder created: /{folder_path}", error=False)
+
+
+@router.post("/{group_id}/move")
+def move_group_file(
+    group_id: str,
+    request: Request,
+    file_id: str = Form(...),
+    new_folder: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    user = _must_user(db, request)
+    group, membership = _must_group_role(db, user, group_id, ROLE_VIEWER)
+
+    normalized_role = _normalize_role(membership.role)
+    if not _role_at_least(normalized_role, ROLE_MEMBER):
+        return _group_detail_redirect(group, "Your role is read-only for moving files.", error=True)
+
+    record = _must_group_file(db, group, file_id)
+    if not _can_edit_group_file(user, membership, record):
+        return _group_detail_redirect(group, "You do not have permission to move that file.", error=True)
+
+    dest_dir = _safe_group_join(group, new_folder)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    current_path = _safe_group_path(group, record.file_path)
+    if not current_path.exists():
+        return _group_detail_redirect(group, "File missing on disk.", error=True)
+
+    dest = dest_dir / current_path.name
+    try:
+        if dest.resolve() == current_path.resolve():
+            return _group_detail_redirect(group, "File is already in that folder.", error=False)
+    except FileNotFoundError:
+        # Current file missing should have been caught above; fall through.
+        pass
+
+    if dest.exists():
+        target_display = f"/{new_folder.strip().lstrip('/')}" if (new_folder or "").strip() else "/"
+        return _group_detail_redirect(
+            group,
+            f"A file named '{record.file_name}' already exists in {target_display}.",
+            error=True,
+        )
+
+    current_path.replace(dest)
+    record.file_path = str(dest)
+    add_event(
+        db,
+        user,
+        action="group",
+        message=f"Moved group file '{record.file_name}' -> '{new_folder or '/'}' in '{group.name}'.",
+        level="SUCCESS",
+    )
+    db.commit()
+    return _group_detail_redirect(group, f"Moved: {record.file_name}", error=False)
+
+
+@router.post("/{group_id}/rename")
+def rename_group_file(
+    group_id: str,
+    request: Request,
+    file_id: str = Form(...),
+    new_name: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    user = _must_user(db, request)
+    group, membership = _must_group_role(db, user, group_id, ROLE_VIEWER)
+
+    normalized_role = _normalize_role(membership.role)
+    if not _role_at_least(normalized_role, ROLE_MEMBER):
+        return _group_detail_redirect(group, "Your role is read-only for renaming files.", error=True)
+
+    record = _must_group_file(db, group, file_id)
+    if not _can_edit_group_file(user, membership, record):
+        return _group_detail_redirect(group, "You do not have permission to rename that file.", error=True)
+
+    safe_name = Path(new_name).name.strip()
+    if not safe_name:
+        return _group_detail_redirect(group, "Invalid file name.", error=True)
+
+    current_path = _safe_group_path(group, record.file_path)
+    if not current_path.exists():
+        return _group_detail_redirect(group, "File missing on disk.", error=True)
+
+    dest = current_path.with_name(safe_name)
+    if dest.exists():
+        return _group_detail_redirect(group, f"A file named '{safe_name}' already exists here.", error=True)
+
+    old_name = record.file_name
+    current_path.replace(dest)
+    record.file_name = safe_name
+    record.file_path = str(dest)
+    add_event(
+        db,
+        user,
+        action="group",
+        message=f"Renamed group file '{old_name}' -> '{safe_name}' in '{group.name}'.",
+        level="SUCCESS",
+    )
+    db.commit()
+    return _group_detail_redirect(group, f"Renamed: {old_name} -> {safe_name}", error=False)
+
+
+@router.post("/{group_id}/delete")
+def delete_group_file(
+    group_id: str,
+    request: Request,
+    file_id: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    user = _must_user(db, request)
+    group, membership = _must_group_role(db, user, group_id, ROLE_VIEWER)
+
+    normalized_role = _normalize_role(membership.role)
+    if not _role_at_least(normalized_role, ROLE_MEMBER):
+        return _group_detail_redirect(group, "Your role is read-only for deleting files.", error=True)
+
+    record = _must_group_file(db, group, file_id)
+    if not _can_edit_group_file(user, membership, record):
+        return _group_detail_redirect(group, "You do not have permission to delete that file.", error=True)
+
+    path = _safe_group_path(group, record.file_path)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+    add_event(
+        db,
+        user,
+        action="group",
+        message=f"Deleted group file '{record.file_name}' from '{group.name}'.",
+        level="WARN",
+    )
+    db.delete(record)
+    db.commit()
+    return _group_detail_redirect(group, f"Deleted: {record.file_name}", error=False)
+
+
+@router.get("/{group_id}/preview/{file_id}")
+def preview_group_file(group_id: str, file_id: str, request: Request, db: Session = Depends(get_db)):
+    user = _must_user(db, request)
+    group, _ = _must_group_role(db, user, group_id, ROLE_VIEWER)
+    record = _must_group_file(db, group, file_id)
+    path = _safe_group_path(group, record.file_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="File missing on disk")
+
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": f'inline; filename="{record.file_name}"',
+    }
+
+    media_type = record.mime_type or (mimetypes.guess_type(record.file_name)[0] or "application/octet-stream")
+    if not record.is_encrypted:
+        return FileResponse(path=path, filename=record.file_name, media_type=media_type, headers=headers)
+    if not record.enc_nonce or not record.enc_tag:
+        raise HTTPException(status_code=500, detail="Encrypted file metadata is incomplete")
+
+    add_event(db, user, action="decrypt", message=f"Decrypting group file '{record.file_name}' for preview...")
+    db.commit()
+    dek = get_group_dek(db, group)
+    return StreamingResponse(
+        decrypt_file_iter(dek, path, record.enc_nonce, record.enc_tag),
+        media_type=media_type,
+        headers=headers,
+    )
 
 
 @router.get("/{group_id}/files/{file_id}")

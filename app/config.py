@@ -26,5 +26,25 @@ class Settings(BaseSettings):
     # Session settings
     session_ttl_minutes: int = 60
 
+    # MFA challenge settings
+    mfa_code_ttl_seconds: int = 300
+    mfa_resend_cooldown_seconds: int = 30
+    mfa_max_attempts: int = 5
+
+    # Optional outgoing mail transport for profile email verification + email MFA.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_use_tls: bool = True
+    smtp_use_ssl: bool = False
+
+    # SMS MFA transport mode: smtp_gateway, twilio, or auto.
+    sms_provider: str = "smtp_gateway"
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_from_number: str = ""
+
 
 settings = Settings()

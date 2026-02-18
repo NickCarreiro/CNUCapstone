@@ -1,11 +1,20 @@
 import os
+import re
+import secrets
 import shlex
 import shutil
 import uuid
 import hashlib
-from datetime import datetime
+import hmac
+import smtplib
+import ssl
+import base64
+from datetime import datetime, timedelta
+from email.message import EmailMessage
 from pathlib import Path
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlencode
+from urllib.request import Request as UrlRequest, urlopen
+from urllib.error import HTTPError, URLError
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 import mimetypes
@@ -13,7 +22,8 @@ import logging
 
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, or_
+from sqlalchemy import and_, func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from app.config import settings
@@ -52,6 +62,7 @@ _TERMINAL_SCOPE_CACHE: dict[str, dict[str, str]] = {}
 
 _TERMINAL_COMMANDS = [
     "help",
+    "clear",
     "pwd",
     "scope",
     "groups",
@@ -98,6 +109,90 @@ _TERMINAL_TEXT_EXTS = {
     ".xml",
     ".rst",
 }
+
+MESSAGE_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024
+PROFILE_AVATAR_MAX_BYTES = 4 * 1024 * 1024
+EMAIL_VERIFY_TTL_MINUTES = 30
+MFA_METHOD_TOTP = "totp"
+MFA_METHOD_EMAIL = "email"
+MFA_METHOD_SMS = "sms"
+MFA_METHODS = (MFA_METHOD_TOTP, MFA_METHOD_EMAIL, MFA_METHOD_SMS)
+MFA_METHOD_LABELS = {
+    MFA_METHOD_TOTP: "Authenticator app (TOTP)",
+    MFA_METHOD_EMAIL: "Email code (SMTP)",
+    MFA_METHOD_SMS: "SMS code",
+}
+
+PROFILE_IMAGE_MIME_ALLOW = {
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+}
+
+DM_REPORT_REASONS: dict[str, str] = {
+    "spam": "Spam / unsolicited advertising",
+    "harassment": "Harassment or hate speech",
+    "threat": "Threats or violence",
+    "impersonation": "Impersonation / fraud",
+    "sexual": "Sexual content",
+    "other": "Other",
+}
+
+SMS_PROVIDER_SMTP_GATEWAY = "smtp_gateway"
+SMS_PROVIDER_TWILIO = "twilio"
+SMS_PROVIDER_AUTO = "auto"
+SMS_PROVIDER_LABELS = {
+    SMS_PROVIDER_SMTP_GATEWAY: "Carrier email gateway (SMTP)",
+    SMS_PROVIDER_TWILIO: "Twilio SMS API",
+    SMS_PROVIDER_AUTO: "Auto (carrier gateway first, Twilio fallback)",
+}
+SMS_CARRIER_OPTIONS: tuple[tuple[str, str, str], ...] = (
+    ("att", "AT&T", "txt.att.net"),
+    ("att_mms", "AT&T (MMS)", "mms.att.net"),
+    ("verizon", "Verizon", "vtext.com"),
+    ("verizon_mms", "Verizon (MMS)", "vzwpix.com"),
+    ("tmobile", "T-Mobile", "tmomail.net"),
+    ("sprint", "Sprint", "messaging.sprintpcs.com"),
+    ("cricket", "Cricket", "sms.cricketwireless.net"),
+    ("metropcs", "Metro by T-Mobile", "mymetropcs.com"),
+    ("uscellular", "US Cellular", "email.uscc.net"),
+)
+SMS_CARRIER_LABELS = {key: label for key, label, _ in SMS_CARRIER_OPTIONS}
+SMS_CARRIER_GATEWAYS = {key: domain for key, _, domain in SMS_CARRIER_OPTIONS}
+
+
+def _normalize_mfa_method(value: str | None) -> str:
+    method = (value or "").strip().lower()
+    if method in MFA_METHODS:
+        return method
+    return ""
+
+
+def _mask_email(value: str) -> str:
+    cleaned = (value or "").strip()
+    if not cleaned or "@" not in cleaned:
+        return "email"
+    local, domain = cleaned.split("@", 1)
+    local = local.strip()
+    domain = domain.strip()
+    if not local or not domain:
+        return "email"
+    local_mask = (local[:1] + "***") if len(local) > 1 else "*"
+    parts = domain.split(".")
+    first = parts[0] if parts else domain
+    first_mask = (first[:1] + "***") if len(first) > 1 else "*"
+    suffix = "." + ".".join(parts[1:]) if len(parts) > 1 else ""
+    return f"{local_mask}@{first_mask}{suffix}"
+
+
+def _mask_phone(value: str) -> str:
+    digits = "".join(ch for ch in (value or "") if ch.isdigit())
+    if not digits:
+        return "phone"
+    if len(digits) <= 4:
+        return f"***{digits}"
+    return f"***-***-{digits[-4:]}"
 
 
 def _hex_bytes(data: bytes, *, limit: int = 64) -> str:
@@ -152,6 +247,66 @@ def _group_root(group_id: uuid.UUID) -> Path:
     return root
 
 
+def _message_attachment_root() -> Path:
+    root = Path(settings.staging_path) / "messages"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _safe_message_attachment_path(path_str: str) -> Path:
+    root = _message_attachment_root().resolve()
+    candidate = Path(path_str).resolve()
+    if not candidate.is_relative_to(root):
+        raise HTTPException(status_code=400, detail="Invalid attachment path")
+    return candidate
+
+
+def _conversation_filter(user_a: uuid.UUID, user_b: uuid.UUID):
+    return or_(
+        and_(DirectMessage.sender_id == user_a, DirectMessage.recipient_id == user_b),
+        and_(DirectMessage.sender_id == user_b, DirectMessage.recipient_id == user_a),
+    )
+
+
+def _resolve_thread_id(
+    db: Session,
+    *,
+    sender_id: uuid.UUID,
+    recipient_id: uuid.UUID,
+    requested_thread: str | None,
+) -> uuid.UUID:
+    pair_filter = _conversation_filter(sender_id, recipient_id)
+    if requested_thread:
+        try:
+            tid = uuid.UUID(requested_thread)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid thread id")
+
+        exists = (
+            db.query(DirectMessage.id)
+            .filter(pair_filter, DirectMessage.thread_id == tid)
+            .first()
+        )
+        if not exists:
+            raise HTTPException(status_code=400, detail="Thread not found for this conversation")
+        return tid
+
+    latest_thread = (
+        db.query(DirectMessage.thread_id)
+        .filter(pair_filter, DirectMessage.thread_id.is_not(None))
+        .order_by(DirectMessage.created_at.desc())
+        .limit(1)
+        .scalar()
+    )
+    return latest_thread or uuid.uuid4()
+
+
+def _format_utc(value: datetime | None) -> str:
+    if not value:
+        return "-"
+    return value.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
 def _terminal_scope_key(request: Request) -> str:
     # Scope is stored per browser session cookie; empty means "no scope".
     return _get_session_id(request)
@@ -190,6 +345,422 @@ def _terminal_root_for_scope(user: User, scope: dict[str, str]) -> tuple[Path, s
             return _user_root(user), "user"
         return _group_root(gid), f"group:{scope.get('group_name') or gid}"
     return _user_root(user), "user"
+
+
+def _profile_redirect(message: str, *, error: bool = False) -> RedirectResponse:
+    key = "error" if error else "notice"
+    return RedirectResponse(url=f"/ui/profile?{key}={quote_plus(message)}", status_code=303)
+
+
+def _profile_avatar_root(user: User) -> Path:
+    root = Path(settings.staging_path) / "profiles" / str(user.id)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _safe_profile_asset_path(path_str: str) -> Path:
+    root = (Path(settings.staging_path) / "profiles").resolve()
+    candidate = Path(path_str).resolve()
+    if not candidate.is_relative_to(root):
+        raise HTTPException(status_code=400, detail="Invalid profile asset path")
+    return candidate
+
+
+def _normalize_email(value: str) -> str:
+    normalized = (value or "").strip().lower()
+    if not normalized:
+        return ""
+    if len(normalized) > 320:
+        raise HTTPException(status_code=400, detail="Email is too long")
+    if "@" not in normalized:
+        raise HTTPException(status_code=400, detail="Invalid email format")
+    if not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+", normalized):
+        raise HTTPException(status_code=400, detail="Invalid email format")
+    return normalized
+
+
+def _normalize_phone(value: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    if len(raw) > 48:
+        raise HTTPException(status_code=400, detail="Phone number is too long")
+    if not re.fullmatch(r"[0-9+()\-\s.]{7,48}", raw):
+        raise HTTPException(status_code=400, detail="Invalid phone number format")
+    return raw
+
+
+def _normalize_sms_carrier(value: str | None) -> str:
+    carrier = (value or "").strip().lower()
+    if carrier in SMS_CARRIER_GATEWAYS:
+        return carrier
+    return ""
+
+
+def _sms_carrier_rows() -> list[dict[str, str]]:
+    return [{"value": key, "label": label} for key, label, _ in SMS_CARRIER_OPTIONS]
+
+
+def _sms_provider_mode() -> str:
+    mode = (settings.sms_provider or "").strip().lower()
+    if mode not in {SMS_PROVIDER_SMTP_GATEWAY, SMS_PROVIDER_TWILIO, SMS_PROVIDER_AUTO}:
+        return SMS_PROVIDER_SMTP_GATEWAY
+    if mode == SMS_PROVIDER_TWILIO and not _twilio_configured() and _smtp_configured():
+        # Preserve existing deployments that still have PFV_SMS_PROVIDER=twilio but are moving to SMTP gateways.
+        return SMS_PROVIDER_AUTO
+    if mode == SMS_PROVIDER_SMTP_GATEWAY and not _smtp_configured() and _twilio_configured():
+        # Allow fallback for older environments where Twilio is configured but SMTP is not.
+        return SMS_PROVIDER_AUTO
+    return mode
+
+
+def _sms_provider_label() -> str:
+    return SMS_PROVIDER_LABELS.get(_sms_provider_mode(), _sms_provider_mode())
+
+
+def _sms_gateway_digits(phone_number: str, *, strict: bool = True) -> str:
+    digits = "".join(ch for ch in (phone_number or "") if ch.isdigit())
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    if len(digits) != 10:
+        if strict:
+            raise RuntimeError("Carrier gateway SMS requires a US 10-digit phone number.")
+        return ""
+    return digits
+
+
+def _sms_gateway_destination(*, phone_number: str, carrier: str) -> str:
+    normalized_carrier = _normalize_sms_carrier(carrier)
+    domain = SMS_CARRIER_GATEWAYS.get(normalized_carrier)
+    if not domain:
+        raise RuntimeError("Carrier selection is required for SMS gateway delivery.")
+    digits = _sms_gateway_digits(phone_number)
+    return f"{digits}@{domain}"
+
+
+def _email_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _public_origin(request: Request) -> str:
+    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "http").strip()
+    host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc).strip()
+    if not host:
+        base = str(request.base_url).rstrip("/")
+        return base
+    return f"{proto}://{host}"
+
+
+def _smtp_configured() -> bool:
+    return bool(settings.smtp_host and settings.smtp_from)
+
+
+def _send_email_message(message: EmailMessage) -> None:
+    host = settings.smtp_host.strip()
+    if not host:
+        raise RuntimeError("SMTP host is not configured")
+
+    username = settings.smtp_username.strip()
+    password = settings.smtp_password
+    port = int(settings.smtp_port)
+
+    if settings.smtp_use_ssl:
+        with smtplib.SMTP_SSL(host, port, timeout=15) as client:
+            if username:
+                client.login(username, password)
+            client.send_message(message)
+        return
+
+    with smtplib.SMTP(host, port, timeout=15) as client:
+        if settings.smtp_use_tls:
+            client.starttls(context=ssl.create_default_context())
+        if username:
+            client.login(username, password)
+        client.send_message(message)
+
+
+def _twilio_configured() -> bool:
+    return bool(
+        settings.twilio_account_sid.strip()
+        and settings.twilio_auth_token
+        and settings.twilio_from_number.strip()
+    )
+
+
+def _sms_configuration_error_for_values(*, phone_number: str | None, sms_carrier: str | None) -> str | None:
+    mode = _sms_provider_mode()
+    phone = (phone_number or "").strip()
+    carrier = _normalize_sms_carrier(sms_carrier)
+
+    if mode == SMS_PROVIDER_TWILIO:
+        if not _twilio_configured():
+            return "Twilio credentials are not configured."
+        if not phone:
+            return "Phone number is required for SMS MFA."
+        return None
+
+    if mode == SMS_PROVIDER_SMTP_GATEWAY:
+        if not _smtp_configured():
+            return "SMTP is not configured."
+        if not phone:
+            return "Phone number is required for SMS MFA."
+        if not carrier:
+            return "Carrier selection is required for SMS MFA."
+        if not _sms_gateway_digits(phone, strict=False):
+            return "Carrier gateway SMS requires a US 10-digit phone number."
+        return None
+
+    # auto mode: allow gateway transport first, then Twilio fallback.
+    if not phone:
+        return "Phone number is required for SMS MFA."
+    if carrier and _smtp_configured() and _sms_gateway_digits(phone, strict=False):
+        return None
+    if _twilio_configured():
+        return None
+    if _smtp_configured() and not carrier:
+        return "Carrier selection is required for SMS MFA."
+    if _smtp_configured() and carrier and not _sms_gateway_digits(phone, strict=False):
+        return "Carrier gateway SMS requires a US 10-digit phone number."
+    if not _smtp_configured() and not _twilio_configured():
+        return "SMS transport is not configured."
+    return "SMS transport is not configured."
+
+
+def _sms_configuration_error(user: User) -> str | None:
+    return _sms_configuration_error_for_values(phone_number=user.phone_number, sms_carrier=user.sms_carrier)
+
+
+def _sms_configured(user: User | None = None) -> bool:
+    if user:
+        return _sms_configuration_error(user) is None
+    mode = _sms_provider_mode()
+    if mode == SMS_PROVIDER_TWILIO:
+        return _twilio_configured()
+    if mode == SMS_PROVIDER_SMTP_GATEWAY:
+        return _smtp_configured()
+    if mode == SMS_PROVIDER_AUTO:
+        return _smtp_configured() or _twilio_configured()
+    return False
+
+
+def _send_sms_via_twilio(*, to_number: str, body: str) -> None:
+    account_sid = settings.twilio_account_sid.strip()
+    auth_token = settings.twilio_auth_token
+    from_number = settings.twilio_from_number.strip()
+    if not account_sid or not auth_token or not from_number:
+        raise RuntimeError("Twilio SMS credentials are not configured")
+
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
+    payload = urlencode({"To": to_number, "From": from_number, "Body": body}).encode()
+    req = UrlRequest(url, data=payload, method="POST")
+    token = base64.b64encode(f"{account_sid}:{auth_token}".encode()).decode()
+    req.add_header("Authorization", f"Basic {token}")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    try:
+        with urlopen(req, timeout=15) as resp:
+            status = getattr(resp, "status", 200)
+            if status >= 400:
+                raise RuntimeError(f"Twilio returned status {status}")
+    except (HTTPError, URLError) as exc:
+        raise RuntimeError(f"Twilio SMS send failed: {exc}") from exc
+
+
+def _send_sms_message(*, user: User, body: str) -> str:
+    mode = _sms_provider_mode()
+    phone = (user.phone_number or "").strip()
+    carrier = _normalize_sms_carrier(user.sms_carrier)
+
+    if mode in {SMS_PROVIDER_SMTP_GATEWAY, SMS_PROVIDER_AUTO} and carrier and _smtp_configured():
+        destination = _sms_gateway_destination(phone_number=phone, carrier=carrier)
+        message = EmailMessage()
+        message["From"] = settings.smtp_from
+        message["To"] = destination
+        message["Subject"] = " "
+        message.set_content(body)
+        _send_email_message(message)
+        return "gateway"
+
+    if mode == SMS_PROVIDER_SMTP_GATEWAY:
+        raise RuntimeError("Carrier gateway SMS is not configured for this account.")
+
+    if mode in {SMS_PROVIDER_TWILIO, SMS_PROVIDER_AUTO} and _twilio_configured():
+        _send_sms_via_twilio(to_number=phone, body=body)
+        return "twilio"
+
+    raise RuntimeError("SMS transport is not configured.")
+
+
+def _mfa_secret_key() -> bytes:
+    material = f"{settings.master_key}|{settings.totp_encryption_key}".encode()
+    return hashlib.sha256(material).digest()
+
+
+def _mfa_code_hash(*, user: User, method: str, code: str) -> str:
+    payload = f"{user.id}:{method}:{code}".encode()
+    return hmac.new(_mfa_secret_key(), payload, hashlib.sha256).hexdigest()
+
+
+def _clear_mfa_challenge(user: User) -> None:
+    user.mfa_challenge_method = None
+    user.mfa_challenge_code_hash = None
+    user.mfa_challenge_expires_at = None
+    user.mfa_challenge_sent_at = None
+    user.mfa_challenge_attempts = 0
+
+
+def _mfa_method_display(method: str) -> str:
+    return MFA_METHOD_LABELS.get(method, method.upper())
+
+
+def _mfa_summary_for_user(user: User) -> str:
+    parts: list[str] = []
+    if user.totp_enabled:
+        parts.append("TOTP")
+    if user.email_mfa_enabled:
+        parts.append("Email")
+    if user.sms_mfa_enabled:
+        parts.append("SMS")
+    return ", ".join(parts) if parts else "Disabled"
+
+
+def _available_mfa_methods(user: User, *, transport_ready_only: bool = True) -> list[str]:
+    methods: list[str] = []
+    if user.totp_enabled and user.totp_secret_enc:
+        methods.append(MFA_METHOD_TOTP)
+    if user.email_mfa_enabled and user.email and user.email_verified:
+        if (not transport_ready_only) or _smtp_configured():
+            methods.append(MFA_METHOD_EMAIL)
+    if user.sms_mfa_enabled and user.phone_number:
+        if (not transport_ready_only) or _sms_configured(user):
+            methods.append(MFA_METHOD_SMS)
+    return methods
+
+
+def _resolve_mfa_method(user: User, requested: str | None, available_methods: list[str]) -> str:
+    method = _normalize_mfa_method(requested)
+    if method in available_methods:
+        return method
+
+    preferred = _normalize_mfa_method(user.mfa_preferred_method)
+    if preferred in available_methods:
+        return preferred
+
+    if MFA_METHOD_TOTP in available_methods:
+        return MFA_METHOD_TOTP
+    if available_methods:
+        return available_methods[0]
+    return ""
+
+
+def _mfa_destination_hint(user: User, method: str) -> str:
+    if method == MFA_METHOD_EMAIL:
+        return _mask_email(user.email or "")
+    if method == MFA_METHOD_SMS:
+        carrier = _normalize_sms_carrier(user.sms_carrier)
+        if carrier:
+            return f"{_mask_phone(user.phone_number or '')} ({SMS_CARRIER_LABELS.get(carrier, carrier)})"
+        return _mask_phone(user.phone_number or "")
+    return "authenticator app"
+
+
+def _verify_totp_for_user(user: User, code: str) -> bool:
+    if not user.totp_enabled or not user.totp_secret_enc:
+        return False
+    value = (code or "").strip()
+    if not value:
+        return False
+    secret = decrypt_totp_secret(user.totp_secret_enc)
+    return pyotp.TOTP(secret).verify(value)
+
+
+def _issue_mfa_challenge(user: User, method: str) -> str:
+    if method not in {MFA_METHOD_EMAIL, MFA_METHOD_SMS}:
+        raise HTTPException(status_code=400, detail="Unsupported MFA challenge method")
+
+    now = datetime.utcnow()
+    cooldown = max(0, int(settings.mfa_resend_cooldown_seconds))
+    if (
+        user.mfa_challenge_method == method
+        and user.mfa_challenge_sent_at
+        and (now - user.mfa_challenge_sent_at).total_seconds() < cooldown
+    ):
+        wait_seconds = int(cooldown - (now - user.mfa_challenge_sent_at).total_seconds())
+        wait_seconds = max(1, wait_seconds)
+        raise HTTPException(status_code=429, detail=f"Please wait {wait_seconds}s before requesting another code.")
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    ttl_seconds = max(60, int(settings.mfa_code_ttl_seconds))
+
+    if method == MFA_METHOD_EMAIL:
+        if not user.email or not user.email_verified:
+            raise HTTPException(status_code=400, detail="Verified email is required for email MFA.")
+        if not _smtp_configured():
+            raise HTTPException(status_code=503, detail="SMTP is not configured.")
+        message = EmailMessage()
+        message["From"] = settings.smtp_from
+        message["To"] = user.email
+        message["Subject"] = "Your FileFort sign-in code"
+        message.set_content(
+            f"Hello {user.username},\n\n"
+            f"Your FileFort sign-in code is: {code}\n\n"
+            f"The code expires in {ttl_seconds // 60} minute(s).\n"
+            "If you did not request this, you can ignore this email."
+        )
+        _send_email_message(message)
+    else:
+        if not user.phone_number:
+            raise HTTPException(status_code=400, detail="Phone number is required for SMS MFA.")
+        sms_error = _sms_configuration_error(user)
+        if sms_error:
+            status = 503 if "configured" in sms_error.lower() else 400
+            raise HTTPException(status_code=status, detail=sms_error)
+        _send_sms_message(user=user, body=f"FileFort code: {code}. Expires in {ttl_seconds // 60} min.")
+
+    user.mfa_challenge_method = method
+    user.mfa_challenge_code_hash = _mfa_code_hash(user=user, method=method, code=code)
+    user.mfa_challenge_expires_at = now + timedelta(seconds=ttl_seconds)
+    user.mfa_challenge_sent_at = now
+    user.mfa_challenge_attempts = 0
+    return _mfa_destination_hint(user, method)
+
+
+def _verify_mfa_challenge(user: User, method: str, code: str) -> tuple[bool, str]:
+    value = (code or "").strip()
+    if not value:
+        return False, "MFA code is required."
+
+    if method not in {MFA_METHOD_EMAIL, MFA_METHOD_SMS}:
+        return False, "Unsupported MFA method."
+
+    if (
+        not user.mfa_challenge_method
+        or user.mfa_challenge_method != method
+        or not user.mfa_challenge_code_hash
+        or not user.mfa_challenge_expires_at
+    ):
+        return False, "No active MFA code. Request a new code."
+
+    now = datetime.utcnow()
+    if user.mfa_challenge_expires_at < now:
+        _clear_mfa_challenge(user)
+        return False, "MFA code expired. Request a new code."
+
+    max_attempts = max(1, int(settings.mfa_max_attempts))
+    attempts = int(user.mfa_challenge_attempts or 0)
+    if attempts >= max_attempts:
+        _clear_mfa_challenge(user)
+        return False, "Too many invalid attempts. Request a new code."
+
+    expected = _mfa_code_hash(user=user, method=method, code=value)
+    if not hmac.compare_digest(expected, user.mfa_challenge_code_hash):
+        user.mfa_challenge_attempts = attempts + 1
+        if user.mfa_challenge_attempts >= max_attempts:
+            _clear_mfa_challenge(user)
+            return False, "Too many invalid attempts. Request a new code."
+        return False, "Invalid MFA code."
+
+    _clear_mfa_challenge(user)
+    return True, ""
 
 
 def _admin_redirect(message: str, *, error: bool = False) -> RedirectResponse:
@@ -429,9 +1000,38 @@ def _build_tree_lines(root: Path, start: Path, *, depth: int) -> list[str]:
     return lines
 
 
+def _render_login_page(
+    request: Request,
+    *,
+    error: str | None = None,
+    notice: str | None = None,
+    username: str = "",
+    mfa_method: str = MFA_METHOD_TOTP,
+    mfa_methods: list[str] | None = None,
+    status_code: int = 200,
+):
+    selected = _normalize_mfa_method(mfa_method) or MFA_METHOD_TOTP
+    methods = list(mfa_methods or list(MFA_METHODS))
+    if selected not in methods and methods:
+        selected = methods[0]
+    method_rows = [{"value": item, "label": _mfa_method_display(item)} for item in methods]
+    return templates.TemplateResponse(
+        "login.html",
+        {
+            "request": request,
+            "error": error,
+            "notice": notice,
+            "username": username,
+            "mfa_method": selected,
+            "mfa_methods": method_rows,
+        },
+        status_code=status_code,
+    )
+
+
 @router.get("/login")
 def login_page(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request, "error": None})
+    return _render_login_page(request)
 
 
 @router.get("/register")
@@ -509,52 +1109,164 @@ def login_action(
     request: Request,
     username: str = Form(...),
     password: str = Form(...),
+    mfa_method: str | None = Form(None),
+    mfa_code: str | None = Form(None),
+    send_mfa_code: str | None = Form(None),
     totp_code: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
-    user = db.query(User).filter(User.username == username).first()
+    normalized_username = (username or "").strip()
+    selected_method = _normalize_mfa_method(mfa_method) or MFA_METHOD_TOTP
+    code_value = (mfa_code or totp_code or "").strip()
+    wants_send_code = (send_mfa_code or "").strip().lower() in {"1", "true", "yes", "on", "send"}
+
+    user = db.query(User).filter(User.username == normalized_username).first()
     if not user:
-        return templates.TemplateResponse(
-            "login.html",
-            {"request": request, "error": "Invalid username or password"},
+        return _render_login_page(
+            request,
+            error="Invalid username or password",
+            username=normalized_username,
+            mfa_method=selected_method,
             status_code=401,
         )
     if not verify_password(password, user.password_hash):
         add_audit_log(db, user=user, event_type="signin.failed_password", details="Password verification failed.", request=request)
         db.commit()
-        return templates.TemplateResponse(
-            "login.html",
-            {"request": request, "error": "Invalid username or password"},
+        return _render_login_page(
+            request,
+            error="Invalid username or password",
+            username=normalized_username,
+            mfa_method=selected_method,
             status_code=401,
         )
-
-    if user.totp_enabled:
-        if not totp_code:
-            add_audit_log(db, user=user, event_type="signin.failed_totp_required", details="MFA code required.", request=request)
-            db.commit()
-            return templates.TemplateResponse(
-                "login.html",
-                {"request": request, "error": "TOTP code required"},
-                status_code=401,
-            )
-        secret = decrypt_totp_secret(user.totp_secret_enc or "")
-        if not pyotp.TOTP(secret).verify(totp_code):
-            add_audit_log(db, user=user, event_type="signin.failed_totp_invalid", details="Invalid MFA code.", request=request)
-            db.commit()
-            return templates.TemplateResponse(
-                "login.html",
-                {"request": request, "error": "Invalid TOTP code"},
-                status_code=401,
-            )
 
     if getattr(user, "is_disabled", False):
         add_audit_log(db, user=user, event_type="signin.blocked_disabled", details="Interactive sign-in blocked (account disabled).", request=request)
         db.commit()
-        return templates.TemplateResponse(
-            "login.html",
-            {"request": request, "error": "Account disabled. Please contact an administrator."},
+        return _render_login_page(
+            request,
+            error="Account disabled. Please contact an administrator.",
+            username=normalized_username,
+            mfa_method=selected_method,
             status_code=403,
         )
+
+    configured_methods = _available_mfa_methods(user, transport_ready_only=False)
+    if configured_methods:
+        effective_method = _resolve_mfa_method(user, selected_method, configured_methods)
+        if not effective_method:
+            add_audit_log(
+                db,
+                user=user,
+                event_type="signin.failed_mfa_unavailable",
+                details="No MFA method is currently available for this account.",
+                request=request,
+            )
+            db.commit()
+            return _render_login_page(
+                request,
+                error="MFA is enabled but no method is available. Contact an administrator.",
+                username=normalized_username,
+                mfa_method=selected_method,
+                mfa_methods=configured_methods,
+                status_code=401,
+            )
+
+        if effective_method == MFA_METHOD_TOTP:
+            if not code_value:
+                add_audit_log(db, user=user, event_type="signin.failed_totp_required", details="TOTP code required.", request=request)
+                db.commit()
+                return _render_login_page(
+                    request,
+                    error="Authenticator app code is required.",
+                    username=normalized_username,
+                    mfa_method=effective_method,
+                    mfa_methods=configured_methods,
+                    status_code=401,
+                )
+            if not _verify_totp_for_user(user, code_value):
+                add_audit_log(db, user=user, event_type="signin.failed_totp_invalid", details="Invalid TOTP code.", request=request)
+                db.commit()
+                return _render_login_page(
+                    request,
+                    error="Invalid authenticator app code.",
+                    username=normalized_username,
+                    mfa_method=effective_method,
+                    mfa_methods=configured_methods,
+                    status_code=401,
+                )
+        else:
+            if wants_send_code or not code_value:
+                try:
+                    destination_hint = _issue_mfa_challenge(user, effective_method)
+                except HTTPException as exc:
+                    db.rollback()
+                    return _render_login_page(
+                        request,
+                        error=str(exc.detail),
+                        username=normalized_username,
+                        mfa_method=effective_method,
+                        mfa_methods=configured_methods,
+                        status_code=exc.status_code,
+                    )
+                except Exception as exc:
+                    db.rollback()
+                    logger.warning("Failed to send %s MFA code for user %s: %s", effective_method, user.id, exc)
+                    return _render_login_page(
+                        request,
+                        error=f"Could not send {_mfa_method_display(effective_method).lower()} code right now.",
+                        username=normalized_username,
+                        mfa_method=effective_method,
+                        mfa_methods=configured_methods,
+                        status_code=503,
+                    )
+
+                add_audit_log(
+                    db,
+                    user=user,
+                    event_type=f"mfa.challenge_sent_{effective_method}",
+                    details=f"Sent MFA challenge via {effective_method} to {destination_hint}.",
+                    request=request,
+                )
+                db.commit()
+                return _render_login_page(
+                    request,
+                    notice=f"A 6-digit code was sent to {destination_hint}. Enter it to complete sign in.",
+                    username=normalized_username,
+                    mfa_method=effective_method,
+                    mfa_methods=configured_methods,
+                    status_code=401,
+                )
+
+            challenge_ok, reason = _verify_mfa_challenge(user, effective_method, code_value)
+            if not challenge_ok:
+                add_audit_log(
+                    db,
+                    user=user,
+                    event_type=f"signin.failed_{effective_method}_mfa",
+                    details=f"{effective_method.upper()} MFA verification failed: {reason}",
+                    request=request,
+                )
+                db.commit()
+                return _render_login_page(
+                    request,
+                    error=reason,
+                    username=normalized_username,
+                    mfa_method=effective_method,
+                    mfa_methods=configured_methods,
+                    status_code=401,
+                )
+
+            add_audit_log(
+                db,
+                user=user,
+                event_type=f"mfa.verified_{effective_method}",
+                details=f"{effective_method.upper()} MFA challenge verified during sign-in.",
+                request=request,
+            )
+            db.commit()
+
+        user.mfa_preferred_method = effective_method
 
     ensure_user_key(db, user)
     add_event(db, user, action="auth", message=f"Signed in as '{user.username}'.")
@@ -669,6 +1381,399 @@ def notifications_state(request: Request, db: Session = Depends(get_db)):
     }
 
 
+def _messages_redirect(message: str, *, error: bool = False, thread: str | None = None) -> RedirectResponse:
+    key = "error" if error else "notice"
+    base = "/ui/messages"
+    if thread:
+        return RedirectResponse(url=f"{base}?thread={thread}&{key}={quote_plus(message)}", status_code=303)
+    return RedirectResponse(url=f"{base}?{key}={quote_plus(message)}", status_code=303)
+
+
+@router.get("/messages")
+def messages_home(
+    request: Request,
+    thread: str | None = None,
+    notice: str | None = None,
+    error: str | None = None,
+    db: Session = Depends(get_db),
+):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+
+    messages = (
+        db.query(DirectMessage)
+        .options(joinedload(DirectMessage.sender), joinedload(DirectMessage.recipient))
+        .filter(or_(DirectMessage.sender_id == user.id, DirectMessage.recipient_id == user.id))
+        .order_by(DirectMessage.created_at.desc())
+        .limit(300)
+        .all()
+    )
+
+    thread_buckets: dict[uuid.UUID, list[DirectMessage]] = {}
+    thread_summaries: dict[uuid.UUID, dict] = {}
+    for row in messages:
+        thread_uuid = row.thread_id or row.id
+        thread_buckets.setdefault(thread_uuid, []).append(row)
+
+        partner = row.recipient if row.sender_id == user.id else row.sender
+        preview = decrypt_message(row.body).replace("\n", " ").strip()
+        if len(preview) > 82:
+            preview = f"{preview[:79]}..."
+
+        if thread_uuid not in thread_summaries:
+            partner_email = ""
+            if partner.email and partner.email_visible and partner.email_verified:
+                partner_email = partner.email
+            thread_summaries[thread_uuid] = {
+                "thread_uuid": thread_uuid,
+                "thread_id": str(thread_uuid),
+                "partner_username": partner.username,
+                "partner_email": partner_email,
+                "latest_preview": preview or "(attachment)",
+                "latest_created_at": row.created_at,
+                "latest_created_at_utc": _format_utc(row.created_at),
+                "unread_count": 0,
+            }
+
+        if row.recipient_id == user.id and row.read_at is None:
+            thread_summaries[thread_uuid]["unread_count"] += 1
+
+    threads = sorted(
+        thread_summaries.values(),
+        key=lambda item: item["latest_created_at"] or datetime.min,
+        reverse=True,
+    )
+
+    active_thread_uuid: uuid.UUID | None = None
+    if thread:
+        try:
+            requested = uuid.UUID(thread)
+            if requested in thread_buckets:
+                active_thread_uuid = requested
+        except ValueError:
+            active_thread_uuid = None
+    if not active_thread_uuid and threads:
+        active_thread_uuid = threads[0]["thread_uuid"]
+
+    active_thread_messages: list[DirectMessage] = []
+    active_thread_summary: dict | None = None
+    if active_thread_uuid:
+        active_thread_messages = sorted(
+            thread_buckets.get(active_thread_uuid, []),
+            key=lambda row: row.created_at or datetime.min,
+        )
+        active_thread_summary = thread_summaries.get(active_thread_uuid)
+
+    read_updates = 0
+    for row in active_thread_messages:
+        if row.recipient_id == user.id and row.read_at is None:
+            row.read_at = datetime.utcnow()
+            read_updates += 1
+    if read_updates:
+        db.commit()
+        if active_thread_summary:
+            active_thread_summary["unread_count"] = 0
+
+    thread_messages = []
+    for row in active_thread_messages:
+        outbound = row.sender_id == user.id
+        thread_messages.append(
+            {
+                "id": str(row.id),
+                "thread_id": str(row.thread_id or row.id),
+                "sender_username": row.sender.username,
+                "recipient_username": row.recipient.username,
+                "body": decrypt_message(row.body),
+                "created_at": row.created_at,
+                "created_at_utc": _format_utc(row.created_at),
+                "direction": "Sent" if outbound else "Received",
+                "is_outbound": outbound,
+                "receipt": (
+                    f"Read {_format_utc(row.read_at)}"
+                    if outbound and row.read_at
+                    else ("Delivered" if outbound else ("Read" if row.read_at else "Unread"))
+                ),
+                "has_attachment": bool(row.attachment_name and row.attachment_path),
+                "attachment_name": row.attachment_name,
+                "attachment_size": row.attachment_size,
+                "attachment_url": f"/ui/messages/{row.id}/attachment"
+                if row.attachment_name and row.attachment_path
+                else None,
+            }
+        )
+
+    return templates.TemplateResponse(
+        "messages.html",
+        {
+            "request": request,
+            "user": user,
+            "threads": threads,
+            "thread_messages": thread_messages,
+            "active_thread_id": str(active_thread_uuid) if active_thread_uuid else "",
+            "active_partner_username": active_thread_summary["partner_username"] if active_thread_summary else "",
+            "unread_thread_total": sum(item["unread_count"] for item in threads),
+            "notice": notice or request.query_params.get("notice"),
+            "error": error or request.query_params.get("error"),
+        },
+    )
+
+
+@router.post("/messages/send")
+def send_message(
+    request: Request,
+    username: str = Form(""),
+    message: str = Form(""),
+    thread_id: str | None = Form(None),
+    attachment: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if getattr(user, "messaging_disabled", False):
+        add_audit_log(
+            db,
+            user=user,
+            event_type="message.send_blocked_restricted",
+            details="Direct message send blocked (messaging disabled).",
+            request=request,
+        )
+        db.commit()
+        return _messages_redirect("Direct messaging has been disabled on your account.", error=True, thread=thread_id)
+
+    target_username = (username or "").strip()
+    body = (message or "").strip()
+
+    recipient: User | None = None
+    if target_username:
+        recipient = db.query(User).filter(User.username == target_username).first()
+    elif thread_id:
+        try:
+            parsed_thread = uuid.UUID(thread_id)
+        except ValueError:
+            return _messages_redirect("Invalid thread id.", error=True)
+        seed = (
+            db.query(DirectMessage)
+            .options(joinedload(DirectMessage.sender), joinedload(DirectMessage.recipient))
+            .filter(
+                DirectMessage.thread_id == parsed_thread,
+                or_(DirectMessage.sender_id == user.id, DirectMessage.recipient_id == user.id),
+            )
+            .order_by(DirectMessage.created_at.desc())
+            .first()
+        )
+        if seed:
+            recipient = seed.sender if seed.sender_id != user.id else seed.recipient
+
+    if not recipient:
+        return _messages_redirect("Recipient username is required.", error=True, thread=thread_id)
+    if recipient.id == user.id:
+        return _messages_redirect("Cannot message yourself.", error=True, thread=thread_id)
+    if getattr(recipient, "is_disabled", False):
+        return _messages_redirect("Recipient account is disabled.", error=True, thread=thread_id)
+
+    has_attachment = bool(attachment and (attachment.filename or "").strip())
+    if not body and not has_attachment:
+        return _messages_redirect("Message cannot be empty.", error=True, thread=thread_id)
+    if len(body) > 4000:
+        return _messages_redirect("Message too long.", error=True, thread=thread_id)
+
+    resolved_thread_id = _resolve_thread_id(
+        db,
+        sender_id=user.id,
+        recipient_id=recipient.id,
+        requested_thread=thread_id,
+    )
+
+    dm = DirectMessage(
+        id=uuid.uuid4(),
+        thread_id=resolved_thread_id,
+        sender_id=user.id,
+        recipient_id=recipient.id,
+        body=encrypt_message(body),
+    )
+
+    if has_attachment and attachment:
+        safe_name = Path(attachment.filename or "").name.strip()
+        if not safe_name:
+            return _messages_redirect("Invalid attachment name.", error=True, thread=str(resolved_thread_id))
+
+        recipient_dek = get_user_dek(db, recipient)
+        attach_dir = _message_attachment_root() / str(recipient.id) / str(dm.id)
+        attach_dir.mkdir(parents=True, exist_ok=True)
+        dest = attach_dir / safe_name
+
+        nonce_b64, tag_b64, plain_size = encrypt_file_to_path(recipient_dek, attachment.file, dest)
+        if plain_size > MESSAGE_ATTACHMENT_MAX_BYTES:
+            try:
+                dest.unlink()
+            except FileNotFoundError:
+                pass
+            return _messages_redirect("Attachment is too large (max 10 MB).", error=True, thread=str(resolved_thread_id))
+
+        mime_type, _ = mimetypes.guess_type(safe_name)
+        dm.attachment_name = safe_name
+        dm.attachment_path = str(dest)
+        dm.attachment_size = plain_size
+        dm.attachment_enc_nonce = nonce_b64
+        dm.attachment_enc_tag = tag_b64
+        dm.attachment_mime_type = mime_type
+
+    db.add(dm)
+    add_event(
+        db,
+        user,
+        action="message",
+        message=(
+            f"Sent message to '{recipient.username}'"
+            f"{' with attachment' if dm.attachment_name else ''}."
+        ),
+        level="SUCCESS",
+    )
+    db.commit()
+
+    return RedirectResponse(url=f"/ui/messages?thread={resolved_thread_id}", status_code=303)
+
+
+@router.post("/messages/report")
+def report_message(
+    request: Request,
+    message_id: str = Form(...),
+    reason: str = Form("other"),
+    details: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+
+    try:
+        mid = uuid.UUID(message_id)
+    except ValueError:
+        return _messages_redirect("Message not found.", error=True)
+
+    message = (
+        db.query(DirectMessage)
+        .options(joinedload(DirectMessage.sender), joinedload(DirectMessage.recipient))
+        .filter(DirectMessage.id == mid)
+        .first()
+    )
+    if not message:
+        return _messages_redirect("Message not found.", error=True)
+
+    if user.id not in {message.sender_id, message.recipient_id}:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    if message.sender_id == user.id:
+        return _messages_redirect("Cannot report your own message.", error=True, thread=str(message.thread_id or message.id))
+
+    normalized_reason = (reason or "").strip().lower()
+    if normalized_reason not in DM_REPORT_REASONS:
+        normalized_reason = "other"
+
+    note = (details or "").strip()
+    if len(note) > 2000:
+        return _messages_redirect("Details too long.", error=True, thread=str(message.thread_id or message.id))
+
+    thread_uuid = message.thread_id or message.id
+    report = DirectMessageReport(
+        message_id=message.id,
+        thread_id=thread_uuid,
+        reporter_id=user.id,
+        reported_user_id=message.sender_id,
+        reason=normalized_reason,
+        details=encrypt_message(note) if note else None,
+        status="open",
+    )
+    db.add(report)
+    add_event(
+        db,
+        user,
+        action="report",
+        message=f"Reported a direct message from '{message.sender.username}' (reason: {normalized_reason}).",
+        level="WARN",
+    )
+    add_audit_log(
+        db,
+        user=user,
+        event_type="message.reported",
+        details=f"Reported direct message {message.id} from '{message.sender.username}' (reason: {normalized_reason}).",
+        request=request,
+    )
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return _messages_redirect("You already reported that message.", error=False, thread=str(thread_uuid))
+
+    return _messages_redirect(
+        "Report submitted. An administrator will review it.",
+        error=False,
+        thread=str(thread_uuid),
+    )
+
+
+@router.get("/messages/{message_id}/attachment")
+def open_message_attachment(message_id: str, request: Request, db: Session = Depends(get_db)):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+
+    try:
+        mid = uuid.UUID(message_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    message = db.query(DirectMessage).filter(DirectMessage.id == mid).first()
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    if user.id not in {message.sender_id, message.recipient_id}:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    if not message.attachment_name or not message.attachment_path:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+
+    path = _safe_message_attachment_path(message.attachment_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Attachment missing on disk")
+
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": f'attachment; filename="{message.attachment_name}"',
+    }
+
+    if not message.attachment_enc_nonce or not message.attachment_enc_tag:
+        return FileResponse(
+            path=path,
+            filename=message.attachment_name,
+            media_type=message.attachment_mime_type or "application/octet-stream",
+            headers=headers,
+        )
+
+    recipient = db.query(User).filter(User.id == message.recipient_id).first()
+    if not recipient:
+        raise HTTPException(status_code=404, detail="Recipient not found")
+
+    add_event(
+        db,
+        user,
+        action="message",
+        message=f"Downloaded message attachment '{message.attachment_name}'.",
+    )
+    db.commit()
+
+    dek = get_user_dek(db, recipient)
+    return StreamingResponse(
+        decrypt_file_iter(dek, path, message.attachment_enc_nonce, message.attachment_enc_tag),
+        media_type=message.attachment_mime_type or "application/octet-stream",
+        headers=headers,
+    )
+
+
 @router.get("/admin/users")
 def admin_users_page(request: Request, db: Session = Depends(get_db)):
     admin_user = _get_current_user(db, request)
@@ -715,6 +1820,7 @@ def admin_users_page(request: Request, db: Session = Depends(get_db)):
             "active_sessions": active_sessions_by_user.get(target.id, 0),
             "file_count": files_by_user.get(target.id, 0),
             "group_count": groups_by_user.get(target.id, 0),
+            "mfa_summary": _mfa_summary_for_user(target),
         }
         for target in users
     ]
@@ -726,7 +1832,9 @@ def admin_users_page(request: Request, db: Session = Depends(get_db)):
             "user": admin_user,
             "rows": rows,
             "admin_count": admin_count,
-            "totp_enabled_count": sum(1 for u in users if u.totp_enabled),
+            "mfa_enabled_count": sum(
+                1 for u in users if (u.totp_enabled or u.email_mfa_enabled or u.sms_mfa_enabled)
+            ),
             "active_session_total": sum(item["active_sessions"] for item in rows),
             "notice": request.query_params.get("notice"),
             "error": request.query_params.get("error"),
@@ -1274,29 +2382,33 @@ def admin_reset_totp(user_id: str, request: Request, db: Session = Depends(get_d
 
     target.totp_enabled = False
     target.totp_secret_enc = None
+    target.email_mfa_enabled = False
+    target.sms_mfa_enabled = False
+    target.mfa_preferred_method = None
+    _clear_mfa_challenge(target)
     add_event(
         db,
         admin_user,
         action="admin",
-        message=f"Reset MFA enrollment for '{target.username}'.",
+        message=f"Reset all MFA methods for '{target.username}'.",
         level="WARN",
     )
     add_audit_log(
         db,
         user=target,
         event_type="mfa.reset_by_admin",
-        details=f"Admin '{admin_user.username}' reset MFA enrollment.",
+        details=f"Admin '{admin_user.username}' reset all MFA methods.",
         request=request,
     )
     add_audit_log(
         db,
         user=admin_user,
         event_type="admin.mfa_reset",
-        details=f"Reset MFA enrollment for '{target.username}'.",
+        details=f"Reset all MFA methods for '{target.username}'.",
         request=request,
     )
     db.commit()
-    return _admin_redirect(f"MFA reset for '{target.username}'.")
+    return _admin_redirect(f"All MFA methods reset for '{target.username}'.")
 
 
 @router.post("/admin/users/{user_id}/reset-password")
@@ -1409,6 +2521,7 @@ def admin_toggle_role(user_id: str, request: Request, db: Session = Depends(get_
 
 
 @router.get("/totp")
+@router.get("/mfa")
 def totp_setup(request: Request, db: Session = Depends(get_db)):
     user = _get_current_user(db, request)
     if not user:
@@ -1416,52 +2529,55 @@ def totp_setup(request: Request, db: Session = Depends(get_db)):
 
     secret = None
     provisioning_uri = None
-    if user.totp_enabled:
-        return templates.TemplateResponse(
-            "totp_setup.html",
-            {
-                "request": request,
-                "user": user,
-                "enabled": True,
-                "secret": None,
-                "provisioning_uri": None,
-                "error": None,
-            },
+    if not user.totp_enabled:
+        if user.totp_secret_enc:
+            secret = decrypt_totp_secret(user.totp_secret_enc)
+        else:
+            totp = pyotp.TOTP(pyotp.random_base32())
+            secret = totp.secret
+            user.totp_secret_enc = encrypt_totp_secret(secret)
+            add_audit_log(
+                db,
+                user=user,
+                event_type="mfa.secret_provisioned",
+                details="MFA enrollment secret generated.",
+                request=request,
+            )
+            db.commit()
+
+        provisioning_uri = pyotp.TOTP(secret).provisioning_uri(
+            name=user.username, issuer_name=settings.totp_issuer
         )
 
-    if user.totp_secret_enc:
-        secret = decrypt_totp_secret(user.totp_secret_enc)
-    else:
-        totp = pyotp.TOTP(pyotp.random_base32())
-        secret = totp.secret
-        user.totp_secret_enc = encrypt_totp_secret(secret)
-        add_audit_log(
-            db,
-            user=user,
-            event_type="mfa.secret_provisioned",
-            details="MFA enrollment secret generated.",
-            request=request,
-        )
-        db.commit()
-
-    provisioning_uri = pyotp.TOTP(secret).provisioning_uri(
-        name=user.username, issuer_name=settings.totp_issuer
-    )
+    active_methods = _available_mfa_methods(user, transport_ready_only=False)
+    preferred_method = _resolve_mfa_method(user, user.mfa_preferred_method, active_methods)
 
     return templates.TemplateResponse(
         "totp_setup.html",
         {
             "request": request,
             "user": user,
-            "enabled": False,
+            "enabled": user.totp_enabled,
             "secret": secret,
             "provisioning_uri": provisioning_uri,
-            "error": None,
+            "error": request.query_params.get("error"),
+            "notice": request.query_params.get("notice"),
+            "smtp_ready": _smtp_configured(),
+            "sms_ready": _sms_configured(user),
+            "sms_provider_mode": _sms_provider_mode(),
+            "sms_provider_label": _sms_provider_label(),
+            "sms_carrier_label": SMS_CARRIER_LABELS.get(_normalize_sms_carrier(user.sms_carrier), ""),
+            "active_methods": active_methods,
+            "preferred_method": preferred_method,
+            "email_mfa_enabled": bool(user.email_mfa_enabled),
+            "sms_mfa_enabled": bool(user.sms_mfa_enabled),
+            "mfa_method_labels": MFA_METHOD_LABELS,
         },
     )
 
 
 @router.post("/totp/verify")
+@router.post("/mfa/verify")
 def totp_verify(
     request: Request,
     code: str = Form(...),
@@ -1472,7 +2588,7 @@ def totp_verify(
         return RedirectResponse(url="/ui/login", status_code=303)
 
     if not user.totp_secret_enc:
-        return RedirectResponse(url="/ui/totp", status_code=303)
+        return RedirectResponse(url="/ui/mfa", status_code=303)
 
     secret = decrypt_totp_secret(user.totp_secret_enc)
     if not pyotp.TOTP(secret).verify(code):
@@ -1484,22 +2600,15 @@ def totp_verify(
             request=request,
         )
         db.commit()
-        return templates.TemplateResponse(
-            "totp_setup.html",
-            {
-                "request": request,
-                "user": user,
-                "enabled": False,
-                "secret": secret,
-                "provisioning_uri": pyotp.TOTP(secret).provisioning_uri(
-                    name=user.username, issuer_name=settings.totp_issuer
-                ),
-                "error": "Invalid code. Try the current code from your authenticator app.",
-            },
-            status_code=400,
+        return RedirectResponse(
+            url=f"/ui/mfa?error={quote_plus('Invalid code. Try the current code from your authenticator app.')}",
+            status_code=303,
         )
 
     user.totp_enabled = True
+    methods_after_enable = _available_mfa_methods(user, transport_ready_only=False)
+    preferred = _resolve_mfa_method(user, user.mfa_preferred_method, methods_after_enable)
+    user.mfa_preferred_method = preferred or MFA_METHOD_TOTP
     add_audit_log(
         db,
         user=user,
@@ -1508,10 +2617,11 @@ def totp_verify(
         request=request,
     )
     db.commit()
-    return RedirectResponse(url="/ui/totp", status_code=303)
+    return RedirectResponse(url="/ui/mfa", status_code=303)
 
 
 @router.post("/totp/disable")
+@router.post("/mfa/disable")
 def totp_disable(request: Request, db: Session = Depends(get_db)):
     user = _get_current_user(db, request)
     if not user:
@@ -1519,6 +2629,9 @@ def totp_disable(request: Request, db: Session = Depends(get_db)):
 
     user.totp_enabled = False
     user.totp_secret_enc = None
+    if user.mfa_preferred_method == MFA_METHOD_TOTP:
+        methods_now = _available_mfa_methods(user, transport_ready_only=False)
+        user.mfa_preferred_method = _resolve_mfa_method(user, user.mfa_preferred_method, methods_now) or None
     add_audit_log(
         db,
         user=user,
@@ -1527,7 +2640,573 @@ def totp_disable(request: Request, db: Session = Depends(get_db)):
         request=request,
     )
     db.commit()
-    return RedirectResponse(url="/ui/totp", status_code=303)
+    return RedirectResponse(url="/ui/mfa", status_code=303)
+
+
+@router.post("/mfa/challenge/send")
+def mfa_send_challenge(
+    request: Request,
+    method: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+
+    selected = _normalize_mfa_method(method)
+    if selected not in {MFA_METHOD_EMAIL, MFA_METHOD_SMS}:
+        return RedirectResponse(url=f"/ui/mfa?error={quote_plus('Select email or SMS for challenge delivery.')}", status_code=303)
+
+    available = _available_mfa_methods(user, transport_ready_only=False)
+    if selected not in available:
+        return RedirectResponse(
+            url=f"/ui/mfa?error={quote_plus('That MFA method is not enabled for this account.')}",
+            status_code=303,
+        )
+
+    try:
+        destination = _issue_mfa_challenge(user, selected)
+    except HTTPException as exc:
+        db.rollback()
+        return RedirectResponse(url=f"/ui/mfa?error={quote_plus(str(exc.detail))}", status_code=303)
+    except Exception as exc:
+        db.rollback()
+        logger.warning("MFA send challenge failed (%s) for user %s: %s", selected, user.id, exc)
+        return RedirectResponse(url=f"/ui/mfa?error={quote_plus('Challenge could not be sent right now.')}", status_code=303)
+
+    add_audit_log(
+        db,
+        user=user,
+        event_type=f"mfa.challenge_sent_{selected}",
+        details=f"User requested MFA challenge via {selected} to {destination}.",
+        request=request,
+    )
+    db.commit()
+    return RedirectResponse(
+        url=f"/ui/mfa?notice={quote_plus(f'Code sent to {destination}.')}",
+        status_code=303,
+    )
+
+
+@router.get("/profile")
+def profile_page(request: Request, db: Session = Depends(get_db)):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+
+    active_methods = _available_mfa_methods(user, transport_ready_only=False)
+
+    return templates.TemplateResponse(
+        "profile.html",
+        {
+            "request": request,
+            "user": user,
+            "notice": request.query_params.get("notice"),
+            "error": request.query_params.get("error"),
+            "smtp_ready": _smtp_configured(),
+            "sms_ready": _sms_configured(user),
+            "sms_provider_mode": _sms_provider_mode(),
+            "sms_provider_label": _sms_provider_label(),
+            "mfa_methods_active": active_methods,
+            "mfa_method_preferred": _resolve_mfa_method(user, user.mfa_preferred_method, active_methods),
+            "mfa_method_labels": MFA_METHOD_LABELS,
+            "sms_carrier_options": _sms_carrier_rows(),
+        },
+    )
+
+
+@router.get("/profile/avatar")
+def profile_avatar(request: Request, db: Session = Depends(get_db)):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+
+    if not user.profile_image_path:
+        raise HTTPException(status_code=404, detail="Avatar not configured")
+
+    path = _safe_profile_asset_path(user.profile_image_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Avatar missing on disk")
+
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if not user.profile_image_nonce or not user.profile_image_tag:
+        return FileResponse(
+            path=path,
+            media_type=user.profile_image_mime_type or "application/octet-stream",
+            headers=headers,
+        )
+
+    ensure_user_key(db, user)
+    dek = get_user_dek(db, user)
+    return StreamingResponse(
+        decrypt_file_iter(dek, path, user.profile_image_nonce, user.profile_image_tag),
+        media_type=user.profile_image_mime_type or "application/octet-stream",
+        headers=headers,
+    )
+
+
+@router.post("/profile/avatar")
+def profile_update_avatar(
+    request: Request,
+    avatar: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+
+    filename = Path((avatar.filename or "").strip()).name
+    if not filename:
+        return _profile_redirect("Select an image file first.", error=True)
+
+    mime_type = (avatar.content_type or "").strip().lower()
+    if mime_type not in PROFILE_IMAGE_MIME_ALLOW:
+        return _profile_redirect("Only PNG, JPEG, WEBP, and GIF images are supported.", error=True)
+
+    ensure_user_key(db, user)
+    dek = get_user_dek(db, user)
+    avatar_root = _profile_avatar_root(user)
+    target = avatar_root / "avatar.enc"
+
+    nonce_b64, tag_b64, plain_size = encrypt_file_to_path(dek, avatar.file, target)
+    if plain_size > PROFILE_AVATAR_MAX_BYTES:
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+        return _profile_redirect("Avatar is too large (max 4 MB).", error=True)
+
+    old_path = user.profile_image_path
+    user.profile_image_path = str(target)
+    user.profile_image_nonce = nonce_b64
+    user.profile_image_tag = tag_b64
+    user.profile_image_mime_type = mime_type
+    add_audit_log(
+        db,
+        user=user,
+        event_type="account.profile_avatar_updated",
+        details=f"Updated profile avatar ({plain_size} bytes, {mime_type}).",
+        request=request,
+    )
+    db.commit()
+
+    if old_path and old_path != str(target):
+        try:
+            _safe_profile_asset_path(old_path).unlink(missing_ok=True)
+        except Exception:
+            logger.warning("Could not remove stale avatar path for user %s", user.id)
+
+    return _profile_redirect("Profile picture updated.")
+
+
+@router.post("/profile/avatar/remove")
+def profile_remove_avatar(request: Request, db: Session = Depends(get_db)):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+
+    old_path = user.profile_image_path
+    user.profile_image_path = None
+    user.profile_image_nonce = None
+    user.profile_image_tag = None
+    user.profile_image_mime_type = None
+    add_audit_log(
+        db,
+        user=user,
+        event_type="account.profile_avatar_removed",
+        details="Removed profile avatar.",
+        request=request,
+    )
+    db.commit()
+
+    if old_path:
+        try:
+            _safe_profile_asset_path(old_path).unlink(missing_ok=True)
+        except Exception:
+            logger.warning("Could not remove avatar file for user %s", user.id)
+
+    return _profile_redirect("Profile picture removed.")
+
+
+@router.post("/profile/preferences")
+def profile_update_preferences(
+    request: Request,
+    email: str = Form(""),
+    email_visible: str | None = Form(None),
+    phone_number: str = Form(""),
+    sms_carrier: str = Form(""),
+    email_mfa_enabled: str | None = Form(None),
+    sms_mfa_enabled: str | None = Form(None),
+    mfa_method: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+
+    try:
+        normalized_email = _normalize_email(email)
+        normalized_phone = _normalize_phone(phone_number)
+        normalized_sms_carrier = _normalize_sms_carrier(sms_carrier)
+    except HTTPException as exc:
+        return _profile_redirect(str(exc.detail), error=True)
+
+    if (sms_carrier or "").strip() and not normalized_sms_carrier:
+        return _profile_redirect("Select a supported SMS carrier.", error=True)
+
+    wants_email_visible = (email_visible or "").strip().lower() in {"1", "true", "on", "yes"}
+    wants_email_mfa = (email_mfa_enabled or "").strip().lower() in {"1", "true", "on", "yes"}
+    wants_sms_mfa = (sms_mfa_enabled or "").strip().lower() in {"1", "true", "on", "yes"}
+    requested_method = _normalize_mfa_method(mfa_method)
+
+    if wants_email_visible and not normalized_email:
+        return _profile_redirect("Add an email before enabling visibility.", error=True)
+    if wants_email_visible and not user.email_verified and normalized_email == (user.email or ""):
+        return _profile_redirect("Verify your email before making it visible to other users.", error=True)
+    if wants_email_mfa and not normalized_email:
+        return _profile_redirect("Add an email before enabling email MFA.", error=True)
+    if wants_email_mfa and not (user.email_verified and normalized_email == (user.email or "")):
+        return _profile_redirect("Verify your email before enabling email MFA.", error=True)
+    if wants_email_mfa and not _smtp_configured():
+        return _profile_redirect("Email MFA is unavailable until SMTP is configured on the server.", error=True)
+    if wants_sms_mfa:
+        sms_error = _sms_configuration_error_for_values(
+            phone_number=normalized_phone,
+            sms_carrier=normalized_sms_carrier,
+        )
+        if sms_error:
+            return _profile_redirect(sms_error, error=True)
+
+    changed = False
+    if normalized_email != (user.email or ""):
+        user.email = normalized_email or None
+        user.email_verified = False if normalized_email else False
+        user.email_verification_token_hash = None
+        user.email_verification_sent_at = None
+        user.email_verification_expires_at = None
+        if user.email_mfa_enabled:
+            user.email_mfa_enabled = False
+        changed = True
+
+    target_visible = wants_email_visible and bool(user.email_verified and (user.email or ""))
+    if user.email_visible != target_visible:
+        user.email_visible = target_visible
+        changed = True
+
+    if normalized_phone != (user.phone_number or ""):
+        user.phone_number = normalized_phone or None
+        if not user.phone_number and user.sms_mfa_enabled:
+            user.sms_mfa_enabled = False
+        changed = True
+
+    if normalized_sms_carrier != (user.sms_carrier or ""):
+        user.sms_carrier = normalized_sms_carrier or None
+        changed = True
+
+    email_mfa_effective = wants_email_mfa and bool(user.email and user.email_verified and _smtp_configured())
+    if user.email_mfa_enabled != email_mfa_effective:
+        user.email_mfa_enabled = email_mfa_effective
+        changed = True
+
+    sms_enabled_effective = wants_sms_mfa and _sms_configured(user)
+    if user.sms_mfa_enabled != sms_enabled_effective:
+        user.sms_mfa_enabled = sms_enabled_effective
+        changed = True
+
+    methods_now = _available_mfa_methods(user, transport_ready_only=False)
+    resolved_preferred = _resolve_mfa_method(user, requested_method, methods_now)
+    if user.mfa_preferred_method != (resolved_preferred or None):
+        user.mfa_preferred_method = resolved_preferred or None
+        changed = True
+
+    if user.mfa_challenge_method and user.mfa_challenge_method not in methods_now:
+        _clear_mfa_challenge(user)
+        changed = True
+
+    if not changed:
+        return _profile_redirect("No profile preference changes were detected.")
+
+    add_audit_log(
+        db,
+        user=user,
+        event_type="account.profile_preferences_updated",
+        details=(
+            f"Updated profile preferences (email={'set' if user.email else 'unset'}, "
+            f"email_visible={'on' if user.email_visible else 'off'}, "
+            f"phone={'set' if user.phone_number else 'unset'}, "
+            f"sms_carrier={user.sms_carrier or 'unset'}, "
+            f"email_mfa={'on' if user.email_mfa_enabled else 'off'}, "
+            f"sms_mfa={'on' if user.sms_mfa_enabled else 'off'})."
+        ),
+        request=request,
+    )
+    db.commit()
+
+    note = "Profile preferences updated."
+    if wants_email_visible and not user.email_visible:
+        note = "Profile preferences updated. Email visibility remains off until verification."
+    if wants_email_mfa and not user.email_mfa_enabled:
+        note = "Profile preferences updated. Email MFA remains off until email is verified and SMTP is configured."
+    if wants_sms_mfa and not user.sms_mfa_enabled:
+        note = "Profile preferences updated. SMS MFA stays off until phone, carrier, and SMS transport are configured."
+    return _profile_redirect(note)
+
+
+@router.post("/profile/email/send-verification")
+def profile_send_email_verification(request: Request, db: Session = Depends(get_db)):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+
+    if not user.email:
+        return _profile_redirect("Add an email address first.", error=True)
+
+    token = secrets.token_urlsafe(32)
+    token_hash = _email_token_hash(token)
+    now = datetime.utcnow()
+    expires_at = now + timedelta(minutes=EMAIL_VERIFY_TTL_MINUTES)
+
+    user.email_verification_token_hash = token_hash
+    user.email_verification_sent_at = now
+    user.email_verification_expires_at = expires_at
+
+    verify_link = (
+        f"{_public_origin(request)}/ui/profile/email/verify?token={quote_plus(token)}"
+    )
+    subject = "Verify your FileFort email"
+    body = (
+        f"Hello {user.username},\n\n"
+        "Use the link below to verify this email for your FileFort account.\n\n"
+        f"{verify_link}\n\n"
+        f"This link expires in {EMAIL_VERIFY_TTL_MINUTES} minutes."
+    )
+
+    if _smtp_configured():
+        message = EmailMessage()
+        message["From"] = settings.smtp_from
+        message["To"] = user.email
+        message["Subject"] = subject
+        message.set_content(body)
+        try:
+            _send_email_message(message)
+        except Exception as exc:
+            db.rollback()
+            logger.warning("Email verification send failed for user %s: %s", user.id, exc)
+            return _profile_redirect(
+                "Verification email could not be sent. Check SMTP settings and retry.",
+                error=True,
+            )
+        add_audit_log(
+            db,
+            user=user,
+            event_type="account.email_verification_sent",
+            details=f"Verification email sent to '{user.email}'.",
+            request=request,
+        )
+        db.commit()
+        return _profile_redirect("Verification email sent.")
+
+    add_audit_log(
+        db,
+        user=user,
+        event_type="account.email_verification_link_generated",
+        details="SMTP not configured; verification link generated in-browser.",
+        request=request,
+    )
+    db.commit()
+    return _profile_redirect(f"SMTP is not configured yet. Open this verification link: {verify_link}")
+
+
+@router.get("/profile/email/verify")
+def profile_verify_email(
+    request: Request,
+    token: str = "",
+    db: Session = Depends(get_db),
+):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+
+    value = (token or "").strip()
+    if not value:
+        return _profile_redirect("Verification token is missing.", error=True)
+
+    token_hash = _email_token_hash(value)
+    if user.email_verification_token_hash != token_hash:
+        add_audit_log(
+            db,
+            user=user,
+            event_type="account.email_verification_failed",
+            details="Email verification failed (token mismatch).",
+            request=request,
+        )
+        db.commit()
+        return _profile_redirect("Invalid verification token.", error=True)
+
+    if not user.email_verification_expires_at or user.email_verification_expires_at < datetime.utcnow():
+        return _profile_redirect("Verification token expired. Send a new verification email.", error=True)
+
+    user.email_verified = True
+    user.email_verification_token_hash = None
+    user.email_verification_sent_at = None
+    user.email_verification_expires_at = None
+    add_audit_log(
+        db,
+        user=user,
+        event_type="account.email_verified",
+        details=f"Email '{user.email}' verified.",
+        request=request,
+    )
+    db.commit()
+    return _profile_redirect("Email verified.")
+
+
+@router.post("/profile/username")
+def profile_update_username(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    mfa_code: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+
+    new_username = (username or "").strip()
+    if not new_username:
+        return RedirectResponse(url=f"/ui/profile?error={quote_plus('Username is required.')}", status_code=303)
+    if new_username == user.username:
+        return RedirectResponse(url=f"/ui/profile?notice={quote_plus('Username unchanged.')}", status_code=303)
+
+    if not verify_password(password or "", user.password_hash):
+        add_audit_log(
+            db,
+            user=user,
+            event_type="account.username_change_failed_password",
+            details="Username change blocked: password verification failed.",
+            request=request,
+        )
+        db.commit()
+        return RedirectResponse(url=f"/ui/profile?error={quote_plus('Current password was incorrect.')}", status_code=303)
+
+    if user.totp_enabled:
+        code = (mfa_code or "").strip()
+        if not code:
+            return RedirectResponse(url=f"/ui/profile?error={quote_plus('MFA code is required.')}", status_code=303)
+        secret = decrypt_totp_secret(user.totp_secret_enc or "")
+        if not pyotp.TOTP(secret).verify(code):
+            add_audit_log(
+                db,
+                user=user,
+                event_type="account.username_change_failed_mfa",
+                details="Username change blocked: MFA verification failed.",
+                request=request,
+            )
+            db.commit()
+            return RedirectResponse(url=f"/ui/profile?error={quote_plus('Invalid MFA code.')}", status_code=303)
+
+    existing = db.query(User).filter(User.username == new_username).first()
+    if existing:
+        return RedirectResponse(url=f"/ui/profile?error={quote_plus('Username is already taken.')}", status_code=303)
+
+    old_username = user.username
+    user.username = new_username
+    add_event(
+        db,
+        user,
+        action="auth",
+        message=f"Username changed: '{old_username}' -> '{new_username}'.",
+        level="SUCCESS",
+    )
+    add_audit_log(
+        db,
+        user=user,
+        event_type="account.username_changed",
+        details=f"Username changed from '{old_username}' to '{new_username}'.",
+        request=request,
+    )
+    db.commit()
+    return RedirectResponse(url=f"/ui/profile?notice={quote_plus('Username updated.')}", status_code=303)
+
+
+@router.post("/profile/password")
+def profile_update_password(
+    request: Request,
+    current_password: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+    mfa_code: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+
+    if not verify_password(current_password or "", user.password_hash):
+        add_audit_log(
+            db,
+            user=user,
+            event_type="account.password_change_failed_password",
+            details="Password change blocked: current password verification failed.",
+            request=request,
+        )
+        db.commit()
+        return RedirectResponse(url=f"/ui/profile?error={quote_plus('Current password was incorrect.')}", status_code=303)
+
+    if new_password != confirm_password:
+        return RedirectResponse(url=f"/ui/profile?error={quote_plus('New passwords did not match.')}", status_code=303)
+
+    if len(new_password or "") < 10:
+        return RedirectResponse(url=f"/ui/profile?error={quote_plus('New password must be at least 10 characters.')}", status_code=303)
+
+    if user.totp_enabled:
+        code = (mfa_code or "").strip()
+        if not code:
+            return RedirectResponse(url=f"/ui/profile?error={quote_plus('MFA code is required.')}", status_code=303)
+        secret = decrypt_totp_secret(user.totp_secret_enc or "")
+        if not pyotp.TOTP(secret).verify(code):
+            add_audit_log(
+                db,
+                user=user,
+                event_type="account.password_change_failed_mfa",
+                details="Password change blocked: MFA verification failed.",
+                request=request,
+            )
+            db.commit()
+            return RedirectResponse(url=f"/ui/profile?error={quote_plus('Invalid MFA code.')}", status_code=303)
+
+    session_id = _get_session_id(request)
+    user.password_hash = hash_password(new_password)
+    revoked = (
+        db.query(SessionModel)
+        .filter(SessionModel.user_id == user.id, SessionModel.is_active.is_(True))
+        .update({SessionModel.is_active: False}, synchronize_session=False)
+    )
+    add_event(
+        db,
+        user,
+        action="auth",
+        message=f"Password updated (revoked {revoked} session(s)).",
+        level="WARN",
+    )
+    add_audit_log(
+        db,
+        user=user,
+        event_type="account.password_changed",
+        details=f"Password changed; revoked {revoked} active session(s).",
+        request=request,
+    )
+    db.commit()
+
+    # Re-issue a session so the user stays signed in after the revoke.
+    session = create_session(db, user)
+    response = RedirectResponse(url=f"/ui/profile?notice={quote_plus('Password updated.')}", status_code=303)
+    response.set_cookie("pfv_session", str(session.id), httponly=True)
+    return response
 
 
 @router.post("/upload")
@@ -1919,6 +3598,7 @@ def terminal_command(
         message = (
             "Commands:\n"
             "  help\n"
+            "  clear\n"
             "  pwd\n"
             "  scope\n"
             "  groups\n"
@@ -1942,6 +3622,12 @@ def terminal_command(
             "Paths are relative to the active scope. Use usegroup/useuser to switch."
         )
         add_event(db, user, action="terminal", message=message)
+        return {"ok": True, "message": message}
+
+    if cmd == "clear":
+        # UI may handle this client-side, but keep it supported for API consistency.
+        message = "Cleared terminal output."
+        add_event(db, user, action="terminal", message="clear")
         return {"ok": True, "message": message}
 
     if cmd not in set(_TERMINAL_COMMANDS):

@@ -65,10 +65,10 @@
         }
       })();
     </script>
-    <link rel="stylesheet" href="/static/style.css?v=23" />
-    <link rel="stylesheet" href="/static/future.css?v=2" />
+    <link rel="stylesheet" href="/static/style.css?v=26" />
+    <link rel="stylesheet" href="/static/future.css?v=5" />
   </head>
-  <body data-ui="future" data-theme="light" class="{% block body_class %}{% endblock %}">
+  <body data-ui="future" data-theme="light" class="{% block body_class %}{% endblock %}{% if user %} has-user-menu{% endif %}">
     <div class="page">
       <header class="site-header">
         <div class="container header-inner">
@@ -82,17 +82,26 @@
             <nav class="nav" id="pfvPrimaryNav">
               <button type="button" class="nav-pill" id="pfvTerminalNav">Terminal</button>
               <a href="/ui" {% if _path == "/ui" %}aria-current="page"{% endif %}>Dashboard</a>
-              <a
-                href="/ui/groups"
-                class="nav-link-with-badge"
-                id="pfvNavGroupsLink"
-                {% if _path.startswith("/ui/groups") %}aria-current="page"{% endif %}
-              >
-                <span>Groups</span>
-                <span class="nav-count" id="pfvNavBadgeGroups" hidden>0</span>
-              </a>
-              <a href="/ui/audit" {% if _path == "/ui/audit" %}aria-current="page"{% endif %}>Audit</a>
-              <a href="/ui/trash" {% if _path == "/ui/trash" %}aria-current="page"{% endif %}>Trash</a>
+	              <a
+	                href="/ui/groups"
+	                class="nav-link-with-badge"
+	                id="pfvNavGroupsLink"
+	                {% if _path.startswith("/ui/groups") %}aria-current="page"{% endif %}
+	              >
+	                <span>Groups</span>
+	                <span class="nav-count" id="pfvNavBadgeGroups" hidden>0</span>
+	              </a>
+	              <a
+	                href="/ui/messages"
+	                class="nav-link-with-badge"
+	                id="pfvNavMessagesLink"
+	                {% if _path.startswith("/ui/messages") %}aria-current="page"{% endif %}
+	              >
+	                <span>Messages</span>
+	                <span class="nav-count" id="pfvNavBadgeMessages" hidden>0</span>
+	              </a>
+	              <a href="/ui/audit" {% if _path == "/ui/audit" %}aria-current="page"{% endif %}>Audit</a>
+	              <a href="/ui/trash" {% if _path == "/ui/trash" %}aria-current="page"{% endif %}>Trash</a>
               {% if user.is_admin %}
               <a href="/ui/admin/users" {% if _path.startswith("/ui/admin/users") %}aria-current="page"{% endif %}>Admin</a>
               <a href="/ui/admin/reports" {% if _path.startswith("/ui/admin/reports") %}aria-current="page"{% endif %}>Reports</a>
@@ -101,9 +110,6 @@
             </nav>
             <div class="toolbar-actions">
               <button type="button" class="ghost nav-menu-toggle" id="pfvMenuToggle" aria-expanded="false" aria-controls="pfvPrimaryNav">Menu</button>
-              <div class="user-pill">Signed in as {{ user.username }}</div>
-              <button type="button" class="ghost toggle-theme" id="themeToggle">Dark mode</button>
-              <a class="pill ghost-link" href="/ui/logout">Logout</a>
             </div>
             {% else %}
             <div class="toolbar-actions">
@@ -120,15 +126,66 @@
         <div class="container footer-inner">Single-host secure storage</div>
       </footer>
     </div>
+    {% if user %}
+    <div class="profile-wrap">
+      <button
+        type="button"
+        class="profile-pill"
+        id="pfvProfileBtn"
+        aria-expanded="false"
+        aria-controls="pfvProfileMenu"
+      >
+        <span class="profile-avatar" aria-hidden="true">
+          {% if user.profile_image_path %}
+          <img src="/ui/profile/avatar" alt="" class="profile-avatar-img" loading="lazy" decoding="async" />
+          {% else %}
+          {{ user.username[:1]|upper }}
+          {% endif %}
+        </span>
+        <span class="profile-meta">
+          <span class="profile-name">{{ user.username }}</span>
+          <span class="profile-sub">Signed in</span>
+        </span>
+      </button>
+      <div class="profile-menu" id="pfvProfileMenu" hidden>
+        <div class="profile-menu-head">
+          Signed in as {{ user.username }}
+          {% if user.email and user.email_visible and user.email_verified %}
+          <br /><span class="profile-menu-subtle">{{ user.email }}</span>
+          {% endif %}
+        </div>
+        <a class="profile-menu-item" href="/ui/profile">Profile</a>
+        <a class="profile-menu-item" href="/ui/mfa">MFA</a>
+        <button type="button" class="profile-menu-item" id="themeToggle">Dark mode</button>
+        <a class="profile-menu-item danger" href="/ui/logout">Logout</a>
+      </div>
+    </div>
+    {% endif %}
     {% block scripts %}{% endblock %}
-    <script>
-      const root = document.body;
-      const toggle = document.getElementById("themeToggle");
-      const stored = localStorage.getItem("pfv-theme");
-      const prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
-      const initialTheme = stored || (prefersDark ? "dark" : "light");
-      root.dataset.theme = initialTheme;
-      toggle.textContent = initialTheme === "dark" ? "Light mode" : "Dark mode";
+	    <script>
+	      const root = document.body;
+	      const toggle = document.getElementById("themeToggle");
+	      const BG_STORAGE_KEY = "pfv-custom-bg";
+	      const stored = localStorage.getItem("pfv-theme");
+	      const prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+	      const initialTheme = stored || (prefersDark ? "dark" : "light");
+	      root.dataset.theme = initialTheme;
+	      toggle.textContent = initialTheme === "dark" ? "Light mode" : "Dark mode";
+
+	      function applyStoredBackground() {
+	        try {
+	          const bg = (localStorage.getItem(BG_STORAGE_KEY) || "").trim();
+	          if (bg) {
+	            root.style.setProperty("--pfv-custom-bg", bg);
+	          } else {
+	            root.style.removeProperty("--pfv-custom-bg");
+	          }
+	        } catch {
+	          root.style.removeProperty("--pfv-custom-bg");
+	        }
+	      }
+
+	      applyStoredBackground();
 
       function syncTerminalTheme() {
         const term = document.getElementById("pfvTerminal");
@@ -175,13 +232,13 @@
         setMenuState(stored === "1");
       }
 
-      if (menuToggle && toolbar && nav) {
-        menuToggle.addEventListener("click", () => {
-          if (!mobileQuery.matches) return;
-          const nextOpen = toolbar.dataset.menuOpen !== "1";
-          setMenuState(nextOpen);
-          localStorage.setItem(MENU_STATE_KEY, nextOpen ? "1" : "0");
-        });
+	      if (menuToggle && toolbar && nav) {
+	        menuToggle.addEventListener("click", () => {
+	          if (!mobileQuery.matches) return;
+	          const nextOpen = toolbar.dataset.menuOpen !== "1";
+	          setMenuState(nextOpen);
+	          localStorage.setItem(MENU_STATE_KEY, nextOpen ? "1" : "0");
+	        });
 
         nav.addEventListener("click", (event) => {
           const target = event.target instanceof Element ? event.target.closest("a, button") : null;
@@ -196,41 +253,105 @@
           mobileQuery.addListener(syncMenuState);
         }
 
-        syncMenuState();
-      }
+	        syncMenuState();
+	      }
+	
+	      (function () {
+	        const btn = document.getElementById("pfvProfileBtn");
+	        const menu = document.getElementById("pfvProfileMenu");
+	        if (!btn || !menu) return;
+	
+	        function setOpen(open) {
+	          const isOpen = !!open;
+	          btn.setAttribute("aria-expanded", isOpen ? "true" : "false");
+	          menu.hidden = !isOpen;
+	        }
+	
+	        function close() {
+	          setOpen(false);
+	          document.removeEventListener("mousedown", onDocMouseDown, true);
+	          document.removeEventListener("keydown", onDocKeyDown, true);
+	        }
+	
+	        function onDocMouseDown(event) {
+	          if (!(event.target instanceof Element)) return;
+	          if (btn.contains(event.target) || menu.contains(event.target)) return;
+	          close();
+	        }
+	
+	        function onDocKeyDown(event) {
+	          if (event.key === "Escape") close();
+	        }
+	
+	        btn.addEventListener("click", () => {
+	          const nextOpen = btn.getAttribute("aria-expanded") !== "true";
+	          setOpen(nextOpen);
+	          if (nextOpen) {
+	            document.addEventListener("mousedown", onDocMouseDown, true);
+	            document.addEventListener("keydown", onDocKeyDown, true);
+	          } else {
+	            close();
+	          }
+	        });
+	
+	        menu.addEventListener("click", (event) => {
+	          const target = event.target instanceof Element ? event.target.closest("a, button") : null;
+	          if (!target) return;
+	          // Close on any selection to keep the header clean.
+	          close();
+	        });
+	      })();
 
-      const navGroupsLink = document.getElementById("pfvNavGroupsLink");
-      const navGroupsBadge = document.getElementById("pfvNavBadgeGroups");
-      let notificationsTimer = null;
+	      const navGroupsLink = document.getElementById("pfvNavGroupsLink");
+	      const navGroupsBadge = document.getElementById("pfvNavBadgeGroups");
+	      const navMessagesLink = document.getElementById("pfvNavMessagesLink");
+	      const navMessagesBadge = document.getElementById("pfvNavBadgeMessages");
+	      let notificationsTimer = null;
 
       async function refreshNotifications() {
-        if (!navGroupsBadge || !navGroupsLink) return;
+        const hasGroups = !!(navGroupsBadge && navGroupsLink);
+        const hasMessages = !!(navMessagesBadge && navMessagesLink);
+        if (!hasGroups && !hasMessages) return;
         try {
           const response = await fetch("/ui/notifications", { credentials: "same-origin", cache: "no-store" });
           if (!response.ok) {
             if (response.status === 401) {
-              navGroupsBadge.hidden = true;
+              if (navGroupsBadge) navGroupsBadge.hidden = true;
+              if (navMessagesBadge) navMessagesBadge.hidden = true;
             }
             return;
           }
           const payload = await response.json();
           const unreadMessages = Number(payload.unread_messages || 0);
           const pendingInvites = Number(payload.pending_group_invites || 0);
-          const total = Number(payload.groups_badge_total || 0);
-          navGroupsLink.title = `${unreadMessages} unread messages, ${pendingInvites} pending invites`;
-          if (total > 0) {
-            navGroupsBadge.hidden = false;
-            navGroupsBadge.textContent = total > 99 ? "99+" : String(total);
-          } else {
-            navGroupsBadge.hidden = true;
-            navGroupsBadge.textContent = "0";
+
+          if (hasGroups) {
+            navGroupsLink.title = `${pendingInvites} pending invites`;
+            if (pendingInvites > 0) {
+              navGroupsBadge.hidden = false;
+              navGroupsBadge.textContent = pendingInvites > 99 ? "99+" : String(pendingInvites);
+            } else {
+              navGroupsBadge.hidden = true;
+              navGroupsBadge.textContent = "0";
+            }
+          }
+
+          if (hasMessages) {
+            navMessagesLink.title = `${unreadMessages} unread messages`;
+            if (unreadMessages > 0) {
+              navMessagesBadge.hidden = false;
+              navMessagesBadge.textContent = unreadMessages > 99 ? "99+" : String(unreadMessages);
+            } else {
+              navMessagesBadge.hidden = true;
+              navMessagesBadge.textContent = "0";
+            }
           }
         } catch {
           return;
         }
       }
 
-      if (navGroupsBadge && navGroupsLink) {
+      if ((navGroupsBadge && navGroupsLink) || (navMessagesBadge && navMessagesLink)) {
         refreshNotifications();
         notificationsTimer = window.setInterval(refreshNotifications, 15000);
         document.addEventListener("visibilitychange", () => {
@@ -320,14 +441,12 @@
           <span class="terminal-badge">Live</span>
           <span class="terminal-title">Vault Activity Console</span>
         </div>
-        <div class="terminal-actions">
-          <button type="button" class="terminal-control" id="pfvTerminalMinimize" aria-label="Minimize terminal" title="Minimize">−</button>
-          <button type="button" class="terminal-control" id="pfvTerminalMaximize" aria-label="Maximize terminal" title="Maximize">▢</button>
-          <button type="button" class="terminal-control terminal-control-close" id="pfvTerminalClose" aria-label="Close terminal" title="Close">×</button>
-          <button type="button" class="ghost" id="pfvTerminalToggle">Hide</button>
-          <button type="button" class="ghost" id="pfvTerminalClear">Clear</button>
-        </div>
-      </div>
+	        <div class="terminal-actions">
+	          <button type="button" class="terminal-control" id="pfvTerminalMinimize" aria-label="Minimize terminal" title="Minimize">−</button>
+	          <button type="button" class="terminal-control" id="pfvTerminalMaximize" aria-label="Maximize terminal" title="Maximize">▢</button>
+	          <button type="button" class="terminal-control terminal-control-close" id="pfvTerminalClose" aria-label="Close terminal" title="Close">×</button>
+	        </div>
+	      </div>
       <div class="terminal-meta">
         <div class="terminal-metric"><span class="metric-key">Status</span><span class="metric-value" id="pfvTerminalStatus">SYNCING</span></div>
         <div class="terminal-metric"><span class="metric-key">Events</span><span class="metric-value" id="pfvTerminalEventCount">0</span></div>
@@ -349,7 +468,7 @@
       </div>
       <form class="terminal-input" id="pfvTerminalForm">
         <span class="terminal-prompt" aria-hidden="true">vault$</span>
-        <input type="text" id="pfvTerminalCommand" name="command" placeholder="Type: help, list, tree, find, stat, view, hash, quota, encstatus" autocomplete="off" />
+	        <input type="text" id="pfvTerminalCommand" name="command" placeholder="Type: help, list, tree, find, stat, view, hash, quota, encstatus, clear" autocomplete="off" />
         <button type="submit">Execute</button>
       </form>
       <span class="resize-handle handle-e" data-resize="e"></span>
@@ -358,22 +477,20 @@
       <span class="resize-handle handle-s" data-resize="s"></span>
     </div>
     <script>
-      (function () {
-        const term = document.getElementById("pfvTerminal");
-        const body = document.getElementById("pfvTerminalBody");
-        const toggleBtn = document.getElementById("pfvTerminalToggle");
-        const clearBtn = document.getElementById("pfvTerminalClear");
-        const closeDot = document.getElementById("pfvTerminalClose");
-        const minDot = document.getElementById("pfvTerminalMinimize");
-        const maxDot = document.getElementById("pfvTerminalMaximize");
-        const navTab = document.getElementById("pfvTerminalNav");
-        const termForm = document.getElementById("pfvTerminalForm");
-        const termCommand = document.getElementById("pfvTerminalCommand");
+	      (function () {
+	        const term = document.getElementById("pfvTerminal");
+	        const body = document.getElementById("pfvTerminalBody");
+	        const closeDot = document.getElementById("pfvTerminalClose");
+	        const minDot = document.getElementById("pfvTerminalMinimize");
+	        const maxDot = document.getElementById("pfvTerminalMaximize");
+	        const navTab = document.getElementById("pfvTerminalNav");
+	        const termForm = document.getElementById("pfvTerminalForm");
+	        const termCommand = document.getElementById("pfvTerminalCommand");
         const terminalStatus = document.getElementById("pfvTerminalStatus");
-        const terminalEventCount = document.getElementById("pfvTerminalEventCount");
-        const terminalScrollState = document.getElementById("pfvTerminalScrollState");
-        const terminalShortcuts = document.querySelectorAll(".terminal-shortcut");
-        if (!term || !body || !toggleBtn || !clearBtn || !closeDot || !minDot || !maxDot) return;
+	        const terminalEventCount = document.getElementById("pfvTerminalEventCount");
+	        const terminalScrollState = document.getElementById("pfvTerminalScrollState");
+	        const terminalShortcuts = document.querySelectorAll(".terminal-shortcut");
+	        if (!term || !body || !closeDot || !minDot || !maxDot) return;
         const VIEW_MARGIN = 12;
         const DESKTOP_MIN_WIDTH = 360;
         const DESKTOP_MIN_HEIGHT = 220;
@@ -516,18 +633,16 @@
         }
         requestAnimationFrame(() => clampTerminalFrame({ persist: false }));
 
-        function syncTerminalUi() {
-          const isOpen = term.dataset.open === "1";
-          toggleBtn.textContent = "Hide";
-          toggleBtn.style.display = isOpen ? "inline-flex" : "none";
-          term.dataset.min = isOpen ? "0" : "1";
-          if (isOpen && term.dataset.max !== "1") {
-            requestAnimationFrame(() => clampTerminalFrame({ persist: false }));
-          }
-          if (navTab) {
-            navTab.textContent = isOpen ? "Hide Terminal" : "Terminal";
-          }
-        }
+	        function syncTerminalUi() {
+	          const isOpen = term.dataset.open === "1";
+	          term.dataset.min = isOpen ? "0" : "1";
+	          if (isOpen && term.dataset.max !== "1") {
+	            requestAnimationFrame(() => clampTerminalFrame({ persist: false }));
+	          }
+	          if (navTab) {
+	            navTab.textContent = isOpen ? "Hide Terminal" : "Terminal";
+	          }
+	        }
 
         syncTerminalUi();
         let renderedEvents = 0;
@@ -537,18 +652,12 @@
           term.dataset.status = normalized.toLowerCase();
         }
 
-        toggleBtn.addEventListener("click", () => {
-          term.dataset.open = "0";
-          localStorage.setItem("pfv-terminal-open", "0");
-          syncTerminalUi();
-        });
-
-        clearBtn.addEventListener("click", () => {
-          body.innerHTML = "";
-          renderedEvents = 0;
-          lastDateLabel = "";
-          if (terminalEventCount) terminalEventCount.textContent = "0";
-        });
+	        function clearTerminal() {
+	          body.innerHTML = "";
+	          renderedEvents = 0;
+	          lastDateLabel = "";
+	          if (terminalEventCount) terminalEventCount.textContent = "0";
+	        }
 
         closeDot.addEventListener("click", () => {
           term.dataset.open = "0";
@@ -693,13 +802,20 @@
           }
         }
 
-        termForm?.addEventListener("submit", async (e) => {
-          e.preventDefault();
-          const raw = termCommand?.value || "";
-          if (!raw.trim()) return;
-          appendEvent({ level: "INFO", action: "cmd", message: raw });
-          if (termCommand) termCommand.value = "";
-          setStatus("RUNNING");
+	        termForm?.addEventListener("submit", async (e) => {
+	          e.preventDefault();
+	          const raw = termCommand?.value || "";
+	          const trimmed = raw.trim();
+	          if (!trimmed) return;
+	          if (trimmed.toLowerCase() === "clear") {
+	            clearTerminal();
+	            if (termCommand) termCommand.value = "";
+	            setStatus("LIVE");
+	            return;
+	          }
+	          appendEvent({ level: "INFO", action: "cmd", message: raw });
+	          if (termCommand) termCommand.value = "";
+	          setStatus("RUNNING");
           try {
             const res = await fetch("/ui/terminal", {
               method: "POST",

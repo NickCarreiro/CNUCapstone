@@ -66,6 +66,26 @@ if ! grep -q '^PFV_SALT_FILE=' .env; then
   printf '\nPFV_SALT_FILE=\"%s\"\n' "/var/lib/pfv/salt.bin" >> .env
 fi
 
+if ! grep -q '^PFV_MFA_CODE_TTL_SECONDS=' .env; then
+  printf '\nPFV_MFA_CODE_TTL_SECONDS=300\n' >> .env
+fi
+
+if ! grep -q '^PFV_MFA_RESEND_COOLDOWN_SECONDS=' .env; then
+  printf 'PFV_MFA_RESEND_COOLDOWN_SECONDS=30\n' >> .env
+fi
+
+if ! grep -q '^PFV_MFA_MAX_ATTEMPTS=' .env; then
+  printf 'PFV_MFA_MAX_ATTEMPTS=5\n' >> .env
+fi
+
+if ! grep -q '^PFV_SMTP_HOST=' .env; then
+  printf '\nPFV_SMTP_HOST=\"\"\nPFV_SMTP_PORT=587\nPFV_SMTP_USERNAME=\"\"\nPFV_SMTP_PASSWORD=\"\"\nPFV_SMTP_FROM=\"\"\nPFV_SMTP_USE_TLS=true\nPFV_SMTP_USE_SSL=false\n' >> .env
+fi
+
+if ! grep -q '^PFV_SMS_PROVIDER=' .env; then
+  printf '\nPFV_SMS_PROVIDER=\"smtp_gateway\"\nPFV_TWILIO_ACCOUNT_SID=\"\"\nPFV_TWILIO_AUTH_TOKEN=\"\"\nPFV_TWILIO_FROM_NUMBER=\"\"\n' >> .env
+fi
+
 # Extract settings using global python
 PASSFILE="$(python3 - <<'PY'
 from app.config import settings
