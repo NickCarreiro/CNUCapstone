@@ -66,8 +66,9 @@
       })();
     </script>
     <link rel="stylesheet" href="/static/style.css?v=23" />
+    <link rel="stylesheet" href="/static/future.css?v=2" />
   </head>
-  <body data-theme="light" class="{% block body_class %}{% endblock %}">
+  <body data-ui="future" data-theme="light" class="{% block body_class %}{% endblock %}">
     <div class="page">
       <header class="site-header">
         <div class="container header-inner">
@@ -77,19 +78,25 @@
           </div>
           <div class="toolbar">
             {% if user %}
+            {% set _path = request.url.path if request else "" %}
             <nav class="nav" id="pfvPrimaryNav">
               <button type="button" class="nav-pill" id="pfvTerminalNav">Terminal</button>
-              <a href="/ui">Dashboard</a>
-              <a href="/ui/groups" class="nav-link-with-badge" id="pfvNavGroupsLink">
+              <a href="/ui" {% if _path == "/ui" %}aria-current="page"{% endif %}>Dashboard</a>
+              <a
+                href="/ui/groups"
+                class="nav-link-with-badge"
+                id="pfvNavGroupsLink"
+                {% if _path.startswith("/ui/groups") %}aria-current="page"{% endif %}
+              >
                 <span>Groups</span>
                 <span class="nav-count" id="pfvNavBadgeGroups" hidden>0</span>
               </a>
-              <a href="/ui/audit">Audit</a>
-              <a href="/ui/trash">Trash</a>
+              <a href="/ui/audit" {% if _path == "/ui/audit" %}aria-current="page"{% endif %}>Audit</a>
+              <a href="/ui/trash" {% if _path == "/ui/trash" %}aria-current="page"{% endif %}>Trash</a>
               {% if user.is_admin %}
-              <a href="/ui/admin/users">Admin</a>
-              <a href="/ui/admin/reports">Reports</a>
-              <a href="/ui/admin/audit">Admin Audit</a>
+              <a href="/ui/admin/users" {% if _path.startswith("/ui/admin/users") %}aria-current="page"{% endif %}>Admin</a>
+              <a href="/ui/admin/reports" {% if _path.startswith("/ui/admin/reports") %}aria-current="page"{% endif %}>Reports</a>
+              <a href="/ui/admin/audit" {% if _path == "/ui/admin/audit" %}aria-current="page"{% endif %}>Admin Audit</a>
               {% endif %}
             </nav>
             <div class="toolbar-actions">
@@ -118,9 +125,20 @@
       const root = document.body;
       const toggle = document.getElementById("themeToggle");
       const stored = localStorage.getItem("pfv-theme");
-      if (stored) {
-        root.dataset.theme = stored;
-        toggle.textContent = stored === "dark" ? "Light mode" : "Dark mode";
+      const prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+      const initialTheme = stored || (prefersDark ? "dark" : "light");
+      root.dataset.theme = initialTheme;
+      toggle.textContent = initialTheme === "dark" ? "Light mode" : "Dark mode";
+
+      function syncTerminalTheme() {
+        const term = document.getElementById("pfvTerminal");
+        if (term) term.dataset.theme = root.dataset.theme === "dark" ? "dark" : "light";
+      }
+
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", syncTerminalTheme, { once: true });
+      } else {
+        syncTerminalTheme();
       }
 
       toggle.addEventListener("click", () => {
@@ -128,6 +146,7 @@
         root.dataset.theme = next;
         localStorage.setItem("pfv-theme", next);
         toggle.textContent = next === "dark" ? "Light mode" : "Dark mode";
+        syncTerminalTheme();
       });
 
       const toolbar = document.querySelector(".toolbar");
@@ -302,9 +321,9 @@
           <span class="terminal-title">Vault Activity Console</span>
         </div>
         <div class="terminal-actions">
-          <button type="button" class="terminal-control" id="pfvTerminalMinimize" aria-label="Minimize terminal" title="Minimize">MIN</button>
-          <button type="button" class="terminal-control" id="pfvTerminalMaximize" aria-label="Maximize terminal" title="Maximize">MAX</button>
-          <button type="button" class="terminal-control terminal-control-close" id="pfvTerminalClose" aria-label="Close terminal" title="Close">CLOSE</button>
+          <button type="button" class="terminal-control" id="pfvTerminalMinimize" aria-label="Minimize terminal" title="Minimize">−</button>
+          <button type="button" class="terminal-control" id="pfvTerminalMaximize" aria-label="Maximize terminal" title="Maximize">▢</button>
+          <button type="button" class="terminal-control terminal-control-close" id="pfvTerminalClose" aria-label="Close terminal" title="Close">×</button>
           <button type="button" class="ghost" id="pfvTerminalToggle">Hide</button>
           <button type="button" class="ghost" id="pfvTerminalClear">Clear</button>
         </div>
