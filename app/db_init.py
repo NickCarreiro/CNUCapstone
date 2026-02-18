@@ -34,8 +34,19 @@ def ensure_schema() -> str:
         if not has_column("files", "mime_type"):
             stmts.append("ALTER TABLE files ADD COLUMN mime_type VARCHAR(255)")
 
-    if "users" in table_names and not has_column("users", "is_admin"):
-        stmts.append("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE")
+    if "users" in table_names:
+        if not has_column("users", "is_admin"):
+            stmts.append("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE")
+        if not has_column("users", "is_disabled"):
+            stmts.append("ALTER TABLE users ADD COLUMN is_disabled BOOLEAN NOT NULL DEFAULT FALSE")
+        if not has_column("users", "disabled_at"):
+            stmts.append("ALTER TABLE users ADD COLUMN disabled_at TIMESTAMP")
+        if not has_column("users", "disabled_reason"):
+            stmts.append("ALTER TABLE users ADD COLUMN disabled_reason TEXT")
+        if not has_column("users", "messaging_disabled"):
+            stmts.append("ALTER TABLE users ADD COLUMN messaging_disabled BOOLEAN NOT NULL DEFAULT FALSE")
+        if not has_column("users", "messaging_disabled_at"):
+            stmts.append("ALTER TABLE users ADD COLUMN messaging_disabled_at TIMESTAMP")
 
     if "direct_messages" in table_names:
         if not has_column("direct_messages", "thread_id"):

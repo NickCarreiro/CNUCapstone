@@ -1,0 +1,197 @@
+{% extends "base.html" %}
+{% block body_class %}page-admin-report-detail{% endblock %}
+{% block content %}
+<section class="card hero-card admin-hero">
+  <div class="eyebrow">System Administration</div>
+  <h1>Report review</h1>
+  <p class="muted">Review the reported message and apply manual account actions as needed.</p>
+  <div class="stat-row">
+    <div class="stat-chip">
+      <div class="stat-number">{{ report.status }}</div>
+      <div class="stat-label">Status</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ report.reason }}</div>
+      <div class="stat-label">Reason</div>
+    </div>
+  </div>
+</section>
+
+{% if error %}
+<div class="alert">{{ error }}</div>
+{% endif %}
+{% if notice %}
+<div class="alert admin-notice">{{ notice }}</div>
+{% endif %}
+
+<section class="card">
+  <div class="card-header">
+    <h2>Report details</h2>
+    <div class="card-tools">
+      <a class="pill ghost" href="/ui/admin/reports">Back to reports</a>
+      <a class="pill ghost" href="/ui/admin/users">Admin users</a>
+    </div>
+  </div>
+
+  <div class="soft-panel">
+    <div class="meta-grid">
+      <div class="meta-item">
+        <div class="label">Report id</div>
+        <code>{{ report.id }}</code>
+      </div>
+      <div class="meta-item">
+        <div class="label">Created (UTC)</div>
+        <div>{{ report.created_at.strftime("%Y-%m-%d %H:%M:%S") if report.created_at else "-" }}</div>
+      </div>
+      <div class="meta-item">
+        <div class="label">Reporter</div>
+        <div>{{ report.reporter.username if report.reporter else "-" }}</div>
+      </div>
+      <div class="meta-item">
+        <div class="label">Reported user</div>
+        <div>
+          {{ report.reported_user.username if report.reported_user else "-" }}
+          {% if report.reported_user and report.reported_user.is_disabled %}
+            <span class="pill ghost">Disabled</span>
+          {% endif %}
+          {% if report.reported_user and report.reported_user.messaging_disabled %}
+            <span class="pill ghost">Messaging restricted</span>
+          {% endif %}
+        </div>
+      </div>
+      <div class="meta-item">
+        <div class="label">Status</div>
+        <code>{{ report.status }}</code>
+      </div>
+      <div class="meta-item">
+        <div class="label">Reviewed by</div>
+        <div>{{ report.reviewed_by_admin.username if report.reviewed_by_admin else "-" }}</div>
+      </div>
+    </div>
+  </div>
+
+  {% if report_details %}
+  <div class="soft-panel">
+    <div class="label">Reporter details</div>
+    <pre class="mono-block">{{ report_details }}</pre>
+  </div>
+  {% endif %}
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Reported message</h2>
+  </div>
+
+  {% if message %}
+  <div class="soft-panel">
+    <div class="meta-grid">
+      <div class="meta-item">
+        <div class="label">Message id</div>
+        <code>{{ message.id }}</code>
+      </div>
+      <div class="meta-item">
+        <div class="label">Thread id</div>
+        <code>{{ message.thread_id or message.id }}</code>
+      </div>
+      <div class="meta-item">
+        <div class="label">From</div>
+        <div>{{ message.sender.username if message.sender else "-" }}</div>
+      </div>
+      <div class="meta-item">
+        <div class="label">To</div>
+        <div>{{ message.recipient.username if message.recipient else "-" }}</div>
+      </div>
+      <div class="meta-item">
+        <div class="label">Sent (UTC)</div>
+        <div>{{ message.created_at.strftime("%Y-%m-%d %H:%M:%S") if message.created_at else "-" }}</div>
+      </div>
+      <div class="meta-item">
+        <div class="label">Attachment</div>
+        <div>
+          {% if message.attachment_name %}
+            {{ message.attachment_name }} ({{ message.attachment_size }} bytes)
+          {% else %}
+            -
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="soft-panel">
+    <div class="label">Body</div>
+    <pre class="mono-block">{{ message_body or "(empty)" }}</pre>
+  </div>
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Admin review</h2>
+  </div>
+  <form method="post" action="/ui/admin/reports/{{ report.id }}/status" class="form compact">
+    <label>
+      <span>Status</span>
+      <select name="status" required>
+        {% for value in allowed_statuses %}
+        <option value="{{ value }}" {% if report.status == value %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>Admin notes (optional)</span>
+      <textarea name="admin_notes" rows="4" maxlength="2000" placeholder="Notes are stored encrypted in the database.">{{ admin_notes }}</textarea>
+    </label>
+    <div class="inline-form">
+      <button type="submit">Save review</button>
+      <a class="pill ghost" href="/ui/admin/reports/{{ report.id }}">Reset</a>
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Account actions</h2>
+  </div>
+  <p class="muted">These actions are manual and do not trigger automatically when a report is filed.</p>
+
+  <div class="admin-action-grid">
+    <form method="post" action="/ui/admin/reports/{{ report.id }}/action" class="inline-form" onsubmit="return confirm('Issue a warning to this user?');">
+      <input type="hidden" name="action" value="warn" />
+      <input type="hidden" name="note" value="Administrator warning: your direct messaging activity has been reported." />
+      <button type="submit" class="ghost">Issue warning</button>
+    </form>
+
+    {% if report.reported_user and not report.reported_user.messaging_disabled %}
+    <form method="post" action="/ui/admin/reports/{{ report.id }}/action" class="inline-form" onsubmit="return confirm('Disable direct messaging for this user?');">
+      <input type="hidden" name="action" value="restrict_messaging" />
+      <button type="submit" class="danger">Restrict messaging</button>
+    </form>
+    {% else %}
+    <form method="post" action="/ui/admin/reports/{{ report.id }}/action" class="inline-form" onsubmit="return confirm('Re-enable direct messaging for this user?');">
+      <input type="hidden" name="action" value="unrestrict_messaging" />
+      <button type="submit" class="ghost">Enable messaging</button>
+    </form>
+    {% endif %}
+
+    {% if report.reported_user and not report.reported_user.is_disabled %}
+    <form method="post" action="/ui/admin/reports/{{ report.id }}/action" class="inline-form" onsubmit="return confirm('Disable this account and revoke sessions?');">
+      <input type="hidden" name="action" value="disable_account" />
+      <button type="submit" class="danger">Disable account</button>
+    </form>
+    {% else %}
+    <form method="post" action="/ui/admin/reports/{{ report.id }}/action" class="inline-form" onsubmit="return confirm('Re-enable this account?');">
+      <input type="hidden" name="action" value="enable_account" />
+      <button type="submit" class="ghost">Enable account</button>
+    </form>
+    {% endif %}
+
+    <form method="post" action="/ui/admin/reports/{{ report.id }}/action" class="inline-form" onsubmit="return confirm('Revoke all active sessions for this user?');">
+      <input type="hidden" name="action" value="revoke_sessions" />
+      <button type="submit" class="ghost">Revoke sessions</button>
+    </form>
+  </div>
+</section>
+{% endblock %}
+

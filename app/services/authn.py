@@ -52,4 +52,10 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
+    if getattr(user, "is_disabled", False):
+        # Immediately invalidate the session so disabled accounts get signed out.
+        session.is_active = False
+        db.commit()
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
+
     return user

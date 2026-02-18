@@ -4,17 +4,20 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 import mimetypes
+from urllib.parse import quote_plus
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import and_, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from app.config import settings
 from app.db import get_db
 from app.models.core import (
     DirectMessage,
+    DirectMessageReport,
     Group,
     GroupFileRecord,
     GroupInvite,
@@ -23,6 +26,7 @@ from app.models.core import (
 )
 from app.services.activity import add_event
 from app.services.authn import get_current_user as resolve_current_user
+from app.services.audit import add_audit_log
 from app.services.crypto import decrypt_file_iter, encrypt_file_to_path
 from app.services.group_keystore import ensure_group_key, get_group_dek
 from app.services.keystore import get_user_dek
@@ -45,6 +49,15 @@ ROLE_RANK = {
 
 MANAGE_MEMBER_ROLES = (ROLE_VIEWER, ROLE_MEMBER, ROLE_ADMIN)
 MESSAGE_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024
+
+DM_REPORT_REASONS: dict[str, str] = {
+    "spam": "Spam / unsolicited advertising",
+    "harassment": "Harassment or hate speech",
+    "threat": "Threats or violence",
+    "impersonation": "Impersonation / fraud",
+    "sexual": "Sexual content",
+    "other": "Other",
+}
 
 
 def _get_current_user(db: Session, request: Request) -> User | None:
@@ -200,6 +213,8 @@ def _format_utc(value: datetime | None) -> str:
 def groups_home(
     request: Request,
     thread: str | None = None,
+    notice: str | None = None,
+    error: str | None = None,
     db: Session = Depends(get_db),
 ):
     user = _get_current_user(db, request)
@@ -332,7 +347,8 @@ def groups_home(
             "active_thread_id": str(active_thread_uuid) if active_thread_uuid else "",
             "active_partner_username": active_thread_summary["partner_username"] if active_thread_summary else "",
             "unread_thread_total": sum(item["unread_count"] for item in threads),
-            "error": None,
+            "notice": notice,
+            "error": error,
         },
     )
 
@@ -591,6 +607,19 @@ def send_message(
     db: Session = Depends(get_db),
 ):
     user = _must_user(db, request)
+    if getattr(user, "messaging_disabled", False):
+        add_audit_log(
+            db,
+            user=user,
+            event_type="message.send_blocked_restricted",
+            details="Direct message send blocked (messaging disabled).",
+            request=request,
+        )
+        db.commit()
+        return RedirectResponse(
+            url=f"/ui/groups?error={quote_plus('Direct messaging has been disabled on your account.')}",
+            status_code=303,
+        )
     target_username = (username or "").strip()
     body = (message or "").strip()
 
@@ -619,6 +648,8 @@ def send_message(
         raise HTTPException(status_code=400, detail="Recipient username is required")
     if recipient.id == user.id:
         raise HTTPException(status_code=400, detail="Cannot message yourself")
+    if getattr(recipient, "is_disabled", False):
+        raise HTTPException(status_code=400, detail="Recipient account is disabled")
 
     has_attachment = bool(attachment and (attachment.filename or "").strip())
     if not body and not has_attachment:
@@ -681,6 +712,85 @@ def send_message(
     db.commit()
 
     return RedirectResponse(url=f"/ui/groups?thread={resolved_thread_id}", status_code=303)
+
+
+@router.post("/messages/report")
+def report_message(
+    request: Request,
+    message_id: str = Form(...),
+    reason: str = Form("other"),
+    details: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    user = _must_user(db, request)
+
+    try:
+        mid = uuid.UUID(message_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    message = (
+        db.query(DirectMessage)
+        .options(joinedload(DirectMessage.sender), joinedload(DirectMessage.recipient))
+        .filter(DirectMessage.id == mid)
+        .first()
+    )
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    if user.id not in {message.sender_id, message.recipient_id}:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    if message.sender_id == user.id:
+        raise HTTPException(status_code=400, detail="Cannot report your own message")
+
+    normalized_reason = (reason or "").strip().lower()
+    if normalized_reason not in DM_REPORT_REASONS:
+        normalized_reason = "other"
+
+    note = (details or "").strip()
+    if len(note) > 2000:
+        raise HTTPException(status_code=400, detail="Details too long")
+
+    thread_uuid = message.thread_id or message.id
+    report = DirectMessageReport(
+        message_id=message.id,
+        thread_id=thread_uuid,
+        reporter_id=user.id,
+        reported_user_id=message.sender_id,
+        reason=normalized_reason,
+        details=encrypt_message(note) if note else None,
+        status="open",
+    )
+    db.add(report)
+    add_event(
+        db,
+        user,
+        action="report",
+        message=f"Reported a direct message from '{message.sender.username}' (reason: {normalized_reason}).",
+        level="WARN",
+    )
+    add_audit_log(
+        db,
+        user=user,
+        event_type="message.reported",
+        details=f"Reported direct message {message.id} from '{message.sender.username}' (reason: {normalized_reason}).",
+        request=request,
+    )
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return RedirectResponse(
+            url=f"/ui/groups?thread={thread_uuid}&notice={quote_plus('You already reported that message.')}",
+            status_code=303,
+        )
+
+    return RedirectResponse(
+        url=f"/ui/groups?thread={thread_uuid}&notice={quote_plus('Report submitted. An administrator will review it.')}",
+        status_code=303,
+    )
 
 
 @router.get("/messages/{message_id}/attachment")

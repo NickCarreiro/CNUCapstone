@@ -17,6 +17,11 @@ class User(Base):
     totp_secret_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_disabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    disabled_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    messaging_disabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    messaging_disabled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     last_login: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -165,6 +170,31 @@ class DirectMessage(Base):
 
     sender: Mapped["User"] = relationship(back_populates="messages_sent", foreign_keys=[sender_id])
     recipient: Mapped["User"] = relationship(back_populates="messages_received", foreign_keys=[recipient_id])
+
+
+class DirectMessageReport(Base):
+    __tablename__ = "direct_message_reports"
+    __table_args__ = (UniqueConstraint("message_id", "reporter_id", name="uq_dm_report_once"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    message_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("direct_messages.id"), index=True)
+    thread_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    reporter_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
+    reported_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
+    reason: Mapped[str] = mapped_column(String(64))
+    details: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="open", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    reviewed_by_admin_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    admin_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    action_taken: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    action_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    message: Mapped["DirectMessage"] = relationship(foreign_keys=[message_id])
+    reporter: Mapped["User"] = relationship(foreign_keys=[reporter_id])
+    reported_user: Mapped["User"] = relationship(foreign_keys=[reported_user_id])
+    reviewed_by_admin: Mapped["User | None"] = relationship(foreign_keys=[reviewed_by_admin_id])
 
 
 class GroupKey(Base):

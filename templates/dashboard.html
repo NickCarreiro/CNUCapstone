@@ -54,45 +54,58 @@
 {% set folder_count = (folders|length - 1) if folders|length > 0 else 0 %}
 {% set top_level_count = (vault_tree|length - 1) if vault_tree|length > 0 else 0 %}
 <section class="card hero-card dashboard-hero">
-  <div class="eyebrow">Vault Cockpit</div>
+  <div class="cockpit-top">
+    <div class="eyebrow">Vault Cockpit</div>
+    <button
+      type="button"
+      class="ghost cockpit-toggle"
+      id="cockpitToggle"
+      aria-expanded="true"
+      aria-controls="cockpitBody"
+    >
+      Minimize
+    </button>
+  </div>
   <h1>Welcome, {{ user.username }}</h1>
-  <p class="muted">Manage your encrypted files, folders, and account security from one workspace.</p>
-  <div class="stat-row">
-    <div class="stat-chip">
-      <div class="stat-number">{{ file_count }}</div>
-      <div class="stat-label">Files</div>
+  <div id="cockpitBody" class="cockpit-body">
+    <p class="muted">Manage your encrypted files, folders, and account security from one workspace.</p>
+    <div class="stat-row">
+      <div class="stat-chip">
+        <div class="stat-number">{{ file_count }}</div>
+        <div class="stat-label">Files</div>
+      </div>
+      <div class="stat-chip">
+        <div class="stat-number">{{ folder_count }}</div>
+        <div class="stat-label">Folders</div>
+      </div>
+      <div class="stat-chip">
+        <div class="stat-number">{{ top_level_count }}</div>
+        <div class="stat-label">Top-level branches</div>
+      </div>
     </div>
-    <div class="stat-chip">
-      <div class="stat-number">{{ folder_count }}</div>
-      <div class="stat-label">Folders</div>
+    <div class="actions">
+      <a class="pill" href="/ui/totp">Manage TOTP</a>
     </div>
-    <div class="stat-chip">
-      <div class="stat-number">{{ top_level_count }}</div>
-      <div class="stat-label">Top-level branches</div>
+    <div class="two-col-forms">
+      <form method="post" action="/ui/folder" class="form compact soft-panel">
+        <label>
+          <span>Create folder (relative to your vault)</span>
+          <input type="text" name="folder" placeholder="projects/phase1" required />
+        </label>
+        <button type="submit">Create folder</button>
+      </form>
+      <form method="post" action="/ui/upload" enctype="multipart/form-data" class="form soft-panel">
+        <label>
+          <span>Folder (optional)</span>
+          <input type="text" name="folder" placeholder="projects/phase1" />
+        </label>
+        <label>
+          <span>Select file</span>
+          <input type="file" name="file" required />
+        </label>
+        <button type="submit">Upload</button>
+      </form>
     </div>
-  </div>
-  <div class="actions">
-    <a class="pill" href="/ui/totp">Manage TOTP</a>
-  </div>
-  <div class="two-col-forms">
-    <form method="post" action="/ui/folder" class="form compact soft-panel">
-      <label>
-        <span>Create folder (relative to your vault)</span>
-        <input type="text" name="folder" placeholder="projects/phase1" required />
-      </label>
-      <button type="submit">Create folder</button>
-    </form>
-    <form method="post" action="/ui/upload" enctype="multipart/form-data" class="form soft-panel">
-      <label>
-        <span>Folder (optional)</span>
-        <input type="text" name="folder" placeholder="projects/phase1" />
-      </label>
-      <label>
-        <span>Select file</span>
-        <input type="file" name="file" required />
-      </label>
-      <button type="submit">Upload</button>
-    </form>
   </div>
 </section>
 <section class="card explorer-card">
@@ -373,11 +386,34 @@
     </div>
   </div>
 
-	<script>
-	  const dialog = document.getElementById("moveDialog");
-	  const moveFileId = document.getElementById("moveFileId");
-	  const moveTitle = document.getElementById("moveTitle");
-  const moveSubtitle = document.getElementById("moveSubtitle");
+		<script>
+		  const COCKPIT_COLLAPSED_KEY = "pfv-cockpit-collapsed";
+		  const cockpitToggle = document.getElementById("cockpitToggle");
+		  const cockpitBody = document.getElementById("cockpitBody");
+		
+		  function setCockpitCollapsed(collapsed) {
+		    if (!cockpitToggle || !cockpitBody) return;
+		    cockpitBody.hidden = !!collapsed;
+		    cockpitToggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+		    cockpitToggle.textContent = collapsed ? "Expand" : "Minimize";
+		    try {
+		      localStorage.setItem(COCKPIT_COLLAPSED_KEY, collapsed ? "1" : "0");
+		    } catch {}
+		  }
+		
+		  if (cockpitToggle && cockpitBody) {
+		    let collapsed = false;
+		    try {
+		      collapsed = localStorage.getItem(COCKPIT_COLLAPSED_KEY) === "1";
+		    } catch {}
+		    setCockpitCollapsed(collapsed);
+		    cockpitToggle.addEventListener("click", () => setCockpitCollapsed(!cockpitBody.hidden));
+		  }
+
+		  const dialog = document.getElementById("moveDialog");
+		  const moveFileId = document.getElementById("moveFileId");
+		  const moveTitle = document.getElementById("moveTitle");
+	  const moveSubtitle = document.getElementById("moveSubtitle");
   const cancelMove = document.getElementById("cancelMove");
   const moveFolderInput = document.getElementById("moveFolderInput");
   const treeRoot = document.getElementById("treeRoot");

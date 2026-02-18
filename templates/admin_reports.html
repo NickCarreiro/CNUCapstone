@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block body_class %}page-admin-reports{% endblock %}
+{% block content %}
+<section class="card hero-card admin-hero">
+  <div class="eyebrow">System Administration</div>
+  <h1>Message reports</h1>
+  <p class="muted">User-submitted reports for direct messages. Reports do not automatically restrict accounts.</p>
+  <div class="stat-row">
+    <div class="stat-chip">
+      <div class="stat-number">{{ counts.total }}</div>
+      <div class="stat-label">Total</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ counts.open }}</div>
+      <div class="stat-label">Open</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ counts.reviewing }}</div>
+      <div class="stat-label">Reviewing</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ counts.resolved }}</div>
+      <div class="stat-label">Resolved</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ counts.dismissed }}</div>
+      <div class="stat-label">Dismissed</div>
+    </div>
+  </div>
+</section>
+
+{% if error %}
+<div class="alert">{{ error }}</div>
+{% endif %}
+{% if notice %}
+<div class="alert admin-notice">{{ notice }}</div>
+{% endif %}
+
+<section class="card" id="adminReportsFiltersTab">
+  <div class="card-header">
+    <h2>Filters</h2>
+    <div class="card-tools">
+      <button
+        type="button"
+        class="ghost filter-toggle"
+        data-collapse-target="adminReportsFiltersTab"
+        data-collapse-label-open="Hide filters tab"
+        data-collapse-label-closed="Show filters tab"
+        aria-controls="adminReportsFiltersTab"
+        aria-expanded="true"
+      >
+        Hide filters tab
+      </button>
+      <a class="pill ghost" href="/ui/admin/users">Admin users</a>
+      <a class="pill ghost" href="/ui/admin/audit">Admin audit</a>
+    </div>
+  </div>
+  <form method="get" class="form compact">
+    <label>
+      <span>Status</span>
+      <select name="status">
+        <option value="">Any</option>
+        {% for value in allowed_statuses %}
+        <option value="{{ value }}" {% if filters.status == value %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>Search (user, reason, status, preview)</span>
+      <input type="text" name="q" value="{{ filters.q }}" placeholder="spam, harassment, username" />
+    </label>
+    <label>
+      <span>Limit</span>
+      <input type="number" name="limit" min="1" max="500" value="{{ filters.limit }}" />
+    </label>
+    <div class="inline-form">
+      <button type="submit">Apply filters</button>
+      <a class="pill ghost" href="/ui/admin/reports">Reset</a>
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Reports</h2>
+    <div class="card-tools">
+      <button
+        type="button"
+        class="ghost filter-toggle"
+        data-collapse-target="adminReportsFiltersTab"
+        data-collapse-label-open="Hide filters tab"
+        data-collapse-label-closed="Show filters tab"
+        data-collapse-visible="collapsed"
+        aria-controls="adminReportsFiltersTab"
+        aria-expanded="true"
+        hidden
+      >
+        Show filters tab
+      </button>
+    </div>
+  </div>
+
+  {% if rows %}
+  <div class="table-wrap">
+    <table class="table" id="adminReportsTable">
+      <thead>
+        <tr>
+          <th>Created (UTC)</th>
+          <th>Status</th>
+          <th>Reason</th>
+          <th>Reporter</th>
+          <th>Reported user</th>
+          <th>Message preview</th>
+          <th>Open</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        {% set report = row.report %}
+        <tr>
+          <td data-label="Created (UTC)">{{ report.created_at.strftime("%Y-%m-%d %H:%M:%S") if report.created_at else "-" }}</td>
+          <td data-label="Status"><code>{{ report.status }}</code></td>
+          <td data-label="Reason"><code>{{ report.reason }}</code></td>
+          <td data-label="Reporter">{{ row.reporter_username }}</td>
+          <td data-label="Reported user">{{ row.reported_username }}</td>
+          <td data-label="Message preview">{{ row.message_preview }}</td>
+          <td data-label="Open">
+            <a class="pill" href="/ui/admin/reports/{{ report.id }}">View</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="muted">No reports matched the current filters.</p>
+  {% endif %}
+</section>
+{% endblock %}

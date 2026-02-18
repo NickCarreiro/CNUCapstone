@@ -29,6 +29,13 @@
   </div>
 </section>
 
+{% if error %}
+<div class="alert">{{ error }}</div>
+{% endif %}
+{% if notice %}
+<div class="alert admin-notice">{{ notice }}</div>
+{% endif %}
+
 <section class="card">
   <div class="card-header">
     <h2>Create group</h2>
@@ -193,7 +200,19 @@
           <article class="dm-message{% if item.is_outbound %} outbound{% else %} inbound{% endif %}">
             <div class="dm-message-meta">
               <span>{{ item.sender_username }} to {{ item.recipient_username }}</span>
-              <span>{{ item.created_at_utc }}</span>
+              <div class="dm-message-meta-right">
+                <span>{{ item.created_at_utc }}</span>
+                {% if not item.is_outbound %}
+                <button
+                  type="button"
+                  class="ghost dm-report-btn"
+                  data-message-id="{{ item.id }}"
+                  data-sender="{{ item.sender_username }}"
+                >
+                  Report
+                </button>
+                {% endif %}
+              </div>
             </div>
             {% if item.body %}
               <div class="dm-message-body">{{ item.body }}</div>
@@ -217,6 +236,39 @@
 {% endblock %}
 
 {% block scripts %}
+<dialog id="dmReportDialog" class="modal">
+  <form method="post" action="/ui/groups/messages/report" class="form compact" id="dmReportForm">
+    <input type="hidden" name="message_id" id="dmReportMessageId" />
+    <h2>Report direct message</h2>
+    <p class="muted" id="dmReportSubtitle">An administrator will review this report. No automatic action is taken.</p>
+    <label>
+      <span>Reason</span>
+      <select name="reason" id="dmReportReason" required>
+        <option value="spam">Spam / unsolicited advertising</option>
+        <option value="harassment">Harassment or hate speech</option>
+        <option value="threat">Threats or violence</option>
+        <option value="impersonation">Impersonation / fraud</option>
+        <option value="sexual">Sexual content</option>
+        <option value="other" selected>Other</option>
+      </select>
+    </label>
+    <label>
+      <span>Details (optional)</span>
+      <textarea
+        name="details"
+        id="dmReportDetails"
+        rows="4"
+        maxlength="2000"
+        placeholder="Optional context for the administrator..."
+      ></textarea>
+    </label>
+    <div class="modal-actions">
+      <button type="submit">Submit report</button>
+      <button type="button" class="ghost" id="dmReportCancel">Cancel</button>
+    </div>
+  </form>
+</dialog>
+
 <script>
   (function () {
     const form = document.getElementById("dmSendForm");
@@ -261,6 +313,59 @@
     }
 
     syncRecipientRequirement();
+  })();
+
+  (function () {
+    const dialog = document.getElementById("dmReportDialog");
+    const form = document.getElementById("dmReportForm");
+    const messageIdInput = document.getElementById("dmReportMessageId");
+    const subtitle = document.getElementById("dmReportSubtitle");
+    const reasonInput = document.getElementById("dmReportReason");
+    const detailsInput = document.getElementById("dmReportDetails");
+    const cancel = document.getElementById("dmReportCancel");
+
+    if (!dialog || !form || !messageIdInput || !subtitle || !reasonInput || !detailsInput) return;
+
+    function closeDialog() {
+      if (typeof dialog.close === "function") {
+        dialog.close();
+      } else {
+        dialog.removeAttribute("open");
+      }
+    }
+
+    cancel?.addEventListener("click", closeDialog);
+
+    function openDialog(btn) {
+      const messageId = (btn?.dataset?.messageId || "").trim();
+      if (!messageId) return;
+      const sender = (btn?.dataset?.sender || "user").trim();
+
+      messageIdInput.value = messageId;
+      reasonInput.value = "other";
+      detailsInput.value = "";
+
+      let snippet = "";
+      const article = btn.closest(".dm-message");
+      const bodyEl = article ? article.querySelector(".dm-message-body") : null;
+      if (bodyEl && bodyEl.textContent) {
+        snippet = bodyEl.textContent.trim().replace(/\s+/g, " ");
+        if (snippet.length > 180) snippet = `${snippet.slice(0, 177)}...`;
+      }
+      subtitle.textContent = snippet
+        ? `Reporting message from ${sender}: "${snippet}"`
+        : `Reporting message from ${sender}. No automatic action is taken.`;
+
+      if (typeof dialog.showModal === "function") {
+        dialog.showModal();
+      } else {
+        dialog.setAttribute("open", "open");
+      }
+    }
+
+    document.querySelectorAll(".dm-report-btn").forEach((btn) => {
+      btn.addEventListener("click", () => openDialog(btn));
+    });
   })();
 </script>
 {% endblock %}

@@ -14,7 +14,7 @@ import logging
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.config import settings
 from app.db import get_db
@@ -22,6 +22,7 @@ from app.models.core import (
     ActivityEvent,
     AuditLog,
     DirectMessage,
+    DirectMessageReport,
     FileRecord,
     Group,
     GroupFileRecord,
@@ -40,6 +41,7 @@ from app.services.activity import add_event
 from app.services.audit import add_audit_log
 from app.services.security import decrypt_totp_secret, encrypt_totp_secret, hash_password, verify_password
 from app.services.sessions import create_session
+from app.services.message_crypto import decrypt_message, encrypt_message
 import pyotp
 
 router = APIRouter(prefix="/ui", tags=["ui"])
@@ -126,7 +128,12 @@ def _get_current_user(db: Session, request: Request) -> User | None:
     session = _get_session(db, session_id)
     if not session:
         return None
-    return db.query(User).filter(User.id == session.user_id).first()
+    user = db.query(User).filter(User.id == session.user_id).first()
+    if user and getattr(user, "is_disabled", False):
+        session.is_active = False
+        db.commit()
+        return None
+    return user
 
 
 def _get_session_id(request: Request) -> str:
@@ -188,6 +195,17 @@ def _terminal_root_for_scope(user: User, scope: dict[str, str]) -> tuple[Path, s
 def _admin_redirect(message: str, *, error: bool = False) -> RedirectResponse:
     key = "error" if error else "notice"
     return RedirectResponse(url=f"/ui/admin/users?{key}={quote_plus(message)}", status_code=303)
+
+
+def _admin_reports_redirect(
+    message: str,
+    *,
+    error: bool = False,
+    report_id: str | None = None,
+) -> RedirectResponse:
+    key = "error" if error else "notice"
+    base = f"/ui/admin/reports/{report_id}" if report_id else "/ui/admin/reports"
+    return RedirectResponse(url=f"{base}?{key}={quote_plus(message)}", status_code=303)
 
 
 def _safe_join(root: Path, rel_path: str) -> Path:
@@ -529,6 +547,15 @@ def login_action(
                 status_code=401,
             )
 
+    if getattr(user, "is_disabled", False):
+        add_audit_log(db, user=user, event_type="signin.blocked_disabled", details="Interactive sign-in blocked (account disabled).", request=request)
+        db.commit()
+        return templates.TemplateResponse(
+            "login.html",
+            {"request": request, "error": "Account disabled. Please contact an administrator."},
+            status_code=403,
+        )
+
     ensure_user_key(db, user)
     add_event(db, user, action="auth", message=f"Signed in as '{user.username}'.")
     add_audit_log(db, user=user, event_type="signin.success", details="Interactive sign-in completed.", request=request)
@@ -858,6 +885,329 @@ def admin_audit_log_page(
     )
 
 
+@router.get("/admin/reports")
+def admin_reports_page(
+    request: Request,
+    status: str = "",
+    q: str = "",
+    limit: int = 200,
+    db: Session = Depends(get_db),
+):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    status_filter = (status or "").strip().lower()
+    text_filter = (q or "").strip().lower()
+    limit = max(1, min(limit, 500))
+
+    allowed_statuses = ("open", "reviewing", "resolved", "dismissed")
+    if status_filter and status_filter not in allowed_statuses:
+        status_filter = ""
+
+    counts = {
+        (s or "open"): int(c)
+        for s, c in (
+            db.query(DirectMessageReport.status, func.count(DirectMessageReport.id))
+            .group_by(DirectMessageReport.status)
+            .all()
+        )
+    }
+    total_reports = sum(counts.values())
+
+    query = (
+        db.query(DirectMessageReport)
+        .options(
+            joinedload(DirectMessageReport.reporter),
+            joinedload(DirectMessageReport.reported_user),
+            joinedload(DirectMessageReport.reviewed_by_admin),
+            joinedload(DirectMessageReport.message).joinedload(DirectMessage.sender),
+            joinedload(DirectMessageReport.message).joinedload(DirectMessage.recipient),
+        )
+        .order_by(DirectMessageReport.created_at.desc(), DirectMessageReport.id.desc())
+    )
+    if status_filter:
+        query = query.filter(DirectMessageReport.status == status_filter)
+
+    reports = query.limit(limit).all()
+    rows = []
+    for report in reports:
+        reporter_name = report.reporter.username if report.reporter else "(unknown)"
+        reported_name = report.reported_user.username if report.reported_user else "(unknown)"
+
+        preview = ""
+        if report.message:
+            preview = decrypt_message(report.message.body).replace("\n", " ").strip()
+        if not preview and report.message and report.message.attachment_name:
+            preview = "(attachment)"
+        if len(preview) > 120:
+            preview = f"{preview[:117]}..."
+
+        if text_filter:
+            hay = f"{reporter_name} {reported_name} {report.reason or ''} {report.status or ''} {preview}".lower()
+            if text_filter not in hay:
+                continue
+
+        rows.append(
+            {
+                "report": report,
+                "reporter_username": reporter_name,
+                "reported_username": reported_name,
+                "message_preview": preview or "-",
+            }
+        )
+
+    return templates.TemplateResponse(
+        "admin_reports.html",
+        {
+            "request": request,
+            "user": admin_user,
+            "rows": rows,
+            "counts": {
+                "total": total_reports,
+                "open": counts.get("open", 0),
+                "reviewing": counts.get("reviewing", 0),
+                "resolved": counts.get("resolved", 0),
+                "dismissed": counts.get("dismissed", 0),
+            },
+            "filters": {
+                "status": status_filter,
+                "q": (q or "").strip(),
+                "limit": limit,
+            },
+            "allowed_statuses": allowed_statuses,
+            "notice": request.query_params.get("notice"),
+            "error": request.query_params.get("error"),
+            "title": "Admin Reports",
+        },
+    )
+
+
+@router.get("/admin/reports/{report_id}")
+def admin_report_detail_page(report_id: str, request: Request, db: Session = Depends(get_db)):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    try:
+        rid = uuid.UUID(report_id)
+    except ValueError:
+        return _admin_reports_redirect("Invalid report id.", error=True)
+
+    report = (
+        db.query(DirectMessageReport)
+        .options(
+            joinedload(DirectMessageReport.reporter),
+            joinedload(DirectMessageReport.reported_user),
+            joinedload(DirectMessageReport.reviewed_by_admin),
+            joinedload(DirectMessageReport.message).joinedload(DirectMessage.sender),
+            joinedload(DirectMessageReport.message).joinedload(DirectMessage.recipient),
+        )
+        .filter(DirectMessageReport.id == rid)
+        .first()
+    )
+    if not report:
+        return _admin_reports_redirect("Report not found.", error=True)
+
+    msg = report.message
+    message_body = decrypt_message(msg.body) if msg else ""
+    report_details = decrypt_message(report.details) if report.details else ""
+    admin_notes = decrypt_message(report.admin_notes) if report.admin_notes else ""
+
+    allowed_statuses = ("open", "reviewing", "resolved", "dismissed")
+    return templates.TemplateResponse(
+        "admin_report_detail.html",
+        {
+            "request": request,
+            "user": admin_user,
+            "report": report,
+            "message": msg,
+            "message_body": message_body,
+            "report_details": report_details,
+            "admin_notes": admin_notes,
+            "allowed_statuses": allowed_statuses,
+            "notice": request.query_params.get("notice"),
+            "error": request.query_params.get("error"),
+            "title": "Report detail",
+        },
+    )
+
+
+@router.post("/admin/reports/{report_id}/status")
+def admin_report_update_status(
+    report_id: str,
+    request: Request,
+    status: str = Form(...),
+    admin_notes: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    try:
+        rid = uuid.UUID(report_id)
+    except ValueError:
+        return _admin_reports_redirect("Invalid report id.", error=True)
+
+    report = db.query(DirectMessageReport).filter(DirectMessageReport.id == rid).first()
+    if not report:
+        return _admin_reports_redirect("Report not found.", error=True)
+
+    normalized_status = (status or "").strip().lower()
+    allowed_statuses = {"open", "reviewing", "resolved", "dismissed"}
+    if normalized_status not in allowed_statuses:
+        return _admin_reports_redirect("Invalid status.", error=True, report_id=str(report.id))
+
+    notes = (admin_notes or "").strip()
+    report.status = normalized_status
+    report.admin_notes = encrypt_message(notes) if notes else None
+    report.reviewed_by_admin_id = admin_user.id
+    report.reviewed_at = datetime.utcnow()
+    add_audit_log(
+        db,
+        user=admin_user,
+        event_type="admin.dm_report_status_updated",
+        details=f"Updated DM report {report.id} status to '{normalized_status}'.",
+        request=request,
+    )
+    db.commit()
+    return _admin_reports_redirect("Report updated.", report_id=str(report.id))
+
+
+@router.post("/admin/reports/{report_id}/action")
+def admin_report_action(
+    report_id: str,
+    request: Request,
+    action: str = Form(...),
+    note: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    try:
+        rid = uuid.UUID(report_id)
+    except ValueError:
+        return _admin_reports_redirect("Invalid report id.", error=True)
+
+    report = (
+        db.query(DirectMessageReport)
+        .options(joinedload(DirectMessageReport.reported_user))
+        .filter(DirectMessageReport.id == rid)
+        .first()
+    )
+    if not report or not report.reported_user:
+        return _admin_reports_redirect("Report not found.", error=True)
+
+    target = report.reported_user
+    action_key = (action or "").strip().lower()
+    note_value = (note or "").strip()
+
+    if report.status == "open":
+        report.status = "reviewing"
+    report.reviewed_by_admin_id = admin_user.id
+    report.reviewed_at = datetime.utcnow()
+    report.action_taken = action_key
+    report.action_at = datetime.utcnow()
+
+    if action_key == "warn":
+        warning = note_value or "Administrator warning: your direct messaging activity has been reported."
+        add_event(db, target, action="admin", message=warning, level="WARN")
+        add_audit_log(
+            db,
+            user=target,
+            event_type="account.warning_by_admin",
+            details=f"Admin '{admin_user.username}' issued a warning. {warning}",
+            request=request,
+        )
+    elif action_key == "restrict_messaging":
+        if not target.messaging_disabled:
+            target.messaging_disabled = True
+            target.messaging_disabled_at = datetime.utcnow()
+        add_audit_log(
+            db,
+            user=target,
+            event_type="account.messaging_disabled_by_admin",
+            details=f"Admin '{admin_user.username}' disabled direct messaging.",
+            request=request,
+        )
+    elif action_key == "unrestrict_messaging":
+        if target.messaging_disabled:
+            target.messaging_disabled = False
+            target.messaging_disabled_at = None
+        add_audit_log(
+            db,
+            user=target,
+            event_type="account.messaging_enabled_by_admin",
+            details=f"Admin '{admin_user.username}' re-enabled direct messaging.",
+            request=request,
+        )
+    elif action_key == "disable_account":
+        if not target.is_disabled:
+            target.is_disabled = True
+            target.disabled_at = datetime.utcnow()
+            target.disabled_reason = note_value or f"Disabled by admin '{admin_user.username}' (DM report {report.id})."
+        revoked = (
+            db.query(SessionModel)
+            .filter(SessionModel.user_id == target.id, SessionModel.is_active.is_(True))
+            .update({SessionModel.is_active: False}, synchronize_session=False)
+        )
+        add_audit_log(
+            db,
+            user=target,
+            event_type="account.disabled_by_admin",
+            details=f"Admin '{admin_user.username}' disabled the account and revoked {revoked} session(s).",
+            request=request,
+        )
+    elif action_key == "enable_account":
+        if target.is_disabled:
+            target.is_disabled = False
+            target.disabled_at = None
+            target.disabled_reason = None
+        add_audit_log(
+            db,
+            user=target,
+            event_type="account.enabled_by_admin",
+            details=f"Admin '{admin_user.username}' re-enabled the account.",
+            request=request,
+        )
+    elif action_key == "revoke_sessions":
+        revoked = (
+            db.query(SessionModel)
+            .filter(SessionModel.user_id == target.id, SessionModel.is_active.is_(True))
+            .update({SessionModel.is_active: False}, synchronize_session=False)
+        )
+        add_audit_log(
+            db,
+            user=target,
+            event_type="account.sessions_revoked_by_admin",
+            details=f"Admin '{admin_user.username}' revoked {revoked} active session(s).",
+            request=request,
+        )
+    else:
+        return _admin_reports_redirect("Unknown action.", error=True, report_id=str(report.id))
+
+    add_audit_log(
+        db,
+        user=admin_user,
+        event_type="admin.dm_report_action",
+        details=f"Applied action '{action_key}' to user '{target.username}' for DM report {report.id}.",
+        request=request,
+    )
+    db.commit()
+    return _admin_reports_redirect("Action applied.", report_id=str(report.id))
+
+
 @router.post("/admin/users/{user_id}/revoke-sessions")
 def admin_revoke_sessions(user_id: str, request: Request, db: Session = Depends(get_db)):
     admin_user = _get_current_user(db, request)
@@ -947,6 +1297,66 @@ def admin_reset_totp(user_id: str, request: Request, db: Session = Depends(get_d
     )
     db.commit()
     return _admin_redirect(f"MFA reset for '{target.username}'.")
+
+
+@router.post("/admin/users/{user_id}/reset-password")
+def admin_reset_password(
+    user_id: str,
+    request: Request,
+    password: str = Form(...),
+    confirm_password: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    try:
+        target_id = uuid.UUID(user_id)
+    except ValueError:
+        return _admin_redirect("Invalid user identifier.", error=True)
+
+    target = db.query(User).filter(User.id == target_id).first()
+    if not target:
+        return _admin_redirect("User not found.", error=True)
+
+    if password != confirm_password:
+        return _admin_redirect("Passwords did not match.", error=True)
+
+    if len(password) < 10:
+        return _admin_redirect("Password must be at least 10 characters.", error=True)
+
+    target.password_hash = hash_password(password)
+    revoked = (
+        db.query(SessionModel)
+        .filter(SessionModel.user_id == target.id, SessionModel.is_active.is_(True))
+        .update({SessionModel.is_active: False}, synchronize_session=False)
+    )
+    add_event(
+        db,
+        admin_user,
+        action="admin",
+        message=f"Reset password for '{target.username}' (revoked {revoked} session(s)).",
+        level="WARN",
+    )
+    add_audit_log(
+        db,
+        user=target,
+        event_type="account.password_reset_by_admin",
+        details=f"Admin '{admin_user.username}' reset the account password and revoked {revoked} active session(s).",
+        request=request,
+    )
+    add_audit_log(
+        db,
+        user=admin_user,
+        event_type="admin.password_reset",
+        details=f"Reset password for '{target.username}' and revoked {revoked} active session(s).",
+        request=request,
+    )
+    db.commit()
+    return _admin_redirect(f"Password reset for '{target.username}'.")
 
 
 @router.post("/admin/users/{user_id}/toggle-admin")

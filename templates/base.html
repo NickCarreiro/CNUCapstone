@@ -65,7 +65,7 @@
         }
       })();
     </script>
-    <link rel="stylesheet" href="/static/style.css?v=20" />
+    <link rel="stylesheet" href="/static/style.css?v=23" />
   </head>
   <body data-theme="light" class="{% block body_class %}{% endblock %}">
     <div class="page">
@@ -88,6 +88,7 @@
               <a href="/ui/trash">Trash</a>
               {% if user.is_admin %}
               <a href="/ui/admin/users">Admin</a>
+              <a href="/ui/admin/reports">Reports</a>
               <a href="/ui/admin/audit">Admin Audit</a>
               {% endif %}
             </nav>
@@ -226,6 +227,71 @@
           { once: true }
         );
       }
+
+      (function () {
+        const COLLAPSE_PREFIX = "pfv-collapse:";
+
+        function normalizeSelector(raw) {
+          const value = (raw || "").trim();
+          if (!value) return null;
+          if (value.startsWith("#")) return value;
+          if (value.startsWith(".")) return value;
+          return `#${value}`;
+        }
+
+        function applyToggleState(toggleEl, collapsed) {
+          toggleEl.dataset.collapsed = collapsed ? "1" : "0";
+          toggleEl.setAttribute("aria-expanded", collapsed ? "false" : "true");
+
+          const openLabel = toggleEl.dataset.collapseLabelOpen || "Hide filters";
+          const closedLabel = toggleEl.dataset.collapseLabelClosed || "Show filters";
+          toggleEl.textContent = collapsed ? closedLabel : openLabel;
+
+          const visibleMode = (toggleEl.dataset.collapseVisible || "").trim().toLowerCase();
+          if (visibleMode === "collapsed") {
+            toggleEl.hidden = !collapsed;
+          } else if (visibleMode === "expanded") {
+            toggleEl.hidden = !!collapsed;
+          } else {
+            toggleEl.hidden = false;
+          }
+        }
+
+        const groups = new Map();
+        document.querySelectorAll("[data-collapse-target]").forEach((toggleEl) => {
+          if (!(toggleEl instanceof HTMLElement)) return;
+          const selector = normalizeSelector(toggleEl.dataset.collapseTarget);
+          if (!selector) return;
+          const targetEl = document.querySelector(selector);
+          if (!(targetEl instanceof HTMLElement)) return;
+
+          const storageKey = `${COLLAPSE_PREFIX}${location.pathname}:${selector}`;
+          const existing = groups.get(storageKey);
+          if (existing) {
+            existing.toggles.push(toggleEl);
+            return;
+          }
+          groups.set(storageKey, { storageKey, targetEl, toggles: [toggleEl] });
+        });
+
+        groups.forEach((group) => {
+          const stored = localStorage.getItem(group.storageKey);
+          const defaultCollapsed = group.toggles.some((t) => t.dataset.collapseDefault === "collapsed");
+          let collapsed = stored === null ? defaultCollapsed : stored === "1";
+
+          group.targetEl.hidden = !!collapsed;
+          group.toggles.forEach((t) => applyToggleState(t, collapsed));
+
+          group.toggles.forEach((toggleEl) => {
+            toggleEl.addEventListener("click", () => {
+              collapsed = !collapsed;
+              localStorage.setItem(group.storageKey, collapsed ? "1" : "0");
+              group.targetEl.hidden = !!collapsed;
+              group.toggles.forEach((t) => applyToggleState(t, collapsed));
+            });
+          });
+        });
+      })();
     </script>
 
     {% if user %}

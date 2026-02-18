@@ -95,6 +95,17 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
             db.commit()
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid TOTP")
 
+    if getattr(user, "is_disabled", False):
+        add_audit_log(
+            db,
+            user=user,
+            event_type="signin.blocked_disabled",
+            details="API sign-in blocked (account disabled).",
+            request=request,
+        )
+        db.commit()
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
+
     ensure_user_key(db, user)
     session = create_session(db, user)
     user.last_login = datetime.utcnow()

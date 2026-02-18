@@ -79,6 +79,15 @@
               <form method="post" action="/ui/admin/users/{{ target.id }}/reset-totp" class="inline-form">
                 <button type="submit" class="ghost">Reset MFA</button>
               </form>
+              <button
+                type="button"
+                class="ghost"
+                data-admin-reset-password
+                data-user-id="{{ target.id }}"
+                data-username="{{ target.username }}"
+              >
+                Reset password
+              </button>
               <form method="post" action="/ui/admin/users/{{ target.id }}/toggle-admin" class="inline-form">
                 <button type="submit" {% if target.is_admin %}class="danger"{% endif %} {% if disable_demotion %}disabled{% endif %}>
                   {{ "Remove admin" if target.is_admin else "Make admin" }}
@@ -98,6 +107,26 @@
 {% endblock %}
 
 {% block scripts %}
+<dialog id="adminResetPasswordDialog" class="modal">
+  <form method="post" class="form compact" id="adminResetPasswordForm">
+    <h2>Reset password</h2>
+    <p class="muted" id="adminResetPasswordSubtitle">Set a new password for the selected user.</p>
+    <label>
+      <span>New password</span>
+      <input type="password" name="password" id="adminResetPasswordValue" minlength="10" required />
+    </label>
+    <label>
+      <span>Confirm password</span>
+      <input type="password" name="confirm_password" id="adminResetPasswordConfirm" minlength="10" required />
+    </label>
+    <div class="modal-actions">
+      <button type="button" class="ghost" id="adminResetPasswordGenerate">Generate</button>
+      <button type="submit">Reset password</button>
+      <button type="button" class="ghost" id="adminResetPasswordCancel">Cancel</button>
+    </div>
+  </form>
+</dialog>
+
 <script>
   const adminUserFilter = document.getElementById("adminUserFilter");
   const adminRows = document.querySelectorAll("#adminUsersTable .admin-user-row");
@@ -107,5 +136,69 @@
       row.hidden = query.length > 0 && !row.textContent.toLowerCase().includes(query);
     });
   });
+
+  (function () {
+    const dialog = document.getElementById("adminResetPasswordDialog");
+    const form = document.getElementById("adminResetPasswordForm");
+    const subtitle = document.getElementById("adminResetPasswordSubtitle");
+    const pwd = document.getElementById("adminResetPasswordValue");
+    const confirmPwd = document.getElementById("adminResetPasswordConfirm");
+    const cancel = document.getElementById("adminResetPasswordCancel");
+    const generate = document.getElementById("adminResetPasswordGenerate");
+
+    if (!dialog || !form || !subtitle || !pwd || !confirmPwd) return;
+
+    function closeDialog() {
+      if (typeof dialog.close === "function") {
+        dialog.close();
+      } else {
+        dialog.removeAttribute("open");
+      }
+    }
+
+    cancel?.addEventListener("click", closeDialog);
+
+    function randomPassword(length) {
+      const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@$%*-_+?";
+      const bytes = new Uint8Array(Math.max(12, length || 20));
+      window.crypto.getRandomValues(bytes);
+      let out = "";
+      for (let i = 0; i < bytes.length; i++) {
+        out += alphabet[bytes[i] % alphabet.length];
+      }
+      return out;
+    }
+
+    generate?.addEventListener("click", () => {
+      if (!window.crypto || !window.crypto.getRandomValues) return;
+      const value = randomPassword(22);
+      pwd.value = value;
+      confirmPwd.value = value;
+      pwd.focus();
+      pwd.select?.();
+    });
+
+    function openDialog(btn) {
+      const userId = (btn?.dataset?.userId || "").trim();
+      const username = (btn?.dataset?.username || "user").trim();
+      if (!userId) return;
+
+      form.action = `/ui/admin/users/${userId}/reset-password`;
+      subtitle.textContent = `Reset password for ${username}. This will revoke all active sessions for that user.`;
+      pwd.value = "";
+      confirmPwd.value = "";
+
+      if (typeof dialog.showModal === "function") {
+        dialog.showModal();
+      } else {
+        dialog.setAttribute("open", "open");
+      }
+      pwd.focus();
+    }
+
+    document.querySelectorAll("[data-admin-reset-password]").forEach((btn) => {
+      btn.addEventListener("click", () => openDialog(btn));
+    });
+  })();
 </script>
 {% endblock %}
