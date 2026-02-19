@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block body_class %}page-admin-help-detail{% endblock %}
+{% block content %}
+<section class="card hero-card admin-hero">
+  <div class="eyebrow">System Administration</div>
+  <h1>Support ticket review</h1>
+  <p class="muted">Review user-submitted support requests and update status for the shared inbox.</p>
+  <div class="stat-row">
+    <div class="stat-chip">
+      <div class="stat-number">{{ ticket.status }}</div>
+      <div class="stat-label">Status</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ ticket.priority }}</div>
+      <div class="stat-label">Priority</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ category_label }}</div>
+      <div class="stat-label">Category</div>
+    </div>
+  </div>
+</section>
+
+{% if error %}
+<div class="alert">{{ error }}</div>
+{% endif %}
+{% if notice %}
+<div class="alert admin-notice">{{ notice }}</div>
+{% endif %}
+
+<section class="card">
+  <div class="card-header">
+    <h2>Ticket details</h2>
+    <div class="card-tools">
+      <a class="pill ghost" href="/ui/admin/help">Back to inbox</a>
+      <a class="pill ghost" href="/ui/help">User help page</a>
+    </div>
+  </div>
+  <div class="soft-panel">
+    <div class="meta-grid">
+      <div class="meta-item">
+        <div class="label">Ticket id</div>
+        <code>{{ ticket.id }}</code>
+      </div>
+      <div class="meta-item">
+        <div class="label">Requester</div>
+        <div>{{ ticket.requester.username if ticket.requester else "-" }}</div>
+      </div>
+      <div class="meta-item">
+        <div class="label">Subject</div>
+        <div>{{ ticket.subject }}</div>
+      </div>
+      <div class="meta-item">
+        <div class="label">Created</div>
+        <div>{{ ticket.created_at.strftime("%Y-%m-%d %H:%M:%S UTC") if ticket.created_at else "-" }}</div>
+      </div>
+      <div class="meta-item">
+        <div class="label">Updated</div>
+        <div>{{ ticket.updated_at.strftime("%Y-%m-%d %H:%M:%S UTC") if ticket.updated_at else "-" }}</div>
+      </div>
+      <div class="meta-item">
+        <div class="label">Assigned admin</div>
+        <div>{{ ticket.assigned_admin.username if ticket.assigned_admin else "-" }}</div>
+      </div>
+      <div class="meta-item">
+        <div class="label">Last admin update</div>
+        <div>{{ ticket.last_admin_update_at.strftime("%Y-%m-%d %H:%M:%S UTC") if ticket.last_admin_update_at else "-" }}</div>
+      </div>
+      <div class="meta-item">
+        <div class="label">Closed</div>
+        <div>{{ ticket.closed_at.strftime("%Y-%m-%d %H:%M:%S UTC") if ticket.closed_at else "-" }}</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="soft-panel">
+    <div class="label">User details</div>
+    <pre class="mono-block">{{ description or "(empty)" }}</pre>
+  </div>
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Admin response and status</h2>
+  </div>
+  <form method="post" action="/ui/admin/help/{{ ticket.id }}/update" class="form compact">
+    <label>
+      <span>Status</span>
+      <select name="status" required>
+        {% for value in status_options %}
+        <option value="{{ value }}" {% if ticket.status == value %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>Priority</span>
+      <select name="priority" required>
+        {% for value in priority_options %}
+        <option value="{{ value }}" {% if ticket.priority == value %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>Admin response (optional)</span>
+      <textarea name="admin_reply" rows="7" maxlength="8000" placeholder="Write a response visible on the user's Help page.">{{ admin_reply }}</textarea>
+    </label>
+    <label class="toggle-row">
+      <input type="checkbox" name="clear_reply" />
+      <span>Clear saved response</span>
+    </label>
+    <div class="inline-form">
+      <button type="submit">Save ticket update</button>
+      <a class="pill ghost" href="/ui/admin/help/{{ ticket.id }}">Reset</a>
+    </div>
+  </form>
+</section>
+{% endblock %}

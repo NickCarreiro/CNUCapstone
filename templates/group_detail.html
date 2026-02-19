@@ -1214,6 +1214,55 @@
     } catch {}
   }
 
+  function submitUploadForm() {
+    if (!uploadForm) return;
+    if (typeof uploadForm.requestSubmit === "function") {
+      uploadForm.requestSubmit();
+    } else {
+      uploadForm.submit();
+    }
+  }
+
+  function openUploadPicker(path, { autoSubmit = false } = {}) {
+    const target = normalizeRelPath(path);
+    prefillUploadFolder(target);
+    if (!uploadForm || !uploadFileInput) return;
+    try {
+      uploadFileInput.value = "";
+    } catch {}
+
+    setCockpitVisible(true);
+    setCockpitCollapsed(false);
+    uploadForm.scrollIntoView({ block: "center", behavior: "smooth" });
+
+    if (!autoSubmit) {
+      requestAnimationFrame(() => uploadFileInput.click());
+      return;
+    }
+
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      uploadFileInput.removeEventListener("change", onChange);
+      window.removeEventListener("focus", onWindowFocus, true);
+    };
+    const onChange = () => {
+      const hasFile = Boolean(uploadFileInput.files && uploadFileInput.files.length > 0);
+      cleanup();
+      if (!hasFile) return;
+      submitUploadForm();
+    };
+    const onWindowFocus = () => {
+      // File picker closed without selection: clear one-shot handlers.
+      window.setTimeout(cleanup, 350);
+    };
+
+    uploadFileInput.addEventListener("change", onChange);
+    window.addEventListener("focus", onWindowFocus, true);
+    requestAnimationFrame(() => uploadFileInput.click());
+  }
+
   if (explorerQuickAdd && explorerQuickMenu) {
     explorerQuickAdd.addEventListener("click", () => {
       if (quickMenuOpen) {
@@ -1250,14 +1299,7 @@
       }
 
       if (action === "upload_file") {
-        if (!uploadForm) {
-          closeQuickMenu();
-          return;
-        }
-        setCockpitVisible(true);
-        setCockpitCollapsed(false);
-        uploadForm.scrollIntoView({ block: "center", behavior: "smooth" });
-        if (uploadFileInput) requestAnimationFrame(() => uploadFileInput.click());
+        openUploadPicker(activeFolderFilter, { autoSubmit: true });
         closeQuickMenu();
         return;
       }
@@ -1418,9 +1460,7 @@
       }
 
       if (action === "upload_here") {
-        prefillUploadFolder(path);
-        uploadForm?.scrollIntoView({ block: "center", behavior: "smooth" });
-        if (uploadFileInput) uploadFileInput.click();
+        openUploadPicker(path, { autoSubmit: true });
         closeCtxMenu();
         return;
       }
@@ -1535,12 +1575,15 @@
   });
 
   function openPreviewById(id, displayName) {
-    const url = `/ui/groups/${GROUP_ID}/preview/${id}?v=${Date.now()}`;
+    const ts = Date.now();
+    const theme = document.body?.dataset?.theme === "dark" ? "dark" : "light";
+    const frameUrl = `/ui/groups/${GROUP_ID}/preview-frame/${id}?theme=${encodeURIComponent(theme)}&v=${ts}`;
+    const url = `/ui/groups/${GROUP_ID}/preview/${id}?v=${ts}`;
     previewTitle.textContent = `Preview ${displayName || "file"}`;
     previewSubtitle.textContent = "";
     previewOpen.href = url;
-    previewDownload.href = `/ui/groups/${GROUP_ID}/files/${id}?v=${Date.now()}`;
-    previewFrame.src = url;
+    previewDownload.href = `/ui/groups/${GROUP_ID}/files/${id}?v=${ts}`;
+    previewFrame.src = frameUrl;
     if (typeof previewDialog.showModal === "function") {
       previewDialog.showModal();
     } else {

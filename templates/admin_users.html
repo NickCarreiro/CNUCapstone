@@ -2,6 +2,8 @@
 {% block body_class %}page-admin-users{% endblock %}
 {% block content %}
 {% set total_users = rows|length %}
+{% set superadmin_count_display = superadmin_count|default(0, true)|int %}
+{% set can_self_promote_display = can_self_promote_superadmin if can_self_promote_superadmin is defined else (user.is_admin and (not user.is_superadmin) and superadmin_count_display == 0) %}
 <section class="card hero-card admin-hero">
   <div class="eyebrow">System Administration</div>
   <h1>User management console</h1>
@@ -14,6 +16,10 @@
     <div class="stat-chip">
       <div class="stat-number">{{ admin_count }}</div>
       <div class="stat-label">Administrators</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ superadmin_count_display }}</div>
+      <div class="stat-label">Superadmins</div>
     </div>
     <div class="stat-chip">
       <div class="stat-number">{{ mfa_enabled_count }}</div>
@@ -32,6 +38,27 @@
 {% if notice %}
 <div class="alert admin-notice">{{ notice }}</div>
 {% endif %}
+
+<section class="card">
+  <div class="card-header">
+    <h2>Superadmin recovery</h2>
+  </div>
+  {% if can_self_promote_display %}
+  <p class="muted">No superadmin account exists. You can claim superadmin to restore protected admin controls.</p>
+  <form method="post" action="/ui/admin/users/promote-self-superadmin" class="inline-form">
+    <button type="submit">Promote my account to superadmin</button>
+  </form>
+  {% elif user.is_superadmin %}
+  <p class="muted">Your account already has superadmin privileges.</p>
+  <button type="button" class="ghost" disabled>Already superadmin</button>
+  {% else %}
+  <p class="muted">
+    Self-promotion is only available when there are zero superadmins.
+    Current superadmin count: {{ superadmin_count_display }}.
+  </p>
+  <button type="button" class="ghost" disabled>Superadmin exists</button>
+  {% endif %}
+</section>
 
 <section class="card">
   <div class="card-header">
@@ -61,10 +88,18 @@
       <tbody>
         {% for row in rows %}
         {% set target = row.user %}
-        {% set disable_demotion = target.is_admin and admin_count <= 1 %}
+        {% set disable_demotion = target.is_superadmin or (target.is_admin and admin_count <= 1) %}
         <tr class="admin-user-row">
           <td data-label="Username">{{ target.username }}</td>
-          <td data-label="Role">{{ "Administrator" if target.is_admin else "Standard" }}</td>
+          <td data-label="Role">
+            {% if target.is_superadmin %}
+            Superadmin
+            {% elif target.is_admin %}
+            Administrator
+            {% else %}
+            Standard
+            {% endif %}
+          </td>
           <td data-label="MFA">{{ row.mfa_summary }}</td>
           <td data-label="Active sessions">{{ row.active_sessions }}</td>
           <td data-label="Files">{{ row.file_count }}</td>
@@ -90,7 +125,7 @@
               </button>
               <form method="post" action="/ui/admin/users/{{ target.id }}/toggle-admin" class="inline-form">
                 <button type="submit" {% if target.is_admin %}class="danger"{% endif %} {% if disable_demotion %}disabled{% endif %}>
-                  {{ "Remove admin" if target.is_admin else "Make admin" }}
+                  {{ "Superadmin locked" if target.is_superadmin else ("Remove admin" if target.is_admin else "Make admin") }}
                 </button>
               </form>
             </div>

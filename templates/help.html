@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+{% block body_class %}page-help{% endblock %}
+{% block content %}
+<section class="card hero-card">
+  <div class="eyebrow">Support</div>
+  <h1>Help center</h1>
+  <p class="muted">Create support tickets for account, platform, and security issues. Tickets are routed to a shared admin inbox.</p>
+  <div class="stat-row">
+    <div class="stat-chip">
+      <div class="stat-number">{{ counts.total }}</div>
+      <div class="stat-label">Total tickets</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ counts.open }}</div>
+      <div class="stat-label">Open</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ counts.in_progress }}</div>
+      <div class="stat-label">In progress</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ counts.resolved }}</div>
+      <div class="stat-label">Resolved</div>
+    </div>
+  </div>
+</section>
+
+{% if error %}
+<div class="alert">{{ error }}</div>
+{% endif %}
+{% if notice %}
+<div class="alert admin-notice">{{ notice }}</div>
+{% endif %}
+
+<section class="card">
+  <div class="card-header">
+    <h2>Create support ticket</h2>
+  </div>
+  <form method="post" action="/ui/help/tickets" class="form compact">
+    <label>
+      <span>Subject</span>
+      <input type="text" name="subject" maxlength="200" placeholder="Brief issue summary" required />
+    </label>
+    <label>
+      <span>Category</span>
+      <select name="category">
+        {% for value, label in category_options.items() %}
+        <option value="{{ value }}">{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>Priority</span>
+      <select name="priority">
+        {% for value in priority_options %}
+        <option value="{{ value }}" {% if value == "normal" %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>Details</span>
+      <textarea name="details" rows="7" maxlength="8000" placeholder="Describe what happened, what you expected, and any error messages." required></textarea>
+    </label>
+    <div class="inline-form">
+      <button type="submit">Submit ticket</button>
+    </div>
+  </form>
+</section>
+
+<section class="card filters-card" id="helpFiltersTab">
+  <div class="card-header">
+    <h2>Ticket filters</h2>
+    <div class="card-tools">
+      <button
+        type="button"
+        class="ghost filter-toggle"
+        data-collapse-target="helpFiltersTab"
+        data-collapse-label-open="Hide filters tab"
+        data-collapse-label-closed="Show filters tab"
+        aria-controls="helpFiltersTab"
+        aria-expanded="true"
+      >
+        Hide filters tab
+      </button>
+    </div>
+  </div>
+  <form method="get" class="form compact filters-form">
+    <label class="filter-field filter-field-sm">
+      <span>Status</span>
+      <select name="status">
+        <option value="">Any</option>
+        {% for value in status_options %}
+        <option value="{{ value }}" {% if filters.status == value %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="filter-field filter-field-xs">
+      <span>Limit</span>
+      <input type="number" name="limit" min="1" max="300" value="{{ filters.limit }}" />
+    </label>
+    <div class="inline-form filters-actions">
+      <button type="submit">Apply filters</button>
+      <a class="pill ghost" href="/ui/help">Reset</a>
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>My tickets</h2>
+    <div class="card-tools">
+      <button
+        type="button"
+        class="ghost filter-toggle"
+        data-collapse-target="helpFiltersTab"
+        data-collapse-label-open="Hide filters tab"
+        data-collapse-label-closed="Show filters tab"
+        data-collapse-visible="collapsed"
+        aria-controls="helpFiltersTab"
+        aria-expanded="true"
+        hidden
+      >
+        Show filters tab
+      </button>
+    </div>
+  </div>
+
+  {% if rows %}
+    {% for row in rows %}
+    {% set ticket = row.ticket %}
+    <article class="soft-panel">
+      <div class="meta-grid">
+        <div class="meta-item">
+          <div class="label">Ticket id</div>
+          <code>{{ ticket.id }}</code>
+        </div>
+        <div class="meta-item">
+          <div class="label">Created</div>
+          <div>{{ ticket.created_at.strftime("%Y-%m-%d %H:%M:%S UTC") if ticket.created_at else "-" }}</div>
+        </div>
+        <div class="meta-item">
+          <div class="label">Updated</div>
+          <div>{{ ticket.updated_at.strftime("%Y-%m-%d %H:%M:%S UTC") if ticket.updated_at else "-" }}</div>
+        </div>
+        <div class="meta-item">
+          <div class="label">Status</div>
+          <code>{{ ticket.status }}</code>
+        </div>
+        <div class="meta-item">
+          <div class="label">Category</div>
+          <div>{{ row.category_label }}</div>
+        </div>
+        <div class="meta-item">
+          <div class="label">Priority</div>
+          <code>{{ ticket.priority }}</code>
+        </div>
+      </div>
+
+      <div class="label">Subject</div>
+      <p>{{ ticket.subject }}</p>
+
+      <details>
+        <summary>Ticket details</summary>
+        <pre class="mono-block">{{ row.description or "(empty)" }}</pre>
+      </details>
+
+      <div class="label">Admin response</div>
+      {% if row.admin_reply %}
+      <pre class="mono-block">{{ row.admin_reply }}</pre>
+      {% else %}
+      <p class="muted">No admin response yet.</p>
+      {% endif %}
+    </article>
+    {% endfor %}
+  {% else %}
+  <p class="muted">No tickets found for the selected filters.</p>
+  {% endif %}
+</section>
+{% endblock %}

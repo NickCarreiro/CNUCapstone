@@ -40,6 +40,7 @@ from app.models.core import (
     GroupKey,
     GroupMembership,
     Session as SessionModel,
+    SupportTicket,
     User,
     UserKey,
 )
@@ -146,6 +147,31 @@ DM_REPORT_REASONS: dict[str, str] = {
     "sexual": "Sexual content",
     "other": "Other",
 }
+
+SUPPORT_TICKET_CATEGORIES: dict[str, str] = {
+    "general": "General support",
+    "account": "Account access",
+    "bug": "Bug report",
+    "feature": "Feature request",
+    "security": "Security concern",
+}
+SUPPORT_TICKET_PRIORITIES: tuple[str, ...] = ("low", "normal", "high", "urgent")
+SUPPORT_TICKET_STATUSES: tuple[str, ...] = ("open", "in_progress", "waiting_on_user", "resolved", "closed")
+
+
+def _normalize_ticket_category(value: str | None) -> str:
+    key = (value or "").strip().lower()
+    return key if key in SUPPORT_TICKET_CATEGORIES else "general"
+
+
+def _normalize_ticket_priority(value: str | None) -> str:
+    key = (value or "").strip().lower()
+    return key if key in SUPPORT_TICKET_PRIORITIES else "normal"
+
+
+def _normalize_ticket_status(value: str | None) -> str:
+    key = (value or "").strip().lower()
+    return key if key in SUPPORT_TICKET_STATUSES else ""
 
 SMS_PROVIDER_SMTP_GATEWAY = "smtp_gateway"
 SMS_PROVIDER_TWILIO = "twilio"
@@ -820,6 +846,17 @@ def _admin_reports_redirect(
     return RedirectResponse(url=f"{base}?{key}={quote_plus(message)}", status_code=303)
 
 
+def _help_redirect(message: str, *, error: bool = False) -> RedirectResponse:
+    key = "error" if error else "notice"
+    return RedirectResponse(url=f"/ui/help?{key}={quote_plus(message)}", status_code=303)
+
+
+def _admin_help_redirect(message: str, *, error: bool = False, ticket_id: str | None = None) -> RedirectResponse:
+    key = "error" if error else "notice"
+    base = f"/ui/admin/help/{ticket_id}" if ticket_id else "/ui/admin/help"
+    return RedirectResponse(url=f"{base}?{key}={quote_plus(message)}", status_code=303)
+
+
 def _safe_join(root: Path, rel_path: str) -> Path:
     rel = (rel_path or "").strip()
     rel = rel.lstrip("/").replace("\\", "/")
@@ -1124,6 +1161,7 @@ def register_action(
         username=username,
         password_hash=hash_password(password),
         is_admin=is_first_user,
+        is_superadmin=is_first_user,
     )
     db.add(user)
     db.commit()
@@ -1135,6 +1173,9 @@ def register_action(
     if user.is_admin:
         add_event(db, user, action="auth", message="System administrator role granted to first account.", level="SUCCESS")
         add_audit_log(db, user=user, event_type="account.role_admin_granted", details="System administrator role granted.", request=request)
+    if user.is_superadmin:
+        add_event(db, user, action="auth", message="Superadmin role granted to first account.", level="SUCCESS")
+        add_audit_log(db, user=user, event_type="account.role_superadmin_granted", details="Superadmin role granted.", request=request)
     session = create_session(db, user)
     user.last_login = datetime.utcnow()
     add_audit_log(db, user=user, event_type="signin.success", details="Signed in after registration.", request=request)
@@ -1420,6 +1461,144 @@ def notifications_state(request: Request, db: Session = Depends(get_db)):
         "groups_badge_total": total_unread,
         "server_time_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+
+
+@router.get("/help")
+def help_page(
+    request: Request,
+    status: str = "",
+    limit: int = 80,
+    db: Session = Depends(get_db),
+):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+
+    status_filter = _normalize_ticket_status(status)
+    limit = max(1, min(limit, 300))
+
+    counts = {
+        (s or "open"): int(c)
+        for s, c in (
+            db.query(SupportTicket.status, func.count(SupportTicket.id))
+            .filter(SupportTicket.user_id == user.id)
+            .group_by(SupportTicket.status)
+            .all()
+        )
+    }
+
+    query = (
+        db.query(SupportTicket)
+        .options(joinedload(SupportTicket.assigned_admin))
+        .filter(SupportTicket.user_id == user.id)
+        .order_by(SupportTicket.updated_at.desc(), SupportTicket.created_at.desc(), SupportTicket.id.desc())
+    )
+    if status_filter:
+        query = query.filter(SupportTicket.status == status_filter)
+    tickets = query.limit(limit).all()
+
+    rows = []
+    for ticket in tickets:
+        body = decrypt_message(ticket.description or "").strip()
+        body_preview = body if len(body) <= 220 else f"{body[:217]}..."
+        admin_reply = decrypt_message(ticket.admin_reply or "").strip() if ticket.admin_reply else ""
+        admin_reply_preview = admin_reply if len(admin_reply) <= 220 else f"{admin_reply[:217]}..."
+        rows.append(
+            {
+                "ticket": ticket,
+                "description": body,
+                "description_preview": body_preview,
+                "admin_reply": admin_reply,
+                "admin_reply_preview": admin_reply_preview,
+                "category_label": SUPPORT_TICKET_CATEGORIES.get(ticket.category, ticket.category),
+            }
+        )
+
+    total = sum(counts.values())
+    return templates.TemplateResponse(
+        "help.html",
+        {
+            "request": request,
+            "user": user,
+            "rows": rows,
+            "counts": {
+                "total": total,
+                "open": counts.get("open", 0),
+                "in_progress": counts.get("in_progress", 0),
+                "waiting_on_user": counts.get("waiting_on_user", 0),
+                "resolved": counts.get("resolved", 0),
+                "closed": counts.get("closed", 0),
+            },
+            "filters": {
+                "status": status_filter,
+                "limit": limit,
+            },
+            "category_options": SUPPORT_TICKET_CATEGORIES,
+            "priority_options": SUPPORT_TICKET_PRIORITIES,
+            "status_options": SUPPORT_TICKET_STATUSES,
+            "notice": request.query_params.get("notice"),
+            "error": request.query_params.get("error"),
+        },
+    )
+
+
+@router.post("/help/tickets")
+def help_create_ticket(
+    request: Request,
+    subject: str = Form(...),
+    category: str = Form("general"),
+    priority: str = Form("normal"),
+    details: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+
+    subject_value = (subject or "").strip()
+    details_value = (details or "").strip()
+    if not subject_value:
+        return _help_redirect("Subject is required.", error=True)
+    if len(subject_value) > 200:
+        return _help_redirect("Subject is too long (max 200 characters).", error=True)
+    if not details_value:
+        return _help_redirect("Ticket details are required.", error=True)
+    if len(details_value) > 8000:
+        return _help_redirect("Ticket details are too long (max 8000 characters).", error=True)
+
+    normalized_category = _normalize_ticket_category(category)
+    normalized_priority = _normalize_ticket_priority(priority)
+    now = datetime.utcnow()
+    ticket = SupportTicket(
+        user_id=user.id,
+        subject=subject_value,
+        category=normalized_category,
+        priority=normalized_priority,
+        description=encrypt_message(details_value),
+        status="open",
+        created_at=now,
+        updated_at=now,
+        closed_at=None,
+        last_admin_update_at=None,
+    )
+    db.add(ticket)
+
+    add_event(
+        db,
+        user,
+        action="support",
+        message=f"Opened support ticket '{subject_value}' ({normalized_priority}).",
+        level="INFO",
+    )
+    add_audit_log(
+        db,
+        user=user,
+        event_type="support.ticket_created",
+        details=f"Created support ticket '{subject_value}' (category={normalized_category}, priority={normalized_priority}).",
+        request=request,
+    )
+    db.commit()
+    return _help_redirect("Support ticket submitted. The admin inbox has been notified.")
 
 
 def _messages_redirect(message: str, *, error: bool = False, thread: str | None = None) -> RedirectResponse:
@@ -1864,6 +2043,7 @@ def admin_users_page(request: Request, db: Session = Depends(get_db)):
         )
     }
     admin_count = sum(1 for u in users if u.is_admin)
+    superadmin_count = sum(1 for u in users if getattr(u, "is_superadmin", False))
 
     rows = [
         {
@@ -1883,10 +2063,12 @@ def admin_users_page(request: Request, db: Session = Depends(get_db)):
             "user": admin_user,
             "rows": rows,
             "admin_count": admin_count,
+            "superadmin_count": superadmin_count,
             "mfa_enabled_count": sum(
                 1 for u in users if (u.totp_enabled or u.email_mfa_enabled or u.sms_mfa_enabled)
             ),
             "active_session_total": sum(item["active_sessions"] for item in rows),
+            "can_self_promote_superadmin": bool(admin_user.is_admin and not admin_user.is_superadmin and superadmin_count == 0),
             "notice": request.query_params.get("notice"),
             "error": request.query_params.get("error"),
         },
@@ -2042,6 +2224,234 @@ def admin_audit_log_page(
             },
         },
     )
+
+
+@router.get("/admin/help")
+def admin_help_inbox(
+    request: Request,
+    status: str = "",
+    priority: str = "",
+    q: str = "",
+    limit: int = 200,
+    db: Session = Depends(get_db),
+):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    status_filter = _normalize_ticket_status(status)
+    priority_raw = (priority or "").strip().lower()
+    priority_filter = priority_raw if priority_raw in SUPPORT_TICKET_PRIORITIES else ""
+    text_filter = (q or "").strip()
+    limit = max(1, min(limit, 500))
+
+    counts = {
+        (s or "open"): int(c)
+        for s, c in (
+            db.query(SupportTicket.status, func.count(SupportTicket.id))
+            .group_by(SupportTicket.status)
+            .all()
+        )
+    }
+    total_tickets = sum(counts.values())
+
+    query = (
+        db.query(SupportTicket)
+        .join(User, SupportTicket.user_id == User.id)
+        .options(
+            joinedload(SupportTicket.requester),
+            joinedload(SupportTicket.assigned_admin),
+        )
+        .order_by(SupportTicket.updated_at.desc(), SupportTicket.created_at.desc(), SupportTicket.id.desc())
+    )
+    if status_filter:
+        query = query.filter(SupportTicket.status == status_filter)
+    if priority_filter:
+        query = query.filter(SupportTicket.priority == priority_filter)
+    if text_filter:
+        like = f"%{text_filter}%"
+        query = query.filter(
+            or_(
+                SupportTicket.subject.ilike(like),
+                User.username.ilike(like),
+            )
+        )
+
+    tickets = query.limit(limit).all()
+    rows = []
+    for ticket in tickets:
+        body = decrypt_message(ticket.description or "").replace("\n", " ").strip()
+        if len(body) > 160:
+            body = f"{body[:157]}..."
+        reply = decrypt_message(ticket.admin_reply or "").replace("\n", " ").strip() if ticket.admin_reply else ""
+        if len(reply) > 120:
+            reply = f"{reply[:117]}..."
+        rows.append(
+            {
+                "ticket": ticket,
+                "requester_username": ticket.requester.username if ticket.requester else "(unknown)",
+                "assigned_admin_username": ticket.assigned_admin.username if ticket.assigned_admin else "",
+                "description_preview": body or "-",
+                "admin_reply_preview": reply or "",
+                "category_label": SUPPORT_TICKET_CATEGORIES.get(ticket.category, ticket.category),
+            }
+        )
+
+    return templates.TemplateResponse(
+        "admin_help.html",
+        {
+            "request": request,
+            "user": admin_user,
+            "rows": rows,
+            "counts": {
+                "total": total_tickets,
+                "open": counts.get("open", 0),
+                "in_progress": counts.get("in_progress", 0),
+                "waiting_on_user": counts.get("waiting_on_user", 0),
+                "resolved": counts.get("resolved", 0),
+                "closed": counts.get("closed", 0),
+            },
+            "filters": {
+                "status": status_filter,
+                "priority": priority_filter,
+                "q": text_filter,
+                "limit": limit,
+            },
+            "status_options": SUPPORT_TICKET_STATUSES,
+            "priority_options": SUPPORT_TICKET_PRIORITIES,
+            "notice": request.query_params.get("notice"),
+            "error": request.query_params.get("error"),
+            "title": "Admin Help Inbox",
+        },
+    )
+
+
+@router.get("/admin/help/{ticket_id}")
+def admin_help_detail(ticket_id: str, request: Request, db: Session = Depends(get_db)):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    try:
+        tid = uuid.UUID(ticket_id)
+    except ValueError:
+        return _admin_help_redirect("Invalid ticket id.", error=True)
+
+    ticket = (
+        db.query(SupportTicket)
+        .options(
+            joinedload(SupportTicket.requester),
+            joinedload(SupportTicket.assigned_admin),
+        )
+        .filter(SupportTicket.id == tid)
+        .first()
+    )
+    if not ticket:
+        return _admin_help_redirect("Ticket not found.", error=True)
+
+    return templates.TemplateResponse(
+        "admin_help_detail.html",
+        {
+            "request": request,
+            "user": admin_user,
+            "ticket": ticket,
+            "description": decrypt_message(ticket.description or ""),
+            "admin_reply": decrypt_message(ticket.admin_reply or "") if ticket.admin_reply else "",
+            "category_label": SUPPORT_TICKET_CATEGORIES.get(ticket.category, ticket.category),
+            "status_options": SUPPORT_TICKET_STATUSES,
+            "priority_options": SUPPORT_TICKET_PRIORITIES,
+            "notice": request.query_params.get("notice"),
+            "error": request.query_params.get("error"),
+            "title": "Help ticket detail",
+        },
+    )
+
+
+@router.post("/admin/help/{ticket_id}/update")
+def admin_help_update_ticket(
+    ticket_id: str,
+    request: Request,
+    status: str = Form(...),
+    priority: str = Form(...),
+    admin_reply: str = Form(""),
+    clear_reply: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    try:
+        tid = uuid.UUID(ticket_id)
+    except ValueError:
+        return _admin_help_redirect("Invalid ticket id.", error=True)
+
+    ticket = (
+        db.query(SupportTicket)
+        .options(joinedload(SupportTicket.requester))
+        .filter(SupportTicket.id == tid)
+        .first()
+    )
+    if not ticket:
+        return _admin_help_redirect("Ticket not found.", error=True)
+
+    status_value = _normalize_ticket_status(status)
+    if not status_value:
+        return _admin_help_redirect("Invalid ticket status.", error=True, ticket_id=str(ticket.id))
+
+    priority_value = (priority or "").strip().lower()
+    if priority_value not in SUPPORT_TICKET_PRIORITIES:
+        return _admin_help_redirect("Invalid ticket priority.", error=True, ticket_id=str(ticket.id))
+
+    reply_text = (admin_reply or "").strip()
+    if len(reply_text) > 8000:
+        return _admin_help_redirect("Admin response is too long (max 8000 characters).", error=True, ticket_id=str(ticket.id))
+
+    now = datetime.utcnow()
+    ticket.status = status_value
+    ticket.priority = priority_value
+    ticket.assigned_admin_id = admin_user.id
+    ticket.updated_at = now
+    ticket.last_admin_update_at = now
+
+    clear_flag = (clear_reply or "").strip().lower() in {"1", "true", "on", "yes"}
+    if clear_flag:
+        ticket.admin_reply = None
+    elif reply_text:
+        ticket.admin_reply = encrypt_message(reply_text)
+
+    if status_value in {"resolved", "closed"}:
+        ticket.closed_at = now
+    else:
+        ticket.closed_at = None
+
+    requester_name = ticket.requester.username if ticket.requester else "(unknown)"
+    add_audit_log(
+        db,
+        user=admin_user,
+        event_type="admin.support_ticket_updated",
+        details=(
+            f"Updated support ticket {ticket.id} for '{requester_name}' "
+            f"(status={status_value}, priority={priority_value})."
+        ),
+        request=request,
+    )
+    if ticket.requester:
+        add_audit_log(
+            db,
+            user=ticket.requester,
+            event_type="support.ticket_updated_by_admin",
+            details=f"Support ticket {ticket.id} updated to status '{status_value}'.",
+            request=request,
+        )
+    db.commit()
+    return _admin_help_redirect("Ticket updated.", ticket_id=str(ticket.id))
 
 
 @router.get("/admin/reports")
@@ -2271,6 +2681,18 @@ def admin_report_action(
     target = report.reported_user
     action_key = (action or "").strip().lower()
     note_value = (note or "").strip()
+    target_is_superadmin = bool(getattr(target, "is_superadmin", False))
+
+    if action_key == "disable_account" and target_is_superadmin:
+        add_audit_log(
+            db,
+            user=admin_user,
+            event_type="admin.dm_report_action_blocked_superadmin",
+            details=f"Blocked action '{action_key}' against superadmin '{target.username}' for DM report {report.id}.",
+            request=request,
+        )
+        db.commit()
+        return _admin_reports_redirect("Superadmin accounts cannot be disabled by administrators.", error=True, report_id=str(report.id))
 
     if report.status == "open":
         report.status = "reviewing"
@@ -2539,6 +2961,17 @@ def admin_toggle_role(user_id: str, request: Request, db: Session = Depends(get_
     if not target:
         return _admin_redirect("User not found.", error=True)
 
+    if getattr(target, "is_superadmin", False):
+        add_audit_log(
+            db,
+            user=admin_user,
+            event_type="admin.role_admin_change_blocked_superadmin",
+            details=f"Blocked administrator role change for superadmin '{target.username}'.",
+            request=request,
+        )
+        db.commit()
+        return _admin_redirect("Superadmin role cannot be changed by administrators.", error=True)
+
     if target.is_admin:
         admin_count = db.query(func.count(User.id)).filter(User.is_admin.is_(True)).scalar() or 0
         if admin_count <= 1:
@@ -2569,6 +3002,68 @@ def admin_toggle_role(user_id: str, request: Request, db: Session = Depends(get_
     )
     db.commit()
     return _admin_redirect(f"Administrator role {status_label} for '{target.username}'.")
+
+
+@router.post("/admin/users/promote-self-superadmin")
+def admin_promote_self_superadmin(request: Request, db: Session = Depends(get_db)):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    if getattr(admin_user, "is_superadmin", False):
+        return _admin_redirect("Your account is already a superadmin.")
+
+    superadmin_count = db.query(func.count(User.id)).filter(User.is_superadmin.is_(True)).scalar() or 0
+    if superadmin_count > 0:
+        return _admin_redirect("A superadmin already exists. Self-promotion is disabled.", error=True)
+
+    admin_user.is_superadmin = True
+    admin_user.is_admin = True
+    add_event(
+        db,
+        admin_user,
+        action="admin",
+        message="Claimed superadmin role because no superadmin account existed.",
+        level="WARN",
+    )
+    add_audit_log(
+        db,
+        user=admin_user,
+        event_type="account.role_superadmin_claimed",
+        details="Claimed superadmin role because no superadmin account existed.",
+        request=request,
+    )
+    add_audit_log(
+        db,
+        user=admin_user,
+        event_type="admin.role_superadmin_claimed",
+        details=f"Admin '{admin_user.username}' promoted their own account to superadmin because no superadmin account existed.",
+        request=request,
+    )
+    db.commit()
+    return _admin_redirect("Your account has been promoted to superadmin.")
+
+
+@router.get("/admin/users/promote-self-superadmin")
+def admin_promote_self_superadmin_get(request: Request, db: Session = Depends(get_db)):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    if getattr(admin_user, "is_superadmin", False):
+        return _admin_redirect("Your account is already a superadmin.")
+
+    superadmin_count = db.query(func.count(User.id)).filter(User.is_superadmin.is_(True)).scalar() or 0
+    if superadmin_count == 0:
+        return _admin_redirect("Use the Promote button to submit superadmin recovery.")
+    return _admin_redirect(
+        f"Self-promotion is unavailable because {superadmin_count} superadmin account(s) already exist.",
+        error=True,
+    )
 
 
 @router.get("/totp")
@@ -3539,6 +4034,37 @@ def open_file(file_token: str, request: Request, db: Session = Depends(get_db)):
         decrypt_file_iter(dek, resolved, record.enc_nonce or "", record.enc_tag or ""),
         media_type=record.mime_type or "application/octet-stream",
         headers=headers,
+    )
+
+
+@router.get("/preview-frame/{file_token}")
+def preview_file_frame(file_token: str, request: Request, db: Session = Depends(get_db)):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+
+    record = _get_user_file_by_token(db, user, request, file_token)
+    resolved = _resolve_user_file_path(user, record.file_path)
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="File missing on disk")
+
+    mime_type = (record.mime_type or mimetypes.guess_type(record.file_name)[0] or "application/octet-stream").lower()
+    ext = Path(record.file_name or "").suffix.lower()
+    theme = (request.query_params.get("theme") or "").strip().lower()
+    if theme not in {"light", "dark"}:
+        theme = "light"
+
+    return templates.TemplateResponse(
+        "preview_frame.html",
+        {
+            "request": request,
+            "title": f"Preview {record.file_name}",
+            "raw_url": f"/ui/preview/{file_token}?v={int(datetime.utcnow().timestamp())}",
+            "file_name": record.file_name,
+            "mime_type": mime_type,
+            "file_ext": ext,
+            "theme": theme,
+        },
     )
 
 

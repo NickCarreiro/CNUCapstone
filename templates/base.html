@@ -65,8 +65,8 @@
         }
       })();
     </script>
-    <link rel="stylesheet" href="/static/style.css?v=26" />
-    <link rel="stylesheet" href="/static/future.css?v=6" />
+    <link rel="stylesheet" href="/static/style.css?v=27" />
+    <link rel="stylesheet" href="/static/future.css?v=7" />
   </head>
   <body data-ui="future" data-theme="light" class="{% block body_class %}{% endblock %}{% if user %} has-user-menu{% endif %}">
     <div class="page">
@@ -79,33 +79,55 @@
           <div class="toolbar">
             {% if user %}
             {% set _path = request.url.path if request else "" %}
+            {% set _workspace_open = _path.startswith("/ui/help") or _path == "/ui/audit" or _path == "/ui/trash" %}
+            {% set _admin_open = _path.startswith("/ui/admin") %}
             <nav class="nav" id="pfvPrimaryNav">
-              <button type="button" class="nav-pill" id="pfvTerminalNav">Terminal</button>
-              <a href="/ui" {% if _path == "/ui" %}aria-current="page"{% endif %}>Dashboard</a>
-	              <a
-	                href="/ui/groups"
-	                class="nav-link-with-badge"
-	                id="pfvNavGroupsLink"
-	                {% if _path.startswith("/ui/groups") %}aria-current="page"{% endif %}
-	              >
-	                <span>Groups</span>
-	                <span class="nav-count" id="pfvNavBadgeGroups" hidden>0</span>
-	              </a>
-	              <a
-	                href="/ui/messages"
-	                class="nav-link-with-badge"
-	                id="pfvNavMessagesLink"
-	                {% if _path.startswith("/ui/messages") %}aria-current="page"{% endif %}
-	              >
-	                <span>Messages</span>
-	                <span class="nav-count" id="pfvNavBadgeMessages" hidden>0</span>
-	              </a>
-	              <a href="/ui/audit" {% if _path == "/ui/audit" %}aria-current="page"{% endif %}>Audit</a>
-	              <a href="/ui/trash" {% if _path == "/ui/trash" %}aria-current="page"{% endif %}>Trash</a>
+              <section class="nav-group nav-group-user">
+                <div class="nav-group-title">User</div>
+                <button type="button" class="nav-pill" id="pfvTerminalNav">Terminal</button>
+                <a href="/ui" {% if _path == "/ui" %}aria-current="page"{% endif %}>Dashboard</a>
+	                <a
+	                  href="/ui/groups"
+	                  class="nav-link-with-badge"
+	                  id="pfvNavGroupsLink"
+	                  {% if _path.startswith("/ui/groups") %}aria-current="page"{% endif %}
+	                >
+	                  <span>Groups</span>
+	                  <span class="nav-count" id="pfvNavBadgeGroups" hidden>0</span>
+	                </a>
+	                <a
+	                  href="/ui/messages"
+	                  class="nav-link-with-badge"
+	                  id="pfvNavMessagesLink"
+	                  {% if _path.startswith("/ui/messages") %}aria-current="page"{% endif %}
+	                >
+	                  <span>Messages</span>
+	                  <span class="nav-count" id="pfvNavBadgeMessages" hidden>0</span>
+	                </a>
+
+                <details class="nav-section" {% if _workspace_open %}open{% endif %}>
+                  <summary>Workspace</summary>
+                  <div class="nav-section-links">
+                    <a href="/ui/help" {% if _path.startswith("/ui/help") %}aria-current="page"{% endif %}>Help</a>
+	                  <a href="/ui/audit" {% if _path == "/ui/audit" %}aria-current="page"{% endif %}>Audit</a>
+	                  <a href="/ui/trash" {% if _path == "/ui/trash" %}aria-current="page"{% endif %}>Trash</a>
+                  </div>
+                </details>
+              </section>
+
               {% if user.is_admin %}
-              <a href="/ui/admin/users" {% if _path.startswith("/ui/admin/users") %}aria-current="page"{% endif %}>Admin</a>
-              <a href="/ui/admin/reports" {% if _path.startswith("/ui/admin/reports") %}aria-current="page"{% endif %}>Reports</a>
-              <a href="/ui/admin/audit" {% if _path == "/ui/admin/audit" %}aria-current="page"{% endif %}>Admin Audit</a>
+              <section class="nav-group nav-group-admin">
+                <div class="nav-group-title">Admin</div>
+                <details class="nav-section" {% if _admin_open %}open{% endif %}>
+                  <summary>Administration</summary>
+                  <div class="nav-section-links">
+                    <a href="/ui/admin/users" {% if _path.startswith("/ui/admin/users") %}aria-current="page"{% endif %}>Admin</a>
+                    <a href="/ui/admin/help" {% if _path.startswith("/ui/admin/help") %}aria-current="page"{% endif %}>Help Inbox</a>
+                    <a href="/ui/admin/reports" {% if _path.startswith("/ui/admin/reports") %}aria-current="page"{% endif %}>Reports</a>
+                    <a href="/ui/admin/audit" {% if _path == "/ui/admin/audit" %}aria-current="page"{% endif %}>Admin Audit</a>
+                  </div>
+                </details>
+              </section>
               {% endif %}
             </nav>
             <div class="toolbar-actions">

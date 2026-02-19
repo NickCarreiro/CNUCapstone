@@ -1237,6 +1237,12 @@ body.resizing {
   overflow: auto;
 }
 
+body.page-dashboard .explorer-card-full .tree-panel,
+body.page-group-detail .explorer-card-full .tree-panel {
+  max-height: none;
+  overflow: visible;
+}
+
 .tree {
   margin-top: 0.35rem;
   display: grid;
@@ -1357,7 +1363,7 @@ body.resizing {
 
 .tree-files-details .tree-file {
   display: grid;
-  grid-template-columns: minmax(0, 2.2fr) minmax(90px, 0.6fr) minmax(140px, 0.9fr) minmax(260px, 1.3fr);
+  grid-template-columns: minmax(0, 2.2fr) minmax(70px, 0.6fr) minmax(110px, 0.9fr) minmax(0, 1.3fr);
   align-items: center;
   gap: 0.55rem;
   padding: 0.45rem 0.56rem;
@@ -1727,7 +1733,10 @@ body.resizing {
 
 .preview-body iframe {
   width: 100%;
-  height: min(64vh, 640px);
+  height: clamp(340px, 74vh, 920px);
+  max-height: calc(100vh - 190px);
+  max-height: calc(100dvh - 190px);
+  min-height: 320px;
   border: 1px solid var(--edge-soft);
   border-radius: 12px;
   background: var(--card-strong);
@@ -2967,7 +2976,9 @@ a:hover {
   }
 
   .preview-body iframe {
-    height: clamp(280px, 47dvh, 460px);
+    height: clamp(300px, 62dvh, 640px);
+    max-height: calc(100dvh - 170px);
+    min-height: 280px;
   }
 
   .terminal {

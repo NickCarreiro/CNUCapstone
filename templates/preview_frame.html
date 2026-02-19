@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title or "Preview" }}</title>
+    <style>
+      :root {
+        --preview-bg: #f6f8fd;
+        --preview-surface: #ffffff;
+        --preview-text: #0c152b;
+        --preview-muted: #5f6f8f;
+        --preview-edge: #d8e1f2;
+      }
+
+      body[data-theme="dark"] {
+        --preview-bg: #020b16;
+        --preview-surface: #071528;
+        --preview-text: #ebf4ff;
+        --preview-muted: #90a4c5;
+        --preview-edge: #1a2f52;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: var(--preview-bg);
+        color: var(--preview-text);
+        font-family: "Inter", "Segoe UI", Roboto, Arial, sans-serif;
+      }
+
+      .preview-shell {
+        box-sizing: border-box;
+        width: 100%;
+        height: 100%;
+        padding: 0.7rem;
+        display: grid;
+        grid-template-rows: minmax(0, 1fr) auto;
+        gap: 0.45rem;
+      }
+
+      .preview-panel {
+        min-width: 0;
+        min-height: 0;
+        border: 1px solid var(--preview-edge);
+        border-radius: 12px;
+        background: var(--preview-surface);
+        overflow: hidden;
+        display: grid;
+        place-items: center;
+      }
+
+      .preview-image {
+        max-width: 100%;
+        max-height: 100%;
+        width: auto;
+        height: auto;
+        object-fit: contain;
+      }
+
+      .preview-text {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        box-sizing: border-box;
+        overflow: auto;
+        padding: 0.95rem 1rem;
+        background: transparent;
+        color: var(--preview-text);
+        white-space: pre-wrap;
+        word-break: break-word;
+        line-height: 1.5;
+        font: 0.92rem/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New",
+          monospace;
+      }
+
+      .preview-file-frame {
+        width: 100%;
+        height: 100%;
+        border: 0;
+        background: transparent;
+      }
+
+      .preview-status {
+        margin: 0;
+        font-size: 0.8rem;
+        color: var(--preview-muted);
+      }
+
+      .preview-status.error {
+        color: #d23d59;
+      }
+    </style>
+  </head>
+  <body data-theme="{{ theme or 'light' }}">
+    <main class="preview-shell">
+      <div class="preview-panel" id="previewPanel"></div>
+      <p class="preview-status" id="previewStatus">Loading preview...</p>
+    </main>
+    <script>
+      (() => {
+        const rawUrl = {{ raw_url|tojson }};
+        const mimeType = String({{ mime_type|tojson }} || "").toLowerCase();
+        const fileExt = String({{ file_ext|tojson }} || "").toLowerCase();
+        const fileName = String({{ file_name|tojson }} || "file");
+        const panel = document.getElementById("previewPanel");
+        const status = document.getElementById("previewStatus");
+        const textExts = new Set([
+          ".txt",
+          ".md",
+          ".csv",
+          ".log",
+          ".json",
+          ".yaml",
+          ".yml",
+          ".toml",
+          ".ini",
+          ".cfg",
+          ".xml",
+          ".html",
+          ".htm",
+          ".css",
+          ".js",
+          ".ts",
+          ".py",
+          ".java",
+          ".go",
+          ".rs",
+          ".sql",
+          ".sh",
+          ".bash",
+          ".zsh",
+        ]);
+
+        function setStatus(message, isError = false) {
+          status.textContent = String(message || "");
+          status.classList.toggle("error", !!isError);
+        }
+
+        function setTheme(theme) {
+          document.body.dataset.theme = theme === "dark" ? "dark" : "light";
+        }
+
+        function bindParentTheme() {
+          try {
+            const parentBody = window.parent && window.parent.document ? window.parent.document.body : null;
+            if (!parentBody) return;
+            const sync = () => {
+              setTheme(parentBody.dataset.theme === "dark" ? "dark" : "light");
+              const computed = window.parent.getComputedStyle(parentBody);
+              const mappings = [
+                ["--surface", "--preview-bg"],
+                ["--card-strong", "--preview-surface"],
+                ["--ink", "--preview-text"],
+                ["--ink-muted", "--preview-muted"],
+                ["--edge-soft", "--preview-edge"],
+              ];
+              for (const [sourceVar, targetVar] of mappings) {
+                const value = (computed.getPropertyValue(sourceVar) || "").trim();
+                if (value) {
+                  document.documentElement.style.setProperty(targetVar, value);
+                }
+              }
+            };
+            sync();
+            const observer = new MutationObserver(sync);
+            observer.observe(parentBody, { attributes: true, attributeFilter: ["data-theme"] });
+            window.addEventListener(
+              "beforeunload",
+              () => {
+                observer.disconnect();
+              },
+              { once: true }
+            );
+          } catch {
+            return;
+          }
+        }
+
+        function isTextLike(mime, ext) {
+          if (mime.startsWith("text/")) return true;
+          if (mime.includes("json") || mime.includes("xml") || mime.includes("javascript") || mime.includes("yaml")) return true;
+          return textExts.has(ext);
+        }
+
+        function renderImage() {
+          const img = document.createElement("img");
+          img.className = "preview-image";
+          img.alt = fileName;
+          img.loading = "eager";
+          img.decoding = "async";
+          img.addEventListener("load", () => {
+            setStatus(`Image scaled to fit: ${img.naturalWidth} x ${img.naturalHeight}px`);
+          });
+          img.addEventListener("error", () => {
+            setStatus("Image preview failed to load. Use Open or Download.", true);
+          });
+          img.src = rawUrl;
+          panel.replaceChildren(img);
+          setStatus("Loading image preview...");
+        }
+
+        async function renderText() {
+          setStatus("Loading text preview...");
+          try {
+            const response = await fetch(rawUrl, { credentials: "same-origin", cache: "no-store" });
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}`);
+            }
+            const text = await response.text();
+            const pre = document.createElement("pre");
+            pre.className = "preview-text";
+            pre.textContent = text;
+            panel.replaceChildren(pre);
+            setStatus("Text preview loaded.");
+          } catch {
+            setStatus("Text preview failed to load. Use Open or Download.", true);
+          }
+        }
+
+        function renderGeneric() {
+          const frame = document.createElement("iframe");
+          frame.className = "preview-file-frame";
+          frame.loading = "eager";
+          frame.referrerPolicy = "same-origin";
+          frame.src = rawUrl;
+          frame.title = `Preview ${fileName}`;
+          frame.addEventListener("load", () => {
+            setStatus("Preview loaded.");
+          });
+          panel.replaceChildren(frame);
+          setStatus("Loading preview...");
+        }
+
+        bindParentTheme();
+
+        if (mimeType.startsWith("image/")) {
+          renderImage();
+          return;
+        }
+        if (isTextLike(mimeType, fileExt)) {
+          renderText();
+          return;
+        }
+        renderGeneric();
+      })();
+    </script>
+  </body>
+</html>

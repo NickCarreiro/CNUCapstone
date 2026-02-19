@@ -90,6 +90,8 @@ def ensure_schema() -> str:
             stmts.append("ALTER TABLE users ADD COLUMN profile_image_mime_type VARCHAR(255)")
         if not has_column("users", "is_admin"):
             stmts.append("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE")
+        if not has_column("users", "is_superadmin"):
+            stmts.append("ALTER TABLE users ADD COLUMN is_superadmin BOOLEAN NOT NULL DEFAULT FALSE")
         if not has_column("users", "is_disabled"):
             stmts.append("ALTER TABLE users ADD COLUMN is_disabled BOOLEAN NOT NULL DEFAULT FALSE")
         if not has_column("users", "disabled_at"):
@@ -172,6 +174,40 @@ def ensure_schema() -> str:
                     )
                 )
                 if promoted.rowcount and promoted.rowcount > 0:
+                    schema_changed = True
+
+            # Ensure at least one superadmin exists and that superadmins remain admins.
+            has_superadmin = conn.execute(text("SELECT EXISTS(SELECT 1 FROM users WHERE is_superadmin = TRUE)")).scalar()
+            if not has_superadmin:
+                promoted_super = conn.execute(
+                    text(
+                        """
+                        UPDATE users
+                        SET is_superadmin = TRUE,
+                            is_admin = TRUE
+                        WHERE id = (
+                            SELECT id
+                            FROM users
+                            ORDER BY is_admin DESC, created_at ASC NULLS LAST, id ASC
+                            LIMIT 1
+                        )
+                        """
+                    )
+                )
+                if promoted_super.rowcount and promoted_super.rowcount > 0:
+                    schema_changed = True
+            else:
+                normalized = conn.execute(
+                    text(
+                        """
+                        UPDATE users
+                        SET is_admin = TRUE
+                        WHERE is_superadmin = TRUE
+                          AND is_admin IS DISTINCT FROM TRUE
+                        """
+                    )
+                )
+                if normalized.rowcount and normalized.rowcount > 0:
                     schema_changed = True
 
     return "schema updated" if schema_changed else "schema ok"

@@ -1178,6 +1178,35 @@ def preview_group_file(group_id: str, file_id: str, request: Request, db: Sessio
     )
 
 
+@router.get("/{group_id}/preview-frame/{file_id}")
+def preview_group_file_frame(group_id: str, file_id: str, request: Request, db: Session = Depends(get_db)):
+    user = _must_user(db, request)
+    group, _ = _must_group_role(db, user, group_id, ROLE_VIEWER)
+    record = _must_group_file(db, group, file_id)
+    path = _safe_group_path(group, record.file_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="File missing on disk")
+
+    mime_type = (record.mime_type or mimetypes.guess_type(record.file_name)[0] or "application/octet-stream").lower()
+    ext = Path(record.file_name or "").suffix.lower()
+    theme = (request.query_params.get("theme") or "").strip().lower()
+    if theme not in {"light", "dark"}:
+        theme = "light"
+
+    return templates.TemplateResponse(
+        "preview_frame.html",
+        {
+            "request": request,
+            "title": f"Preview {record.file_name}",
+            "raw_url": f"/ui/groups/{group_id}/preview/{file_id}?v={int(datetime.utcnow().timestamp())}",
+            "file_name": record.file_name,
+            "mime_type": mime_type,
+            "file_ext": ext,
+            "theme": theme,
+        },
+    )
+
+
 @router.get("/{group_id}/files/{file_id}")
 def open_group_file(group_id: str, file_id: str, request: Request, db: Session = Depends(get_db)):
     user = _must_user(db, request)

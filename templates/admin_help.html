@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% block body_class %}page-admin-help{% endblock %}
+{% block content %}
+<section class="card hero-card admin-hero">
+  <div class="eyebrow">System Administration</div>
+  <h1>Help inbox</h1>
+  <p class="muted">Shared support queue for all administrators.</p>
+  <div class="stat-row">
+    <div class="stat-chip">
+      <div class="stat-number">{{ counts.total }}</div>
+      <div class="stat-label">Total</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ counts.open }}</div>
+      <div class="stat-label">Open</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ counts.in_progress }}</div>
+      <div class="stat-label">In progress</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ counts.waiting_on_user }}</div>
+      <div class="stat-label">Waiting</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ counts.resolved }}</div>
+      <div class="stat-label">Resolved</div>
+    </div>
+  </div>
+</section>
+
+{% if error %}
+<div class="alert">{{ error }}</div>
+{% endif %}
+{% if notice %}
+<div class="alert admin-notice">{{ notice }}</div>
+{% endif %}
+
+<section class="card filters-card" id="adminHelpFiltersTab">
+  <div class="card-header">
+    <h2>Filters</h2>
+    <div class="card-tools">
+      <button
+        type="button"
+        class="ghost filter-toggle"
+        data-collapse-target="adminHelpFiltersTab"
+        data-collapse-label-open="Hide filters tab"
+        data-collapse-label-closed="Show filters tab"
+        aria-controls="adminHelpFiltersTab"
+        aria-expanded="true"
+      >
+        Hide filters tab
+      </button>
+      <a class="pill ghost" href="/ui/admin/users">Admin users</a>
+      <a class="pill ghost" href="/ui/admin/reports">Message reports</a>
+    </div>
+  </div>
+  <form method="get" class="form compact filters-form">
+    <label class="filter-field filter-field-sm">
+      <span>Status</span>
+      <select name="status">
+        <option value="">Any</option>
+        {% for value in status_options %}
+        <option value="{{ value }}" {% if filters.status == value %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="filter-field filter-field-sm">
+      <span>Priority</span>
+      <select name="priority">
+        <option value="">Any</option>
+        {% for value in priority_options %}
+        <option value="{{ value }}" {% if filters.priority == value %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="filter-field filter-field-lg">
+      <span>Search (username or subject)</span>
+      <input type="text" name="q" value="{{ filters.q }}" placeholder="username, subject" />
+    </label>
+    <label class="filter-field filter-field-xs">
+      <span>Limit</span>
+      <input type="number" name="limit" min="1" max="500" value="{{ filters.limit }}" />
+    </label>
+    <div class="inline-form filters-actions">
+      <button type="submit">Apply filters</button>
+      <a class="pill ghost" href="/ui/admin/help">Reset</a>
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Ticket queue</h2>
+    <div class="card-tools">
+      <button
+        type="button"
+        class="ghost filter-toggle"
+        data-collapse-target="adminHelpFiltersTab"
+        data-collapse-label-open="Hide filters tab"
+        data-collapse-label-closed="Show filters tab"
+        data-collapse-visible="collapsed"
+        aria-controls="adminHelpFiltersTab"
+        aria-expanded="true"
+        hidden
+      >
+        Show filters tab
+      </button>
+    </div>
+  </div>
+
+  {% if rows %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Created (UTC)</th>
+          <th>Status</th>
+          <th>Priority</th>
+          <th>Requester</th>
+          <th>Category</th>
+          <th>Subject</th>
+          <th>Preview</th>
+          <th>Assigned admin</th>
+          <th>Open</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        {% set ticket = row.ticket %}
+        <tr>
+          <td data-label="Created">{{ ticket.created_at.strftime("%Y-%m-%d %H:%M:%S") if ticket.created_at else "-" }}</td>
+          <td data-label="Status"><code>{{ ticket.status }}</code></td>
+          <td data-label="Priority"><code>{{ ticket.priority }}</code></td>
+          <td data-label="Requester">{{ row.requester_username }}</td>
+          <td data-label="Category">{{ row.category_label }}</td>
+          <td data-label="Subject">{{ ticket.subject }}</td>
+          <td data-label="Preview">{{ row.description_preview }}</td>
+          <td data-label="Assigned admin">{{ row.assigned_admin_username or "-" }}</td>
+          <td data-label="Open"><a class="pill" href="/ui/admin/help/{{ ticket.id }}">View</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="muted">No support tickets matched the current filters.</p>
+  {% endif %}
+</section>
+{% endblock %}

@@ -32,6 +32,7 @@ def register(payload: UserCreate, request: Request, db: Session = Depends(get_db
         username=payload.username,
         password_hash=hash_password(payload.password),
         is_admin=is_first_user,
+        is_superadmin=is_first_user,
     )
     db.add(user)
     db.commit()
@@ -50,6 +51,14 @@ def register(payload: UserCreate, request: Request, db: Session = Depends(get_db
             user=user,
             event_type="account.role_admin_granted",
             details="System administrator role granted.",
+            request=request,
+        )
+    if user.is_superadmin:
+        add_audit_log(
+            db,
+            user=user,
+            event_type="account.role_superadmin_granted",
+            details="Superadmin role granted.",
             request=request,
         )
     db.commit()
