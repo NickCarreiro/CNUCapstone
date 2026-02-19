@@ -51,7 +51,15 @@ from app.services.activity import add_event
 from app.services.audit import add_audit_log
 from app.services.security import decrypt_totp_secret, encrypt_totp_secret, hash_password, verify_password
 from app.services.sessions import create_session
-from app.services.message_crypto import decrypt_message, encrypt_message
+from app.services.message_crypto import (
+    DM_ATTACHMENT_SCHEME_RECIPIENT,
+    DM_ATTACHMENT_SCHEME_SYSTEM,
+    decrypt_message,
+    decrypt_message_attachment_iter,
+    encrypt_message,
+    encrypt_message_attachment_to_path,
+    is_message_encrypted,
+)
 import pyotp
 
 router = APIRouter(prefix="/ui", tags=["ui"])
@@ -259,6 +267,39 @@ def _safe_message_attachment_path(path_str: str) -> Path:
     if not candidate.is_relative_to(root):
         raise HTTPException(status_code=400, detail="Invalid attachment path")
     return candidate
+
+
+def _ensure_message_attachment_encrypted(row: DirectMessage, path: Path) -> bool:
+    """Best-effort upgrade for legacy plaintext DM attachments."""
+    has_nonce_tag = bool(row.attachment_enc_nonce and row.attachment_enc_tag)
+    changed = False
+
+    if not has_nonce_tag:
+        tmp = path.with_name(f"{path.name}.dmenc.tmp")
+        try:
+            with path.open("rb") as src:
+                nonce_b64, tag_b64, plain_size = encrypt_message_attachment_to_path(src, tmp)
+            tmp.replace(path)
+        except Exception:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+            logger.warning("Failed to encrypt legacy message attachment %s", row.id, exc_info=True)
+            raise HTTPException(status_code=500, detail="Attachment encryption failed")
+
+        row.attachment_enc_nonce = nonce_b64
+        row.attachment_enc_tag = tag_b64
+        row.attachment_size = plain_size
+        row.attachment_key_scheme = DM_ATTACHMENT_SCHEME_SYSTEM
+        changed = True
+
+    if row.attachment_enc_nonce and row.attachment_enc_tag and not row.attachment_key_scheme:
+        row.attachment_key_scheme = DM_ATTACHMENT_SCHEME_RECIPIENT
+        changed = True
+
+    return changed
 
 
 def _conversation_filter(user_a: uuid.UUID, user_b: uuid.UUID):
@@ -1412,7 +1453,12 @@ def messages_home(
 
     thread_buckets: dict[uuid.UUID, list[DirectMessage]] = {}
     thread_summaries: dict[uuid.UUID, dict] = {}
+    message_rows_changed = False
     for row in messages:
+        if not is_message_encrypted(row.body):
+            row.body = encrypt_message(row.body or "")
+            message_rows_changed = True
+
         thread_uuid = row.thread_id or row.id
         thread_buckets.setdefault(thread_uuid, []).append(row)
 
@@ -1470,9 +1516,9 @@ def messages_home(
         if row.recipient_id == user.id and row.read_at is None:
             row.read_at = datetime.utcnow()
             read_updates += 1
-    if read_updates:
+    if read_updates or message_rows_changed:
         db.commit()
-        if active_thread_summary:
+        if read_updates and active_thread_summary:
             active_thread_summary["unread_count"] = 0
 
     thread_messages = []
@@ -1599,12 +1645,12 @@ def send_message(
         if not safe_name:
             return _messages_redirect("Invalid attachment name.", error=True, thread=str(resolved_thread_id))
 
-        recipient_dek = get_user_dek(db, recipient)
         attach_dir = _message_attachment_root() / str(recipient.id) / str(dm.id)
         attach_dir.mkdir(parents=True, exist_ok=True)
-        dest = attach_dir / safe_name
+        storage_name = f"{uuid.uuid4().hex}.dmenc"
+        dest = attach_dir / storage_name
 
-        nonce_b64, tag_b64, plain_size = encrypt_file_to_path(recipient_dek, attachment.file, dest)
+        nonce_b64, tag_b64, plain_size = encrypt_message_attachment_to_path(attachment.file, dest)
         if plain_size > MESSAGE_ATTACHMENT_MAX_BYTES:
             try:
                 dest.unlink()
@@ -1618,6 +1664,7 @@ def send_message(
         dm.attachment_size = plain_size
         dm.attachment_enc_nonce = nonce_b64
         dm.attachment_enc_tag = tag_b64
+        dm.attachment_key_scheme = DM_ATTACHMENT_SCHEME_SYSTEM
         dm.attachment_mime_type = mime_type
 
     db.add(dm)
@@ -1740,6 +1787,8 @@ def open_message_attachment(message_id: str, request: Request, db: Session = Dep
     if not path.exists():
         raise HTTPException(status_code=404, detail="Attachment missing on disk")
 
+    _ensure_message_attachment_encrypted(message, path)
+
     headers = {
         "Cache-Control": "no-store",
         "X-Content-Type-Options": "nosniff",
@@ -1747,16 +1796,7 @@ def open_message_attachment(message_id: str, request: Request, db: Session = Dep
     }
 
     if not message.attachment_enc_nonce or not message.attachment_enc_tag:
-        return FileResponse(
-            path=path,
-            filename=message.attachment_name,
-            media_type=message.attachment_mime_type or "application/octet-stream",
-            headers=headers,
-        )
-
-    recipient = db.query(User).filter(User.id == message.recipient_id).first()
-    if not recipient:
-        raise HTTPException(status_code=404, detail="Recipient not found")
+        raise HTTPException(status_code=409, detail="Attachment encryption metadata missing")
 
     add_event(
         db,
@@ -1766,9 +1806,20 @@ def open_message_attachment(message_id: str, request: Request, db: Session = Dep
     )
     db.commit()
 
-    dek = get_user_dek(db, recipient)
+    scheme = (message.attachment_key_scheme or "").strip().lower()
+    if scheme in {"", DM_ATTACHMENT_SCHEME_RECIPIENT}:
+        recipient = db.query(User).filter(User.id == message.recipient_id).first()
+        if not recipient:
+            raise HTTPException(status_code=404, detail="Recipient not found")
+        dek = get_user_dek(db, recipient)
+        stream = decrypt_file_iter(dek, path, message.attachment_enc_nonce, message.attachment_enc_tag)
+    elif scheme == DM_ATTACHMENT_SCHEME_SYSTEM:
+        stream = decrypt_message_attachment_iter(path, message.attachment_enc_nonce, message.attachment_enc_tag)
+    else:
+        raise HTTPException(status_code=500, detail="Unknown attachment encryption scheme")
+
     return StreamingResponse(
-        decrypt_file_iter(dek, path, message.attachment_enc_nonce, message.attachment_enc_tag),
+        stream,
         media_type=message.attachment_mime_type or "application/octet-stream",
         headers=headers,
     )

@@ -184,6 +184,7 @@ class DirectMessage(Base):
     attachment_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
     attachment_enc_nonce: Mapped[str | None] = mapped_column(String(64), nullable=True)
     attachment_enc_tag: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attachment_key_scheme: Mapped[str | None] = mapped_column(String(32), nullable=True)
     attachment_mime_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

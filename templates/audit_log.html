@@ -41,7 +41,7 @@
   </div>
 </section>
 
-<section class="card" id="auditFiltersTab">
+<section class="card filters-card" id="auditFiltersTab">
   <div class="card-header">
     <h2>Filters</h2>
     <div class="card-tools">
@@ -62,26 +62,26 @@
       {% endif %}
     </div>
   </div>
-  <form method="get" class="form compact">
+  <form method="get" class="form compact filters-form">
     {% if is_admin_view %}
-    <label>
+    <label class="filter-field filter-field-sm">
       <span>Username contains</span>
       <input type="text" name="username" value="{{ filters.username }}" placeholder="nick" />
     </label>
     {% endif %}
-    <label>
+    <label class="filter-field filter-field-sm">
       <span>Event type contains</span>
       <input type="text" name="event" value="{{ filters.event }}" placeholder="signin.failed" />
     </label>
-    <label>
+    <label class="filter-field filter-field-lg">
       <span>Search event or details</span>
       <input type="text" name="q" value="{{ filters.q }}" placeholder="MFA, admin, revoked" />
     </label>
-    <label>
+    <label class="filter-field filter-field-xs">
       <span>Limit</span>
       <input type="number" name="limit" min="1" max="{{ 2000 if is_admin_view else 1000 }}" value="{{ filters.limit }}" />
     </label>
-    <div class="inline-form">
+    <div class="inline-form filters-actions">
       <button type="submit">Apply filters</button>
       {% if is_admin_view %}
       <a class="pill ghost" href="/ui/admin/audit">Reset</a>

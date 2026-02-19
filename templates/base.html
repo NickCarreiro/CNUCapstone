@@ -66,7 +66,7 @@
       })();
     </script>
     <link rel="stylesheet" href="/static/style.css?v=26" />
-    <link rel="stylesheet" href="/static/future.css?v=5" />
+    <link rel="stylesheet" href="/static/future.css?v=6" />
   </head>
   <body data-ui="future" data-theme="light" class="{% block body_class %}{% endblock %}{% if user %} has-user-menu{% endif %}">
     <div class="page">
@@ -161,36 +161,111 @@
       </div>
     </div>
     {% endif %}
-    {% block scripts %}{% endblock %}
-	    <script>
-	      const root = document.body;
-	      const toggle = document.getElementById("themeToggle");
-	      const BG_STORAGE_KEY = "pfv-custom-bg";
-	      const stored = localStorage.getItem("pfv-theme");
-	      const prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
-	      const initialTheme = stored || (prefersDark ? "dark" : "light");
-	      root.dataset.theme = initialTheme;
-	      toggle.textContent = initialTheme === "dark" ? "Light mode" : "Dark mode";
+	    {% block scripts %}{% endblock %}
+		    <script>
+		      const root = document.body;
+		      const toggle = document.getElementById("themeToggle");
+		      const BG_STORAGE_KEY = "pfv-custom-bg";
+		      const THEME_STORAGE_KEY = "pfv-theme";
+		      const COLOR_STORAGE_KEY = "pfv-custom-colors";
 
-	      function applyStoredBackground() {
-	        try {
-	          const bg = (localStorage.getItem(BG_STORAGE_KEY) || "").trim();
-	          if (bg) {
-	            root.style.setProperty("--pfv-custom-bg", bg);
-	          } else {
-	            root.style.removeProperty("--pfv-custom-bg");
-	          }
-	        } catch {
-	          root.style.removeProperty("--pfv-custom-bg");
-	        }
-	      }
+      function readStorage(key) {
+        try {
+          return localStorage.getItem(key);
+        } catch {
+          return null;
+        }
+      }
 
-	      applyStoredBackground();
+      function writeStorage(key, value) {
+        try {
+          if (value === null || value === undefined || value === "") {
+            localStorage.removeItem(key);
+          } else {
+            localStorage.setItem(key, value);
+          }
+        } catch {}
+      }
+
+      function normalizeHex(value, fallback) {
+        const raw = String(value || "").trim();
+        return /^#[0-9a-fA-F]{6}$/.test(raw) ? raw.toLowerCase() : fallback;
+      }
+
+      function toRgb(hex) {
+        const value = normalizeHex(hex, "#00c7ff").slice(1);
+        return {
+          r: parseInt(value.slice(0, 2), 16),
+          g: parseInt(value.slice(2, 4), 16),
+          b: parseInt(value.slice(4, 6), 16),
+        };
+      }
+
+      function shadeHex(hex, factor) {
+        const rgb = toRgb(hex);
+        const f = Math.max(0, Math.min(1, Number(factor || 0)));
+        const clamp = (v) => Math.max(0, Math.min(255, Math.round(v)));
+        const r = clamp(rgb.r * (1 - f));
+        const g = clamp(rgb.g * (1 - f));
+        const b = clamp(rgb.b * (1 - f));
+        return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+      }
+
+      function applyTheme(next) {
+        const value = next === "dark" ? "dark" : "light";
+        root.dataset.theme = value;
+        if (toggle) toggle.textContent = value === "dark" ? "Light mode" : "Dark mode";
+      }
+
+      function applyStoredTheme() {
+        const stored = readStorage(THEME_STORAGE_KEY);
+        const prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+        applyTheme(stored || (prefersDark ? "dark" : "light"));
+      }
+
+      function applyStoredBackground() {
+        const bg = (readStorage(BG_STORAGE_KEY) || "").trim();
+        if (bg) {
+          root.style.setProperty("--pfv-custom-bg", bg);
+        } else {
+          root.style.removeProperty("--pfv-custom-bg");
+        }
+      }
+
+      function applyStoredColors() {
+        const raw = readStorage(COLOR_STORAGE_KEY) || "";
+        if (!raw) {
+          root.style.removeProperty("--accent");
+          root.style.removeProperty("--accent-strong");
+          root.style.removeProperty("--accent-2");
+          root.style.removeProperty("--accent-2-soft");
+          return;
+        }
+        try {
+          const parsed = JSON.parse(raw);
+          const accentA = normalizeHex(parsed.a, "#00c7ff");
+          const accentB = normalizeHex(parsed.b, "#ffbf3c");
+          root.style.setProperty("--accent", accentA);
+          root.style.setProperty("--accent-strong", shadeHex(accentA, 0.2));
+          root.style.setProperty("--accent-2", accentB);
+          root.style.setProperty("--accent-2-soft", `${accentB}33`);
+        } catch {
+          writeStorage(COLOR_STORAGE_KEY, "");
+          root.style.removeProperty("--accent");
+          root.style.removeProperty("--accent-strong");
+          root.style.removeProperty("--accent-2");
+          root.style.removeProperty("--accent-2-soft");
+        }
+      }
 
       function syncTerminalTheme() {
         const term = document.getElementById("pfvTerminal");
         if (term) term.dataset.theme = root.dataset.theme === "dark" ? "dark" : "light";
       }
+
+      applyStoredTheme();
+      applyStoredBackground();
+      applyStoredColors();
 
       if (document.readyState === "loading") {
         document.addEventListener("DOMContentLoaded", syncTerminalTheme, { once: true });
@@ -198,16 +273,71 @@
         syncTerminalTheme();
       }
 
-      toggle.addEventListener("click", () => {
-        const next = root.dataset.theme === "dark" ? "light" : "dark";
-        root.dataset.theme = next;
-        localStorage.setItem("pfv-theme", next);
-        toggle.textContent = next === "dark" ? "Light mode" : "Dark mode";
-        syncTerminalTheme();
-      });
+      if (toggle) {
+        toggle.addEventListener("click", () => {
+          const next = root.dataset.theme === "dark" ? "light" : "dark";
+          applyTheme(next);
+          writeStorage(THEME_STORAGE_KEY, next);
+          syncTerminalTheme();
+        });
+      }
 
-      const toolbar = document.querySelector(".toolbar");
-      const nav = document.getElementById("pfvPrimaryNav");
+      if (window.matchMedia) {
+        const mq = window.matchMedia("(prefers-color-scheme: dark)");
+        const onThemeMediaChange = () => {
+          if (readStorage(THEME_STORAGE_KEY)) return;
+          applyTheme(mq.matches ? "dark" : "light");
+          syncTerminalTheme();
+        };
+        if (typeof mq.addEventListener === "function") {
+          mq.addEventListener("change", onThemeMediaChange);
+        } else if (typeof mq.addListener === "function") {
+          mq.addListener(onThemeMediaChange);
+        }
+      }
+
+      window.PFVTheme = {
+        applyTheme,
+        applyStoredTheme,
+        setThemePreference(value) {
+          if (!value) {
+            writeStorage(THEME_STORAGE_KEY, "");
+            applyStoredTheme();
+          } else {
+            const next = value === "dark" ? "dark" : "light";
+            writeStorage(THEME_STORAGE_KEY, next);
+            applyTheme(next);
+          }
+          syncTerminalTheme();
+        },
+        setBackgroundCss(value) {
+          writeStorage(BG_STORAGE_KEY, String(value || "").trim());
+          applyStoredBackground();
+        },
+        setAccentColors(a, b) {
+          const accentA = normalizeHex(a, "#00c7ff");
+          const accentB = normalizeHex(b, "#ffbf3c");
+          writeStorage(COLOR_STORAGE_KEY, JSON.stringify({ a: accentA, b: accentB }));
+          applyStoredColors();
+        },
+        clearAccentColors() {
+          writeStorage(COLOR_STORAGE_KEY, "");
+          applyStoredColors();
+        },
+        getAccentColors() {
+          const raw = readStorage(COLOR_STORAGE_KEY) || "";
+          if (!raw) return null;
+          try {
+            const parsed = JSON.parse(raw);
+            return { a: normalizeHex(parsed.a, "#00c7ff"), b: normalizeHex(parsed.b, "#ffbf3c") };
+          } catch {
+            return null;
+          }
+        },
+      };
+
+	      const toolbar = document.querySelector(".toolbar");
+	      const nav = document.getElementById("pfvPrimaryNav");
       const menuToggle = document.getElementById("pfvMenuToggle");
       const mobileQuery = window.matchMedia("(max-width: 760px)");
       const MENU_STATE_KEY = "pfv-mobile-menu-open";

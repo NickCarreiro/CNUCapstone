@@ -5,18 +5,8 @@
 {% set unread_count = unread_thread_total or 0 %}
 <section class="card hero-card">
   <div class="eyebrow">Messages</div>
-  <h1>Direct messages</h1>
-  <p class="muted">Secure, encrypted conversations between users.</p>
-  <div class="stat-row">
-    <div class="stat-chip">
-      <div class="stat-number">{{ thread_count }}</div>
-      <div class="stat-label">Conversations</div>
-    </div>
-    <div class="stat-chip">
-      <div class="stat-number">{{ unread_count }}</div>
-      <div class="stat-label">Unread</div>
-    </div>
-  </div>
+  <h1>Secure direct messaging</h1>
+  <p class="muted">Conversations are encrypted at rest and scoped to authenticated users.</p>
 </section>
 
 {% if error %}
@@ -27,34 +17,39 @@
 {% endif %}
 
 <section class="card">
-  <div class="card-header">
-    <h2>Inbox</h2>
-    <div class="card-tools">
-      <span class="pill ghost">Unread: {{ unread_count }}</span>
-    </div>
-  </div>
-
-  <div class="dm-layout">
-    <aside class="dm-threads">
-      <h3>Conversations</h3>
+  <div class="messages-shell">
+    <aside class="messages-rail">
+      <div class="messages-rail-head">
+        <div>
+          <h2>Threads</h2>
+          <p class="muted">{{ thread_count }} conversations</p>
+        </div>
+        <div class="messages-rail-badges">
+          <span class="pill ghost">Unread {{ unread_count }}</span>
+        </div>
+      </div>
+      <div class="messages-rail-search">
+        <input type="text" id="dmThreadFilter" placeholder="Search conversations..." />
+      </div>
       {% if threads %}
-        <div class="dm-thread-list">
+        <div class="messages-thread-list" id="dmThreadList">
           {% for item in threads %}
           <a
-            class="dm-thread{% if item.thread_id == active_thread_id %} active{% endif %}"
+            class="messages-thread{% if item.thread_id == active_thread_id %} active{% endif %}"
             href="/ui/messages?thread={{ item.thread_id }}"
+            data-thread-search="{{ (item.partner_username ~ ' ' ~ (item.partner_email or '') ~ ' ' ~ (item.latest_preview or ''))|lower }}"
           >
-            <div class="dm-thread-head">
-              <span class="dm-thread-user">{{ item.partner_username }}</span>
+            <div class="messages-thread-top">
+              <span class="messages-thread-user">{{ item.partner_username }}</span>
               {% if item.unread_count %}
-                <span class="dm-thread-unread">{{ item.unread_count }}</span>
+                <span class="messages-thread-unread">{{ item.unread_count }}</span>
               {% endif %}
             </div>
             {% if item.partner_email %}
-            <div class="muted dm-thread-contact">{{ item.partner_email }}</div>
+            <div class="muted messages-thread-contact">{{ item.partner_email }}</div>
             {% endif %}
-            <div class="dm-thread-preview">{{ item.latest_preview }}</div>
-            <div class="dm-thread-time">{{ item.latest_created_at_utc }}</div>
+            <div class="messages-thread-preview">{{ item.latest_preview }}</div>
+            <div class="messages-thread-time">{{ item.latest_created_at_utc }}</div>
           </a>
           {% endfor %}
         </div>
@@ -63,76 +58,139 @@
       {% endif %}
     </aside>
 
-    <div class="dm-main">
-      <form
-        method="post"
-        action="/ui/messages/send"
-        enctype="multipart/form-data"
-        class="form compact dm-compose-form"
-        id="dmSendForm"
-        data-active-partner="{{ active_partner_username }}"
-      >
-        <input type="hidden" name="thread_id" id="dmThreadId" value="{{ active_thread_id }}" />
-        <label>
-          <span>Recipient username</span>
-          <input
-            type="text"
-            name="username"
-            id="dmUsername"
-            value="{{ active_partner_username }}"
-            placeholder="teammate"
-            autocomplete="off"
-          />
-        </label>
-        <label>
-          <span>Message</span>
-          <textarea name="message" id="dmMessage" maxlength="4000" rows="4" placeholder="Write a secure message..."></textarea>
-        </label>
-        <label>
-          <span>Attachment (optional, max 10 MB)</span>
-          <input type="file" name="attachment" id="dmAttachment" />
-        </label>
-        <div class="dm-compose-actions">
-          <button type="submit">Send message</button>
-          <button type="button" class="ghost" id="dmNewThread">New conversation</button>
+    <div class="messages-main">
+      <div class="messages-main-head">
+        <div>
+          <h2>
+            {% if active_partner_username %}
+            Chat with {{ active_partner_username }}
+            {% else %}
+            New conversation
+            {% endif %}
+          </h2>
+          <p class="muted">
+            {% if active_thread_id %}
+            Active encrypted thread
+            {% else %}
+            Pick a thread or create a new one
+            {% endif %}
+          </p>
         </div>
-      </form>
+        <button type="button" class="ghost" id="dmNewThread" aria-expanded="false" aria-controls="dmNewConversationPanel">New conversation</button>
+      </div>
 
-      <div class="dm-stream">
-        {% if thread_messages %}
-          {% for item in thread_messages %}
-          <article class="dm-message{% if item.is_outbound %} outbound{% else %} inbound{% endif %}">
-            <div class="dm-message-meta">
-              <span>{{ item.sender_username }} to {{ item.recipient_username }}</span>
-              <div class="dm-message-meta-right">
-                <span>{{ item.created_at_utc }}</span>
-                {% if not item.is_outbound %}
-                <button
-                  type="button"
-                  class="ghost dm-report-btn"
-                  data-message-id="{{ item.id }}"
-                  data-sender="{{ item.sender_username }}"
-                >
-                  Report
-                </button>
+      <div class="messages-workspace" id="dmWorkspace">
+        <div class="messages-chat-column">
+          <div class="messages-stream" id="dmStream">
+            {% if thread_messages %}
+              {% for item in thread_messages %}
+              <article class="messages-bubble{% if item.is_outbound %} outbound{% else %} inbound{% endif %}">
+                <div class="messages-bubble-meta">
+                  <span class="messages-bubble-sender">{{ item.sender_username }} to {{ item.recipient_username }}</span>
+                  <span>{{ item.created_at_utc }}</span>
+                </div>
+                {% if item.body %}
+                  <div class="messages-bubble-body">{{ item.body }}</div>
                 {% endif %}
+                {% if item.has_attachment %}
+                  <div class="messages-bubble-attachment">
+                    <a href="{{ item.attachment_url }}">{{ item.attachment_name }}</a>
+                    <span class="muted">({{ item.attachment_size }} bytes)</span>
+                  </div>
+                {% endif %}
+                <div class="messages-bubble-foot">
+                  <span class="messages-bubble-receipt">{{ item.receipt }}</span>
+                  {% if not item.is_outbound %}
+                  <button
+                    type="button"
+                    class="ghost dm-report-btn"
+                    data-message-id="{{ item.id }}"
+                    data-sender="{{ item.sender_username }}"
+                  >
+                    Report
+                  </button>
+                  {% endif %}
+                </div>
+              </article>
+              {% endfor %}
+            {% else %}
+              <div class="messages-empty-state">
+                <p class="muted">No messages in this thread yet.</p>
               </div>
+            {% endif %}
+          </div>
+
+          {% set has_active_thread = active_thread_id|length > 0 %}
+          <section class="messages-reply">
+            <form
+              method="post"
+              action="/ui/messages/send"
+              enctype="multipart/form-data"
+              class="messages-reply-form"
+              id="dmReplyForm"
+            >
+              <input type="hidden" name="thread_id" id="dmReplyThreadId" value="{{ active_thread_id }}" />
+              <input type="hidden" name="username" value="{{ active_partner_username }}" />
+              <textarea
+                name="message"
+                id="dmReplyMessage"
+                maxlength="4000"
+                rows="3"
+                placeholder="{% if has_active_thread %}Reply to {{ active_partner_username }}...{% else %}Select a conversation to reply...{% endif %}"
+                {% if not has_active_thread %}disabled{% endif %}
+              ></textarea>
+              <div class="messages-reply-side">
+                <input type="file" name="attachment" id="dmReplyAttachment" {% if not has_active_thread %}disabled{% endif %} />
+                <button type="submit" {% if not has_active_thread %}disabled{% endif %}>Send</button>
+              </div>
+            </form>
+          </section>
+        </div>
+
+        <section class="messages-new" id="dmNewConversationPanel" hidden>
+          <div class="messages-new-head">
+            <h3>Start new conversation</h3>
+            <p class="muted">Enter recipient, message, and optional attachment.</p>
+          </div>
+          <form
+            method="post"
+            action="/ui/messages/send"
+            enctype="multipart/form-data"
+            class="form compact messages-new-form"
+            id="dmNewForm"
+          >
+            <input type="hidden" name="thread_id" value="" />
+            <label>
+              <span>Recipient username</span>
+              <input
+                type="text"
+                name="username"
+                id="dmNewUsername"
+                placeholder="teammate"
+                autocomplete="off"
+                required
+              />
+            </label>
+            <label>
+              <span>Message</span>
+              <textarea
+                name="message"
+                id="dmNewMessage"
+                maxlength="4000"
+                rows="4"
+                placeholder="Write your first message..."
+                required
+              ></textarea>
+            </label>
+            <label>
+              <span>Attachment (optional, max 10 MB)</span>
+              <input type="file" name="attachment" id="dmNewAttachment" />
+            </label>
+            <div class="messages-new-actions">
+              <button type="submit">Start conversation</button>
             </div>
-            {% if item.body %}
-              <div class="dm-message-body">{{ item.body }}</div>
-            {% endif %}
-            {% if item.has_attachment %}
-              <div class="dm-attachment">
-                <a href="{{ item.attachment_url }}">{{ item.attachment_name }}</a>
-                <span class="muted">({{ item.attachment_size }} bytes)</span>
-              </div>
-            {% endif %}
-            <div class="dm-receipt">{{ item.receipt }}</div>
-          </article>
-          {% endfor %}
-        {% else %}
-          <p class="muted">Select a conversation or start a new one to view messages.</p>
-        {% endif %}
+          </form>
+        </section>
       </div>
     </div>
   </div>
@@ -175,48 +233,54 @@
 
 <script>
   (function () {
-    const form = document.getElementById("dmSendForm");
-    if (!form) return;
-
-    const threadInput = document.getElementById("dmThreadId");
-    const usernameInput = document.getElementById("dmUsername");
     const clearButton = document.getElementById("dmNewThread");
-    const stream = document.querySelector(".dm-stream");
-    const activePartner = (form.dataset.activePartner || "").trim().toLowerCase();
+    const newPanel = document.getElementById("dmNewConversationPanel");
+    const workspace = document.getElementById("dmWorkspace");
+    const newUsername = document.getElementById("dmNewUsername");
+    const newMessage = document.getElementById("dmNewMessage");
+    const newAttachment = document.getElementById("dmNewAttachment");
+    const replyThreadInput = document.getElementById("dmReplyThreadId");
+    const stream = document.getElementById("dmStream");
+    if (!clearButton || !newPanel) return;
 
-    function syncRecipientRequirement() {
-      const hasThread = !!(threadInput && threadInput.value.trim());
-      if (usernameInput) {
-        usernameInput.required = !hasThread;
-      }
+    function setNewPanelOpen(open) {
+      const next = !!open;
+      newPanel.hidden = !next;
+      workspace?.classList.toggle("is-new-open", next);
+      clearButton.setAttribute("aria-expanded", next ? "true" : "false");
+      clearButton.textContent = next ? "Close new conversation" : "New conversation";
+      if (next) newUsername?.focus();
     }
 
-    usernameInput?.addEventListener("input", () => {
-      const currentValue = usernameInput.value.trim().toLowerCase();
-      if (threadInput && threadInput.value && activePartner && currentValue && currentValue !== activePartner) {
-        threadInput.value = "";
-      }
-      syncRecipientRequirement();
-    });
-
-    clearButton?.addEventListener("click", () => {
-      if (threadInput) threadInput.value = "";
-      if (usernameInput) {
-        usernameInput.value = "";
-        usernameInput.focus();
-      }
-      const messageInput = document.getElementById("dmMessage");
-      if (messageInput) messageInput.value = "";
-      const attachmentInput = document.getElementById("dmAttachment");
-      if (attachmentInput) attachmentInput.value = "";
-      syncRecipientRequirement();
+    clearButton.addEventListener("click", () => {
+      const open = clearButton.getAttribute("aria-expanded") === "true";
+      setNewPanelOpen(!open);
+      if (open) return;
+      if (newUsername) newUsername.value = "";
+      if (newMessage) newMessage.value = "";
+      if (newAttachment) newAttachment.value = "";
     });
 
     if (stream) {
       stream.scrollTop = stream.scrollHeight;
     }
 
-    syncRecipientRequirement();
+    const hasActiveThread = !!(replyThreadInput && replyThreadInput.value.trim());
+    setNewPanelOpen(!hasActiveThread);
+  })();
+
+  (function () {
+    const filter = document.getElementById("dmThreadFilter");
+    const list = document.getElementById("dmThreadList");
+    if (!filter || !list) return;
+    const rows = Array.from(list.querySelectorAll(".messages-thread"));
+    filter.addEventListener("input", () => {
+      const q = filter.value.trim().toLowerCase();
+      rows.forEach((row) => {
+        const haystack = row.dataset.threadSearch || "";
+        row.hidden = !!q && !haystack.includes(q);
+      });
+    });
   })();
 
   (function () {
@@ -250,8 +314,8 @@
       detailsInput.value = "";
 
       let snippet = "";
-      const article = btn.closest(".dm-message");
-      const bodyEl = article ? article.querySelector(".dm-message-body") : null;
+      const article = btn.closest(".messages-bubble");
+      const bodyEl = article ? article.querySelector(".messages-bubble-body") : null;
       if (bodyEl && bodyEl.textContent) {
         snippet = bodyEl.textContent.trim().replace(/\s+/g, " ");
         if (snippet.length > 180) snippet = `${snippet.slice(0, 177)}...`;

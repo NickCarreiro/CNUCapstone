@@ -94,3 +94,15 @@ def message_fernet_key_str() -> str:
         raise ValueError("PFV_MASTER_KEY must decode to 32 bytes")
     raw = _hkdf(master_raw, info=b"pfv:messages-fernet:v1", length=32)
     return base64.urlsafe_b64encode(raw).decode()
+
+
+@lru_cache(maxsize=1)
+def message_attachment_key_bytes() -> bytes:
+    if settings.passphrase_file:
+        root = _root_key_from_passphrase()
+        return _hkdf(root, info=b"pfv:messages-attachments-aesgcm:v1", length=32)
+
+    master_raw = base64.urlsafe_b64decode(settings.master_key.encode())
+    if len(master_raw) != 32:
+        raise ValueError("PFV_MASTER_KEY must decode to 32 bytes")
+    return _hkdf(master_raw, info=b"pfv:messages-attachments-aesgcm:v1", length=32)

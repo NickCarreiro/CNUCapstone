@@ -216,6 +216,12 @@
     <button type="button" class="ghost" data-bg-preset="ember">Ember preset</button>
     <button type="button" class="ghost" id="profileBgReset">Reset background</button>
   </div>
+  <div class="actions">
+    <button type="button" class="ghost" data-accent-preset="cyan-amber">Cyan + amber</button>
+    <button type="button" class="ghost" data-accent-preset="mint-coral">Mint + coral</button>
+    <button type="button" class="ghost" data-accent-preset="violet-gold">Violet + gold</button>
+    <button type="button" class="ghost" id="profileAccentReset">Reset colors</button>
+  </div>
   <details class="soft-panel">
     <summary>Advanced background controls</summary>
     <form class="form compact" id="profileBgForm">
@@ -237,46 +243,48 @@
       <button type="submit">Apply background</button>
     </form>
   </details>
+  <details class="soft-panel">
+    <summary>Advanced accent colors</summary>
+    <form class="form compact" id="profileAccentForm">
+      <label>
+        <span>Primary accent</span>
+        <input type="color" id="profileAccentColorA" value="#00c7ff" />
+      </label>
+      <label>
+        <span>Secondary accent</span>
+        <input type="color" id="profileAccentColorB" value="#ffbf3c" />
+      </label>
+      <button type="submit">Apply accent colors</button>
+    </form>
+  </details>
 </section>
 
 <script>
   (function () {
     const root = document.body;
-    const prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
-    const themeToggle = document.getElementById("themeToggle");
+    const themeApi = window.PFVTheme || null;
     const sys = document.getElementById("profileThemeSystem");
     const light = document.getElementById("profileThemeLight");
     const dark = document.getElementById("profileThemeDark");
     const bgPresetButtons = document.querySelectorAll("[data-bg-preset]");
+    const accentPresetButtons = document.querySelectorAll("[data-accent-preset]");
     const bgReset = document.getElementById("profileBgReset");
     const bgForm = document.getElementById("profileBgForm");
     const bgMode = document.getElementById("profileBgMode");
     const bgColorA = document.getElementById("profileBgColorA");
     const bgColorB = document.getElementById("profileBgColorB");
-    const BG_STORAGE_KEY = "pfv-custom-bg";
+    const accentReset = document.getElementById("profileAccentReset");
+    const accentForm = document.getElementById("profileAccentForm");
+    const accentColorA = document.getElementById("profileAccentColorA");
+    const accentColorB = document.getElementById("profileAccentColorB");
     if (!sys || !light || !dark) return;
 
-    function applyTheme(next) {
-      root.dataset.theme = next;
-      if (themeToggle) themeToggle.textContent = next === "dark" ? "Light mode" : "Dark mode";
-      try {
-        const term = document.getElementById("pfvTerminal");
-        if (term) term.dataset.theme = next === "dark" ? "dark" : "light";
-      } catch {}
-    }
-
     function setStoredTheme(value) {
-      try {
-        if (!value) {
-          localStorage.removeItem("pfv-theme");
-          applyTheme(prefersDark ? "dark" : "light");
-        } else {
-          localStorage.setItem("pfv-theme", value);
-          applyTheme(value);
-        }
-      } catch {
-        applyTheme(value || (prefersDark ? "dark" : "light"));
+      if (themeApi && typeof themeApi.setThemePreference === "function") {
+        themeApi.setThemePreference(value);
+        return;
       }
+      root.dataset.theme = value === "dark" ? "dark" : "light";
     }
 
     sys.addEventListener("click", () => setStoredTheme(""));
@@ -285,17 +293,21 @@
 
     function setBackgroundCss(css) {
       const value = String(css || "").trim();
-      try {
-        if (value) {
-          localStorage.setItem(BG_STORAGE_KEY, value);
-          root.style.setProperty("--pfv-custom-bg", value);
-        } else {
-          localStorage.removeItem(BG_STORAGE_KEY);
-          root.style.removeProperty("--pfv-custom-bg");
-        }
-      } catch {
-        if (value) root.style.setProperty("--pfv-custom-bg", value);
+      if (themeApi && typeof themeApi.setBackgroundCss === "function") {
+        themeApi.setBackgroundCss(value);
+        return;
       }
+      if (value) root.style.setProperty("--pfv-custom-bg", value);
+      else root.style.removeProperty("--pfv-custom-bg");
+    }
+
+    function setAccentColors(a, b) {
+      if (themeApi && typeof themeApi.setAccentColors === "function") {
+        themeApi.setAccentColors(a, b);
+        return;
+      }
+      root.style.setProperty("--accent", a);
+      root.style.setProperty("--accent-2", b);
     }
 
     const PRESETS = {
@@ -305,6 +317,11 @@
         "radial-gradient(980px at 6% 0%, rgba(115,172,255,0.14), rgba(0,0,0,0) 58%), linear-gradient(180deg, #0b1324 0%, #101a2d 54%, #0d1727 100%)",
       ember:
         "radial-gradient(900px at 96% 4%, rgba(255,143,69,0.22), rgba(0,0,0,0) 54%), radial-gradient(820px at 0% 100%, rgba(255,208,92,0.12), rgba(0,0,0,0) 56%), linear-gradient(180deg, #13090a 0%, #1a0e12 56%, #12080a 100%)",
+    };
+    const ACCENT_PRESETS = {
+      "cyan-amber": ["#00c7ff", "#ffbf3c"],
+      "mint-coral": ["#14d6a5", "#ff8d7a"],
+      "violet-gold": ["#8a7dff", "#ffd26a"],
     };
 
     bgPresetButtons.forEach((btn) => {
@@ -316,6 +333,14 @@
     });
 
     bgReset?.addEventListener("click", () => setBackgroundCss(""));
+    accentReset?.addEventListener("click", () => {
+      if (themeApi && typeof themeApi.clearAccentColors === "function") {
+        themeApi.clearAccentColors();
+      } else {
+        root.style.removeProperty("--accent");
+        root.style.removeProperty("--accent-2");
+      }
+    });
 
     bgForm?.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -330,6 +355,32 @@
         );
       }
     });
+
+    accentPresetButtons.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const preset = btn.dataset.accentPreset || "";
+        const pair = ACCENT_PRESETS[preset];
+        if (!pair) return;
+        if (accentColorA) accentColorA.value = pair[0];
+        if (accentColorB) accentColorB.value = pair[1];
+        setAccentColors(pair[0], pair[1]);
+      });
+    });
+
+    accentForm?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const a = (accentColorA?.value || "#00c7ff").trim();
+      const b = (accentColorB?.value || "#ffbf3c").trim();
+      setAccentColors(a, b);
+    });
+
+    if (themeApi && typeof themeApi.getAccentColors === "function") {
+      const current = themeApi.getAccentColors();
+      if (current) {
+        if (accentColorA) accentColorA.value = current.a;
+        if (accentColorB) accentColorB.value = current.b;
+      }
+    }
   })();
 </script>
 {% endblock %}

@@ -36,7 +36,7 @@
 <div class="alert admin-notice">{{ notice }}</div>
 {% endif %}
 
-<section class="card" id="adminReportsFiltersTab">
+<section class="card filters-card" id="adminReportsFiltersTab">
   <div class="card-header">
     <h2>Filters</h2>
     <div class="card-tools">
@@ -55,8 +55,8 @@
       <a class="pill ghost" href="/ui/admin/audit">Admin audit</a>
     </div>
   </div>
-  <form method="get" class="form compact">
-    <label>
+  <form method="get" class="form compact filters-form">
+    <label class="filter-field filter-field-sm">
       <span>Status</span>
       <select name="status">
         <option value="">Any</option>
@@ -65,15 +65,15 @@
         {% endfor %}
       </select>
     </label>
-    <label>
+    <label class="filter-field filter-field-lg">
       <span>Search (user, reason, status, preview)</span>
       <input type="text" name="q" value="{{ filters.q }}" placeholder="spam, harassment, username" />
     </label>
-    <label>
+    <label class="filter-field filter-field-xs">
       <span>Limit</span>
       <input type="number" name="limit" min="1" max="500" value="{{ filters.limit }}" />
     </label>
-    <div class="inline-form">
+    <div class="inline-form filters-actions">
       <button type="submit">Apply filters</button>
       <a class="pill ghost" href="/ui/admin/reports">Reset</a>
     </div>

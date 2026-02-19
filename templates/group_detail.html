@@ -210,6 +210,79 @@
 <div class="alert admin-notice">{{ notice }}</div>
 {% endif %}
 
+<section class="card" id="groupMembersModule">
+  <div class="card-header">
+    <h2>Members</h2>
+    <div class="card-tools">
+      <button
+        type="button"
+        class="ghost filter-toggle"
+        data-collapse-target="groupMembersModule"
+        data-collapse-label-open="Hide members module"
+        data-collapse-label-closed="Show members module"
+        aria-controls="groupMembersModule"
+        aria-expanded="true"
+      >
+        Hide members module
+      </button>
+    </div>
+  </div>
+  {% if members %}
+    <div class="table-wrap">
+      <table class="table" id="groupDetailMembersTable">
+        <thead>
+          <tr>
+            <th>Username</th>
+            <th>Email</th>
+            <th>Role</th>
+            <th>Joined</th>
+            <th>Manage</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for member in members %}
+          <tr>
+            <td data-label="Username">{{ member.user.username }}</td>
+            <td data-label="Email">
+              {% if member.user.email and member.user.email_visible and member.user.email_verified %}
+              {{ member.user.email }}
+              {% else %}
+              <span class="muted">Hidden</span>
+              {% endif %}
+            </td>
+            <td data-label="Role">{{ member.role }}</td>
+            <td data-label="Joined">{{ member.joined_at }}</td>
+            <td data-label="Manage">
+              {% if can_manage_members and member.user.id != user.id and member.role != "owner" %}
+                <div class="member-manage">
+                  <form method="post" action="/ui/groups/{{ group.id }}/members/{{ member.user.id }}/role" class="inline-form member-role-form">
+                    <select name="role">
+                      {% for role_option in member_role_options %}
+                      <option value="{{ role_option }}" {% if member.role == role_option %}selected{% endif %}>{{ role_option|capitalize }}</option>
+                      {% endfor %}
+                    </select>
+                    <button type="submit">Update</button>
+                  </form>
+                  <form method="post" action="/ui/groups/{{ group.id }}/members/{{ member.user.id }}/remove" class="inline-form">
+                    <button type="submit" class="danger">Remove</button>
+                  </form>
+                </div>
+              {% elif member.user.id == user.id %}
+                <span class="muted">Current user</span>
+              {% elif member.role == "owner" %}
+                <span class="muted">Owner</span>
+              {% else %}
+                <span class="muted">No access</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+</section>
+
 <section class="card explorer-card explorer-card-full">
   <div class="card-header explorer-header">
     <div class="explorer-title">
@@ -217,6 +290,19 @@
       <div class="explorer-path muted" id="explorerPath">Showing: /</div>
     </div>
     <div class="card-tools">
+      <button
+        type="button"
+        class="ghost filter-toggle"
+        data-collapse-target="groupMembersModule"
+        data-collapse-label-open="Hide members module"
+        data-collapse-label-closed="Show members module"
+        data-collapse-visible="collapsed"
+        aria-controls="groupMembersModule"
+        aria-expanded="true"
+        hidden
+      >
+        Show members module
+      </button>
       <button type="button" class="ghost" id="explorerQuickAdd" aria-expanded="false" aria-controls="explorerQuickMenu">+</button>
       <input type="text" id="fileFilter" placeholder="Search files..." />
       <button type="button" class="ghost explorer-clear-filter" id="explorerClearFilter" hidden>
@@ -276,66 +362,6 @@
     </div>
   </div>
 </div>
-
-<section class="card">
-  <div class="card-header">
-    <h2>Members</h2>
-  </div>
-  {% if members %}
-    <div class="table-wrap">
-      <table class="table" id="groupDetailMembersTable">
-        <thead>
-          <tr>
-            <th>Username</th>
-            <th>Email</th>
-            <th>Role</th>
-            <th>Joined</th>
-            <th>Manage</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for member in members %}
-          <tr>
-            <td data-label="Username">{{ member.user.username }}</td>
-            <td data-label="Email">
-              {% if member.user.email and member.user.email_visible and member.user.email_verified %}
-              {{ member.user.email }}
-              {% else %}
-              <span class="muted">Hidden</span>
-              {% endif %}
-            </td>
-            <td data-label="Role">{{ member.role }}</td>
-            <td data-label="Joined">{{ member.joined_at }}</td>
-            <td data-label="Manage">
-              {% if can_manage_members and member.user.id != user.id and member.role != "owner" %}
-                <div class="member-manage">
-                  <form method="post" action="/ui/groups/{{ group.id }}/members/{{ member.user.id }}/role" class="inline-form member-role-form">
-                    <select name="role">
-                      {% for role_option in member_role_options %}
-                      <option value="{{ role_option }}" {% if member.role == role_option %}selected{% endif %}>{{ role_option|capitalize }}</option>
-                      {% endfor %}
-                    </select>
-                    <button type="submit">Update</button>
-                  </form>
-                  <form method="post" action="/ui/groups/{{ group.id }}/members/{{ member.user.id }}/remove" class="inline-form">
-                    <button type="submit" class="danger">Remove</button>
-                  </form>
-                </div>
-              {% elif member.user.id == user.id %}
-                <span class="muted">Current user</span>
-              {% elif member.role == "owner" %}
-                <span class="muted">Owner</span>
-              {% else %}
-                <span class="muted">No access</span>
-              {% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  {% endif %}
-</section>
 
 {% if can_invite %}
 <section class="card">
