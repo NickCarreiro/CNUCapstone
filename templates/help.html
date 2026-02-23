@@ -36,12 +36,12 @@
   <div class="card-header">
     <h2>Create support ticket</h2>
   </div>
-  <form method="post" action="/ui/help/tickets" class="form compact">
-    <label>
+  <form method="post" action="/ui/help/tickets" class="form compact help-ticket-form">
+    <label class="help-ticket-subject">
       <span>Subject</span>
       <input type="text" name="subject" maxlength="200" placeholder="Brief issue summary" required />
     </label>
-    <label>
+    <label class="help-ticket-category">
       <span>Category</span>
       <select name="category">
         {% for value, label in category_options.items() %}
@@ -49,7 +49,7 @@
         {% endfor %}
       </select>
     </label>
-    <label>
+    <label class="help-ticket-priority">
       <span>Priority</span>
       <select name="priority">
         {% for value in priority_options %}
@@ -57,11 +57,11 @@
         {% endfor %}
       </select>
     </label>
-    <label>
+    <label class="help-ticket-details">
       <span>Details</span>
       <textarea name="details" rows="7" maxlength="8000" placeholder="Describe what happened, what you expected, and any error messages." required></textarea>
     </label>
-    <div class="inline-form">
+    <div class="inline-form help-ticket-actions">
       <button type="submit">Submit ticket</button>
     </div>
   </form>
@@ -84,8 +84,8 @@
       </button>
     </div>
   </div>
-  <form method="get" class="form compact filters-form">
-    <label class="filter-field filter-field-sm">
+  <form method="get" class="form compact filters-form help-filters-form">
+    <label class="filter-field filter-field-sm help-filter-status">
       <span>Status</span>
       <select name="status">
         <option value="">Any</option>
@@ -94,7 +94,7 @@
         {% endfor %}
       </select>
     </label>
-    <label class="filter-field filter-field-xs">
+    <label class="filter-field filter-field-xs help-filter-limit">
       <span>Limit</span>
       <input type="number" name="limit" min="1" max="300" value="{{ filters.limit }}" />
     </label>
@@ -131,6 +131,10 @@
     <article class="soft-panel">
       <div class="meta-grid">
         <div class="meta-item">
+          <div class="label">Requester</div>
+          <div><code>{{ row.requester_username }}</code></div>
+        </div>
+        <div class="meta-item">
           <div class="label">Ticket id</div>
           <code>{{ ticket.id }}</code>
         </div>
@@ -153,6 +157,10 @@
         <div class="meta-item">
           <div class="label">Priority</div>
           <code>{{ ticket.priority }}</code>
+        </div>
+        <div class="meta-item">
+          <div class="label">Assigned admin</div>
+          <div>{{ row.assigned_admin_username or "-" }}</div>
         </div>
       </div>
 

@@ -16,6 +16,30 @@
 
 <section class="card">
   <div class="card-header">
+    <h2>Interface mode</h2>
+  </div>
+  <p class="muted">Base mode is simplified. Advanced mode enables Terminal and Audit views.</p>
+  <form method="post" action="/ui/profile/view-mode" class="form compact">
+    <label class="toggle-row">
+      <input type="checkbox" name="advanced_view" {% if ui_view_mode == "advanced" %}checked{% endif %} />
+      <span>Enable advanced view (current interface)</span>
+    </label>
+    <div class="muted">
+      Current mode:
+      {% if ui_view_mode == "advanced" %}
+      Advanced
+      {% else %}
+      Base
+      {% endif %}
+    </div>
+    <div class="modal-actions">
+      <button type="submit">Save view mode</button>
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <div class="card-header">
     <h2>Profile picture</h2>
   </div>
   <div class="profile-avatar-section">
@@ -116,7 +140,7 @@
       </select>
     </label>
     <div class="modal-actions">
-      <button type="submit">Save contact settings</button>
+      <button type="submit">Save preferences</button>
       <button
         type="submit"
         formaction="/ui/profile/email/send-verification"

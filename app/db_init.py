@@ -88,6 +88,8 @@ def ensure_schema() -> str:
             stmts.append("ALTER TABLE users ADD COLUMN profile_image_tag VARCHAR(64)")
         if not has_column("users", "profile_image_mime_type"):
             stmts.append("ALTER TABLE users ADD COLUMN profile_image_mime_type VARCHAR(255)")
+        if not has_column("users", "ui_view_mode"):
+            stmts.append("ALTER TABLE users ADD COLUMN ui_view_mode VARCHAR(16) NOT NULL DEFAULT 'base'")
         if not has_column("users", "is_admin"):
             stmts.append("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE")
         if not has_column("users", "is_superadmin"):
@@ -157,6 +159,16 @@ def ensure_schema() -> str:
 
         # Ensure at least one system administrator exists for admin UI bootstrap.
         if "users" in table_names:
+            conn.execute(
+                text(
+                    """
+                    UPDATE users
+                    SET ui_view_mode = 'base'
+                    WHERE ui_view_mode IS NULL
+                       OR ui_view_mode NOT IN ('base', 'advanced')
+                    """
+                )
+            )
             has_admin = conn.execute(text("SELECT EXISTS(SELECT 1 FROM users WHERE is_admin = TRUE)")).scalar()
             if not has_admin:
                 promoted = conn.execute(

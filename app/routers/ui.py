@@ -76,6 +76,10 @@ templates = Jinja2Templates(directory="templates")
 logger = logging.getLogger("uvicorn.error")
 _FILE_TOKEN_CACHE: dict[str, dict[str, str]] = {}
 _TERMINAL_SCOPE_CACHE: dict[str, dict[str, str]] = {}
+_PENDING_LOGIN_CACHE: dict[str, dict[str, object]] = {}
+_PENDING_LOGIN_TTL_SECONDS = 10 * 60
+_PENDING_PASSWORD_RESET_CACHE: dict[str, dict[str, object]] = {}
+_PENDING_PASSWORD_RESET_TTL_SECONDS = 15 * 60
 
 _TERMINAL_COMMANDS = [
     "help",
@@ -148,6 +152,9 @@ MFA_METHOD_LABELS = {
     MFA_METHOD_EMAIL: "Email code (SMTP)",
     MFA_METHOD_SMS: "SMS code",
 }
+UI_VIEW_BASE = "base"
+UI_VIEW_ADVANCED = "advanced"
+UI_VIEW_MODES = (UI_VIEW_BASE, UI_VIEW_ADVANCED)
 
 PROFILE_IMAGE_MIME_ALLOW = {
     "image/png",
@@ -174,6 +181,55 @@ SUPPORT_TICKET_CATEGORIES: dict[str, str] = {
 }
 SUPPORT_TICKET_PRIORITIES: tuple[str, ...] = ("low", "normal", "high", "urgent")
 SUPPORT_TICKET_STATUSES: tuple[str, ...] = ("open", "in_progress", "waiting_on_user", "resolved", "closed")
+ADMIN_TICKET_SHORTCUTS: dict[str, dict[str, object]] = {
+    "take": {"status": "in_progress", "priority": None, "label": "Take ownership"},
+    "need_info": {"status": "waiting_on_user", "priority": None, "label": "Need user info"},
+    "resolve": {"status": "resolved", "priority": None, "label": "Mark resolved"},
+    "close": {"status": "closed", "priority": None, "label": "Close ticket"},
+    "reopen": {"status": "open", "priority": None, "label": "Reopen ticket"},
+    "escalate": {"status": "in_progress", "priority": "urgent", "label": "Escalate urgent"},
+}
+ADMIN_TICKET_RESPONSE_TEMPLATES: dict[str, dict[str, object]] = {
+    "need_info": {
+        "label": "Request more details",
+        "shortcut": "need_info",
+        "body": (
+            "Hello {username},\n\n"
+            "We reviewed your request (ticket {ticket_id}) and need more detail to continue:\n"
+            "- What exact steps triggered the issue?\n"
+            "- Any error message text or screenshot?\n"
+            "- Approximate UTC time this occurred?\n\n"
+            "Reply in the Help page and we will continue immediately."
+        ),
+    },
+    "investigating": {
+        "label": "Investigating update",
+        "shortcut": "take",
+        "body": (
+            "Hello {username},\n\n"
+            "Thanks for the report. We have started investigation on ticket {ticket_id} and "
+            "will update you as soon as we confirm root cause and remediation steps."
+        ),
+    },
+    "resolved": {
+        "label": "Resolved confirmation",
+        "shortcut": "resolve",
+        "body": (
+            "Hello {username},\n\n"
+            "We implemented a fix for ticket {ticket_id}. Please verify and confirm the issue is resolved. "
+            "If the problem persists, reply with the latest behavior and we will reopen immediately."
+        ),
+    },
+    "closed": {
+        "label": "Closed notice",
+        "shortcut": "close",
+        "body": (
+            "Hello {username},\n\n"
+            "Ticket {ticket_id} has been closed based on current resolution state. "
+            "If you need follow-up, submit a new ticket referencing this id."
+        ),
+    },
+}
 
 
 def _normalize_ticket_category(value: str | None) -> str:
@@ -189,6 +245,38 @@ def _normalize_ticket_priority(value: str | None) -> str:
 def _normalize_ticket_status(value: str | None) -> str:
     key = (value or "").strip().lower()
     return key if key in SUPPORT_TICKET_STATUSES else ""
+
+
+def _normalize_admin_ticket_shortcut(value: str | None) -> str:
+    key = (value or "").strip().lower()
+    return key if key in ADMIN_TICKET_SHORTCUTS else ""
+
+
+def _render_admin_ticket_response_template(key: str, ticket: SupportTicket) -> str:
+    row = ADMIN_TICKET_RESPONSE_TEMPLATES.get((key or "").strip().lower())
+    if not row:
+        return ""
+    requester_name = ticket.requester.username if ticket.requester else "user"
+    body = str(row.get("body", ""))
+    return body.format(
+        username=requester_name,
+        ticket_id=ticket.id,
+        subject=ticket.subject or "",
+    ).strip()
+
+
+def _admin_ticket_response_rows() -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for key, meta in ADMIN_TICKET_RESPONSE_TEMPLATES.items():
+        shortcut_key = _normalize_admin_ticket_shortcut(str(meta.get("shortcut", "")))
+        rows.append(
+            {
+                "key": key,
+                "label": str(meta.get("label", key)),
+                "shortcut": shortcut_key or "need_info",
+            }
+        )
+    return rows
 
 SMS_PROVIDER_SMTP_GATEWAY = "smtp_gateway"
 SMS_PROVIDER_TWILIO = "twilio"
@@ -218,6 +306,109 @@ def _normalize_mfa_method(value: str | None) -> str:
     if method in MFA_METHODS:
         return method
     return ""
+
+
+def _normalize_ui_view_mode(value: str | None) -> str:
+    mode = (value or "").strip().lower()
+    if mode in UI_VIEW_MODES:
+        return mode
+    return UI_VIEW_BASE
+
+
+def _is_advanced_view_enabled(user: User | None) -> bool:
+    if not user:
+        return False
+    return _normalize_ui_view_mode(getattr(user, "ui_view_mode", None)) == UI_VIEW_ADVANCED
+
+
+def _advanced_view_redirect(message: str = "Advanced view is required for this page.") -> RedirectResponse:
+    return RedirectResponse(url=f"/ui/profile?error={quote_plus(message)}", status_code=303)
+
+
+def _cleanup_pending_login_cache(now: datetime | None = None) -> None:
+    current = now or datetime.utcnow()
+    expired_tokens = [
+        token
+        for token, row in _PENDING_LOGIN_CACHE.items()
+        if not isinstance(row.get("expires_at"), datetime) or row["expires_at"] <= current
+    ]
+    for token in expired_tokens:
+        _PENDING_LOGIN_CACHE.pop(token, None)
+
+
+def _issue_pending_login_token(user: User) -> str:
+    _cleanup_pending_login_cache()
+    token = secrets.token_urlsafe(32)
+    _PENDING_LOGIN_CACHE[token] = {
+        "user_id": str(user.id),
+        "username": user.username,
+        "expires_at": datetime.utcnow() + timedelta(seconds=_PENDING_LOGIN_TTL_SECONDS),
+    }
+    return token
+
+
+def _resolve_pending_login(token: str | None) -> dict[str, object] | None:
+    value = (token or "").strip()
+    if not value:
+        return None
+    _cleanup_pending_login_cache()
+    row = _PENDING_LOGIN_CACHE.get(value)
+    if not row:
+        return None
+    expires_at = row.get("expires_at")
+    if not isinstance(expires_at, datetime) or expires_at <= datetime.utcnow():
+        _PENDING_LOGIN_CACHE.pop(value, None)
+        return None
+    return row
+
+
+def _clear_pending_login(token: str | None) -> None:
+    value = (token or "").strip()
+    if value:
+        _PENDING_LOGIN_CACHE.pop(value, None)
+
+
+def _cleanup_pending_password_reset_cache(now: datetime | None = None) -> None:
+    current = now or datetime.utcnow()
+    expired_tokens = [
+        token
+        for token, row in _PENDING_PASSWORD_RESET_CACHE.items()
+        if not isinstance(row.get("expires_at"), datetime) or row["expires_at"] <= current
+    ]
+    for token in expired_tokens:
+        _PENDING_PASSWORD_RESET_CACHE.pop(token, None)
+
+
+def _issue_pending_password_reset_token(user: User) -> str:
+    _cleanup_pending_password_reset_cache()
+    token = secrets.token_urlsafe(32)
+    _PENDING_PASSWORD_RESET_CACHE[token] = {
+        "user_id": str(user.id),
+        "username": user.username,
+        "expires_at": datetime.utcnow() + timedelta(seconds=_PENDING_PASSWORD_RESET_TTL_SECONDS),
+    }
+    return token
+
+
+def _resolve_pending_password_reset(token: str | None) -> dict[str, object] | None:
+    value = (token or "").strip()
+    if not value:
+        return None
+    _cleanup_pending_password_reset_cache()
+    row = _PENDING_PASSWORD_RESET_CACHE.get(value)
+    if not row:
+        return None
+    expires_at = row.get("expires_at")
+    if not isinstance(expires_at, datetime) or expires_at <= datetime.utcnow():
+        _PENDING_PASSWORD_RESET_CACHE.pop(value, None)
+        return None
+    return row
+
+
+def _clear_pending_password_reset(token: str | None) -> None:
+    value = (token or "").strip()
+    if value:
+        _PENDING_PASSWORD_RESET_CACHE.pop(value, None)
 
 
 def _mask_email(value: str) -> str:
@@ -1581,6 +1772,27 @@ def _render_login_page(
     error: str | None = None,
     notice: str | None = None,
     username: str = "",
+    status_code: int = 200,
+):
+    return templates.TemplateResponse(
+        "login.html",
+        {
+            "request": request,
+            "error": error,
+            "notice": notice,
+            "username": username,
+        },
+        status_code=status_code,
+    )
+
+
+def _render_login_mfa_page(
+    request: Request,
+    *,
+    pending_token: str,
+    username: str,
+    error: str | None = None,
+    notice: str | None = None,
     mfa_method: str = MFA_METHOD_TOTP,
     mfa_methods: list[str] | None = None,
     status_code: int = 200,
@@ -1591,12 +1803,13 @@ def _render_login_page(
         selected = methods[0]
     method_rows = [{"value": item, "label": _mfa_method_display(item)} for item in methods]
     return templates.TemplateResponse(
-        "login.html",
+        "login_mfa.html",
         {
             "request": request,
             "error": error,
             "notice": notice,
             "username": username,
+            "pending_token": pending_token,
             "mfa_method": selected,
             "mfa_methods": method_rows,
         },
@@ -1604,9 +1817,481 @@ def _render_login_page(
     )
 
 
+def _render_forgot_password_page(
+    request: Request,
+    *,
+    error: str | None = None,
+    notice: str | None = None,
+    username: str = "",
+    status_code: int = 200,
+):
+    return templates.TemplateResponse(
+        "forgot_password.html",
+        {
+            "request": request,
+            "error": error,
+            "notice": notice,
+            "username": username,
+        },
+        status_code=status_code,
+    )
+
+
+def _render_forgot_password_mfa_page(
+    request: Request,
+    *,
+    pending_token: str,
+    username: str,
+    error: str | None = None,
+    notice: str | None = None,
+    mfa_method: str = MFA_METHOD_TOTP,
+    mfa_methods: list[str] | None = None,
+    status_code: int = 200,
+):
+    selected = _normalize_mfa_method(mfa_method) or MFA_METHOD_TOTP
+    methods = list(mfa_methods or list(MFA_METHODS))
+    if selected not in methods and methods:
+        selected = methods[0]
+    method_rows = [{"value": item, "label": _mfa_method_display(item)} for item in methods]
+    return templates.TemplateResponse(
+        "forgot_password_mfa.html",
+        {
+            "request": request,
+            "error": error,
+            "notice": notice,
+            "username": username,
+            "pending_token": pending_token,
+            "mfa_method": selected,
+            "mfa_methods": method_rows,
+        },
+        status_code=status_code,
+    )
+
+
+def _create_forgot_password_ticket(db: Session, user: User, request: Request) -> tuple[SupportTicket, bool]:
+    now = datetime.utcnow()
+    existing = (
+        db.query(SupportTicket)
+        .filter(
+            SupportTicket.user_id == user.id,
+            SupportTicket.subject == "Password reset request",
+            SupportTicket.status.in_(("open", "in_progress", "waiting_on_user")),
+        )
+        .order_by(SupportTicket.created_at.desc(), SupportTicket.id.desc())
+        .first()
+    )
+    if existing:
+        add_audit_log(
+            db,
+            user=user,
+            event_type="account.password_reset_ticket_reused",
+            details=f"Reused existing open password reset support ticket {existing.id}.",
+            request=request,
+        )
+        db.commit()
+        return existing, False
+
+    detail_text = (
+        f"User '{user.username}' requested password reset from the sign-in page, "
+        "but no MFA methods are configured on the account. "
+        "Admin verification and manual reset are required."
+    )
+    ticket = SupportTicket(
+        user_id=user.id,
+        subject="Password reset request",
+        category="account",
+        priority="high",
+        description=encrypt_message(detail_text),
+        status="open",
+        created_at=now,
+        updated_at=now,
+        closed_at=None,
+        last_admin_update_at=None,
+    )
+    db.add(ticket)
+    db.flush()
+    add_event(
+        db,
+        user,
+        action="support",
+        message=f"Opened support ticket '{ticket.subject}' (high) from forgot-password flow.",
+        level="WARN",
+    )
+    add_audit_log(
+        db,
+        user=user,
+        event_type="account.password_reset_ticket_created",
+        details=f"Created password reset support ticket {ticket.id} (no MFA methods configured).",
+        request=request,
+    )
+    db.commit()
+    return ticket, True
+
+
+def _complete_signin(request: Request, db: Session, user: User) -> RedirectResponse:
+    ensure_user_key(db, user)
+    add_event(db, user, action="auth", message=f"Signed in as '{user.username}'.")
+    add_audit_log(db, user=user, event_type="signin.success", details="Interactive sign-in completed.", request=request)
+    session = create_session(db, user)
+    user.last_login = datetime.utcnow()
+    db.commit()
+
+    response = RedirectResponse(url="/ui", status_code=303)
+    response.set_cookie("pfv_session", str(session.id), httponly=True)
+    return response
+
+
 @router.get("/login")
 def login_page(request: Request):
     return _render_login_page(request)
+
+
+@router.get("/forgot-password")
+def forgot_password_page(request: Request):
+    return _render_forgot_password_page(request)
+
+
+@router.post("/forgot-password")
+def forgot_password_start(
+    request: Request,
+    username: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    normalized_username = (username or "").strip()
+    if not normalized_username:
+        return _render_forgot_password_page(
+            request,
+            error="Username is required.",
+            username=normalized_username,
+            status_code=400,
+        )
+
+    user = db.query(User).filter(User.username == normalized_username).first()
+    if not user:
+        return _render_forgot_password_page(
+            request,
+            notice="If the account exists, recovery steps have been initiated.",
+            username=normalized_username,
+            status_code=200,
+        )
+
+    if getattr(user, "is_disabled", False):
+        add_audit_log(
+            db,
+            user=user,
+            event_type="account.password_reset_blocked_disabled",
+            details="Forgot-password reset attempt blocked (account disabled).",
+            request=request,
+        )
+        db.commit()
+        return _render_forgot_password_page(
+            request,
+            error="Account is disabled. Contact an administrator.",
+            username=normalized_username,
+            status_code=403,
+        )
+
+    configured_methods = _available_mfa_methods(user, transport_ready_only=False)
+    if configured_methods:
+        effective_method = _resolve_mfa_method(user, user.mfa_preferred_method, configured_methods)
+        if not effective_method:
+            add_audit_log(
+                db,
+                user=user,
+                event_type="account.password_reset_failed_mfa_unavailable",
+                details="Forgot-password flow could not resolve an MFA method.",
+                request=request,
+            )
+            db.commit()
+            return _render_forgot_password_page(
+                request,
+                error="MFA is enabled but no recovery method is currently available.",
+                username=normalized_username,
+                status_code=400,
+            )
+
+        pending_token = _issue_pending_password_reset_token(user)
+        add_audit_log(
+            db,
+            user=user,
+            event_type="account.password_reset_started",
+            details=f"Forgot-password flow started with MFA method {effective_method}.",
+            request=request,
+        )
+        db.commit()
+        return _render_forgot_password_mfa_page(
+            request,
+            pending_token=pending_token,
+            username=user.username,
+            notice=f"Recovery started. Verify with {_mfa_method_display(effective_method)} and set a new password.",
+            mfa_method=effective_method,
+            mfa_methods=configured_methods,
+            status_code=200,
+        )
+
+    ticket, created = _create_forgot_password_ticket(db, user, request)
+    message = (
+        f"No MFA methods are configured. Support ticket {ticket.id} was opened for manual password reset."
+        if created
+        else f"No MFA methods are configured. Existing support ticket {ticket.id} is still open."
+    )
+    return _render_forgot_password_page(
+        request,
+        notice=message,
+        username=user.username,
+        status_code=200,
+    )
+
+
+@router.post("/forgot-password/mfa")
+def forgot_password_mfa_action(
+    request: Request,
+    pending_token: str = Form(...),
+    mfa_method: str | None = Form(None),
+    mfa_code: str | None = Form(None),
+    send_mfa_code: str | None = Form(None),
+    totp_code: str | None = Form(None),
+    new_password: str = Form(""),
+    confirm_password: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    pending = _resolve_pending_password_reset(pending_token)
+    if not pending:
+        return _render_forgot_password_page(
+            request,
+            error="Recovery session expired. Start again from username.",
+            status_code=401,
+        )
+
+    user_id_raw = str(pending.get("user_id") or "").strip()
+    username_hint = str(pending.get("username") or "").strip()
+    try:
+        user_id = uuid.UUID(user_id_raw)
+    except ValueError:
+        _clear_pending_password_reset(pending_token)
+        return _render_forgot_password_page(
+            request,
+            error="Recovery session expired. Start again from username.",
+            username=username_hint,
+            status_code=401,
+        )
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        _clear_pending_password_reset(pending_token)
+        return _render_forgot_password_page(
+            request,
+            error="Recovery session expired. Start again from username.",
+            username=username_hint,
+            status_code=401,
+        )
+
+    if getattr(user, "is_disabled", False):
+        add_audit_log(
+            db,
+            user=user,
+            event_type="account.password_reset_blocked_disabled",
+            details="Forgot-password reset attempt blocked (account disabled).",
+            request=request,
+        )
+        db.commit()
+        _clear_pending_password_reset(pending_token)
+        return _render_forgot_password_page(
+            request,
+            error="Account is disabled. Contact an administrator.",
+            username=user.username,
+            status_code=403,
+        )
+
+    configured_methods = _available_mfa_methods(user, transport_ready_only=False)
+    if not configured_methods:
+        _clear_pending_password_reset(pending_token)
+        ticket, created = _create_forgot_password_ticket(db, user, request)
+        notice = (
+            f"No MFA methods are configured. Support ticket {ticket.id} was opened for manual password reset."
+            if created
+            else f"No MFA methods are configured. Existing support ticket {ticket.id} is still open."
+        )
+        return _render_forgot_password_page(request, notice=notice, username=user.username, status_code=200)
+
+    selected_method = _resolve_mfa_method(user, mfa_method, configured_methods)
+    if not selected_method:
+        add_audit_log(
+            db,
+            user=user,
+            event_type="account.password_reset_failed_mfa_unavailable",
+            details="Forgot-password flow could not resolve an MFA method during verification.",
+            request=request,
+        )
+        db.commit()
+        return _render_forgot_password_mfa_page(
+            request,
+            pending_token=pending_token,
+            username=user.username,
+            error="MFA method unavailable for password recovery.",
+            mfa_method=MFA_METHOD_TOTP,
+            mfa_methods=configured_methods,
+            status_code=400,
+        )
+
+    code_value = (mfa_code or totp_code or "").strip()
+    wants_send_code = (send_mfa_code or "").strip().lower() in {"1", "true", "yes", "on", "send"}
+
+    if not wants_send_code:
+        if new_password != confirm_password:
+            return _render_forgot_password_mfa_page(
+                request,
+                pending_token=pending_token,
+                username=user.username,
+                error="New passwords did not match.",
+                mfa_method=selected_method,
+                mfa_methods=configured_methods,
+                status_code=400,
+            )
+        if len(new_password or "") < 10:
+            return _render_forgot_password_mfa_page(
+                request,
+                pending_token=pending_token,
+                username=user.username,
+                error="New password must be at least 10 characters.",
+                mfa_method=selected_method,
+                mfa_methods=configured_methods,
+                status_code=400,
+            )
+
+    if selected_method == MFA_METHOD_TOTP:
+        if not code_value:
+            add_audit_log(
+                db,
+                user=user,
+                event_type="account.password_reset_failed_totp_required",
+                details="Forgot-password reset blocked: TOTP code required.",
+                request=request,
+            )
+            db.commit()
+            return _render_forgot_password_mfa_page(
+                request,
+                pending_token=pending_token,
+                username=user.username,
+                error="Authenticator app code is required.",
+                mfa_method=selected_method,
+                mfa_methods=configured_methods,
+                status_code=401,
+            )
+        if not _verify_totp_for_user(user, code_value):
+            add_audit_log(
+                db,
+                user=user,
+                event_type="account.password_reset_failed_totp_invalid",
+                details="Forgot-password reset blocked: invalid TOTP code.",
+                request=request,
+            )
+            db.commit()
+            return _render_forgot_password_mfa_page(
+                request,
+                pending_token=pending_token,
+                username=user.username,
+                error="Invalid authenticator app code.",
+                mfa_method=selected_method,
+                mfa_methods=configured_methods,
+                status_code=401,
+            )
+    else:
+        if wants_send_code or not code_value:
+            try:
+                destination_hint = _issue_mfa_challenge(user, selected_method)
+            except HTTPException as exc:
+                db.rollback()
+                return _render_forgot_password_mfa_page(
+                    request,
+                    pending_token=pending_token,
+                    username=user.username,
+                    error=str(exc.detail),
+                    mfa_method=selected_method,
+                    mfa_methods=configured_methods,
+                    status_code=exc.status_code,
+                )
+            except Exception as exc:
+                db.rollback()
+                logger.warning("Failed to send %s password-reset MFA code for user %s: %s", selected_method, user.id, exc)
+                return _render_forgot_password_mfa_page(
+                    request,
+                    pending_token=pending_token,
+                    username=user.username,
+                    error=f"Could not send {_mfa_method_display(selected_method).lower()} code right now.",
+                    mfa_method=selected_method,
+                    mfa_methods=configured_methods,
+                    status_code=503,
+                )
+
+            add_audit_log(
+                db,
+                user=user,
+                event_type=f"account.password_reset_challenge_sent_{selected_method}",
+                details=f"Sent forgot-password MFA challenge via {selected_method} to {destination_hint}.",
+                request=request,
+            )
+            db.commit()
+            return _render_forgot_password_mfa_page(
+                request,
+                pending_token=pending_token,
+                username=user.username,
+                notice=f"A 6-digit code was sent to {destination_hint}. Enter it with your new password.",
+                mfa_method=selected_method,
+                mfa_methods=configured_methods,
+                status_code=200,
+            )
+
+        challenge_ok, reason = _verify_mfa_challenge(user, selected_method, code_value)
+        if not challenge_ok:
+            add_audit_log(
+                db,
+                user=user,
+                event_type=f"account.password_reset_failed_{selected_method}",
+                details=f"{selected_method.upper()} MFA verification failed during forgot-password flow: {reason}",
+                request=request,
+            )
+            db.commit()
+            return _render_forgot_password_mfa_page(
+                request,
+                pending_token=pending_token,
+                username=user.username,
+                error=reason,
+                mfa_method=selected_method,
+                mfa_methods=configured_methods,
+                status_code=401,
+            )
+
+    user.password_hash = hash_password(new_password)
+    user.mfa_preferred_method = selected_method
+    _clear_mfa_challenge(user)
+    revoked = (
+        db.query(SessionModel)
+        .filter(SessionModel.user_id == user.id, SessionModel.is_active.is_(True))
+        .update({SessionModel.is_active: False}, synchronize_session=False)
+    )
+    _clear_pending_password_reset(pending_token)
+    add_event(
+        db,
+        user,
+        action="auth",
+        message=f"Password reset via forgot-password flow (revoked {revoked} session(s)).",
+        level="WARN",
+    )
+    add_audit_log(
+        db,
+        user=user,
+        event_type="account.password_reset_completed",
+        details=f"Forgot-password reset completed with MFA method {selected_method}; revoked {revoked} active session(s).",
+        request=request,
+    )
+    db.commit()
+    return _render_login_page(
+        request,
+        notice="Password reset complete. Sign in with your new password.",
+        username=user.username,
+        status_code=200,
+    )
 
 
 @router.get("/register")
@@ -1688,16 +2373,9 @@ def login_action(
     request: Request,
     username: str = Form(...),
     password: str = Form(...),
-    mfa_method: str | None = Form(None),
-    mfa_code: str | None = Form(None),
-    send_mfa_code: str | None = Form(None),
-    totp_code: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
     normalized_username = (username or "").strip()
-    selected_method = _normalize_mfa_method(mfa_method) or MFA_METHOD_TOTP
-    code_value = (mfa_code or totp_code or "").strip()
-    wants_send_code = (send_mfa_code or "").strip().lower() in {"1", "true", "yes", "on", "send"}
 
     user = db.query(User).filter(User.username == normalized_username).first()
     if not user:
@@ -1705,7 +2383,6 @@ def login_action(
             request,
             error="Invalid username or password",
             username=normalized_username,
-            mfa_method=selected_method,
             status_code=401,
         )
     if not verify_password(password, user.password_hash):
@@ -1715,7 +2392,6 @@ def login_action(
             request,
             error="Invalid username or password",
             username=normalized_username,
-            mfa_method=selected_method,
             status_code=401,
         )
 
@@ -1726,13 +2402,12 @@ def login_action(
             request,
             error="Account disabled. Please contact an administrator.",
             username=normalized_username,
-            mfa_method=selected_method,
             status_code=403,
         )
 
     configured_methods = _available_mfa_methods(user, transport_ready_only=False)
     if configured_methods:
-        effective_method = _resolve_mfa_method(user, selected_method, configured_methods)
+        effective_method = _resolve_mfa_method(user, user.mfa_preferred_method, configured_methods)
         if not effective_method:
             add_audit_log(
                 db,
@@ -1746,117 +2421,213 @@ def login_action(
                 request,
                 error="MFA is enabled but no method is available. Contact an administrator.",
                 username=normalized_username,
+                status_code=401,
+            )
+
+        pending_token = _issue_pending_login_token(user)
+        return _render_login_mfa_page(
+            request,
+            pending_token=pending_token,
+            username=normalized_username,
+            notice=f"Password accepted. Complete MFA using {_mfa_method_display(effective_method)}.",
+            mfa_method=effective_method,
+            mfa_methods=configured_methods,
+            status_code=200,
+        )
+
+    return _complete_signin(request, db, user)
+
+
+@router.post("/login/mfa")
+def login_mfa_action(
+    request: Request,
+    pending_token: str = Form(...),
+    mfa_method: str | None = Form(None),
+    mfa_code: str | None = Form(None),
+    send_mfa_code: str | None = Form(None),
+    totp_code: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    pending = _resolve_pending_login(pending_token)
+    if not pending:
+        return _render_login_page(
+            request,
+            error="Sign-in session expired. Enter your username and password again.",
+            status_code=401,
+        )
+
+    user_id_raw = str(pending.get("user_id") or "").strip()
+    username_hint = str(pending.get("username") or "").strip()
+    try:
+        user_id = uuid.UUID(user_id_raw)
+    except ValueError:
+        _clear_pending_login(pending_token)
+        return _render_login_page(
+            request,
+            error="Sign-in session expired. Enter your username and password again.",
+            username=username_hint,
+            status_code=401,
+        )
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        _clear_pending_login(pending_token)
+        return _render_login_page(
+            request,
+            error="Sign-in session expired. Enter your username and password again.",
+            username=username_hint,
+            status_code=401,
+        )
+
+    if getattr(user, "is_disabled", False):
+        add_audit_log(db, user=user, event_type="signin.blocked_disabled", details="Interactive sign-in blocked (account disabled).", request=request)
+        db.commit()
+        _clear_pending_login(pending_token)
+        return _render_login_page(
+            request,
+            error="Account disabled. Please contact an administrator.",
+            username=user.username,
+            status_code=403,
+        )
+
+    configured_methods = _available_mfa_methods(user, transport_ready_only=False)
+    if not configured_methods:
+        _clear_pending_login(pending_token)
+        return _complete_signin(request, db, user)
+
+    selected_method = _resolve_mfa_method(user, mfa_method, configured_methods)
+    if not selected_method:
+        add_audit_log(
+            db,
+            user=user,
+            event_type="signin.failed_mfa_unavailable",
+            details="No MFA method is currently available for this account.",
+            request=request,
+        )
+        db.commit()
+        return _render_login_mfa_page(
+            request,
+            pending_token=pending_token,
+            username=user.username,
+            error="MFA is enabled but no method is available. Contact an administrator.",
+            mfa_method=MFA_METHOD_TOTP,
+            mfa_methods=configured_methods,
+            status_code=401,
+        )
+
+    code_value = (mfa_code or totp_code or "").strip()
+    wants_send_code = (send_mfa_code or "").strip().lower() in {"1", "true", "yes", "on", "send"}
+
+    if selected_method == MFA_METHOD_TOTP:
+        if not code_value:
+            add_audit_log(db, user=user, event_type="signin.failed_totp_required", details="TOTP code required.", request=request)
+            db.commit()
+            return _render_login_mfa_page(
+                request,
+                pending_token=pending_token,
+                username=user.username,
+                error="Authenticator app code is required.",
+                mfa_method=selected_method,
+                mfa_methods=configured_methods,
+                status_code=401,
+            )
+        if not _verify_totp_for_user(user, code_value):
+            add_audit_log(db, user=user, event_type="signin.failed_totp_invalid", details="Invalid TOTP code.", request=request)
+            db.commit()
+            return _render_login_mfa_page(
+                request,
+                pending_token=pending_token,
+                username=user.username,
+                error="Invalid authenticator app code.",
                 mfa_method=selected_method,
                 mfa_methods=configured_methods,
                 status_code=401,
             )
 
-        if effective_method == MFA_METHOD_TOTP:
-            if not code_value:
-                add_audit_log(db, user=user, event_type="signin.failed_totp_required", details="TOTP code required.", request=request)
-                db.commit()
-                return _render_login_page(
+        add_audit_log(
+            db,
+            user=user,
+            event_type="mfa.verified_totp",
+            details="TOTP MFA verified during sign-in.",
+            request=request,
+        )
+    else:
+        if wants_send_code or not code_value:
+            try:
+                destination_hint = _issue_mfa_challenge(user, selected_method)
+            except HTTPException as exc:
+                db.rollback()
+                return _render_login_mfa_page(
                     request,
-                    error="Authenticator app code is required.",
-                    username=normalized_username,
-                    mfa_method=effective_method,
+                    pending_token=pending_token,
+                    username=user.username,
+                    error=str(exc.detail),
+                    mfa_method=selected_method,
                     mfa_methods=configured_methods,
-                    status_code=401,
+                    status_code=exc.status_code,
                 )
-            if not _verify_totp_for_user(user, code_value):
-                add_audit_log(db, user=user, event_type="signin.failed_totp_invalid", details="Invalid TOTP code.", request=request)
-                db.commit()
-                return _render_login_page(
+            except Exception as exc:
+                db.rollback()
+                logger.warning("Failed to send %s MFA code for user %s: %s", selected_method, user.id, exc)
+                return _render_login_mfa_page(
                     request,
-                    error="Invalid authenticator app code.",
-                    username=normalized_username,
-                    mfa_method=effective_method,
+                    pending_token=pending_token,
+                    username=user.username,
+                    error=f"Could not send {_mfa_method_display(selected_method).lower()} code right now.",
+                    mfa_method=selected_method,
                     mfa_methods=configured_methods,
-                    status_code=401,
-                )
-        else:
-            if wants_send_code or not code_value:
-                try:
-                    destination_hint = _issue_mfa_challenge(user, effective_method)
-                except HTTPException as exc:
-                    db.rollback()
-                    return _render_login_page(
-                        request,
-                        error=str(exc.detail),
-                        username=normalized_username,
-                        mfa_method=effective_method,
-                        mfa_methods=configured_methods,
-                        status_code=exc.status_code,
-                    )
-                except Exception as exc:
-                    db.rollback()
-                    logger.warning("Failed to send %s MFA code for user %s: %s", effective_method, user.id, exc)
-                    return _render_login_page(
-                        request,
-                        error=f"Could not send {_mfa_method_display(effective_method).lower()} code right now.",
-                        username=normalized_username,
-                        mfa_method=effective_method,
-                        mfa_methods=configured_methods,
-                        status_code=503,
-                    )
-
-                add_audit_log(
-                    db,
-                    user=user,
-                    event_type=f"mfa.challenge_sent_{effective_method}",
-                    details=f"Sent MFA challenge via {effective_method} to {destination_hint}.",
-                    request=request,
-                )
-                db.commit()
-                return _render_login_page(
-                    request,
-                    notice=f"A 6-digit code was sent to {destination_hint}. Enter it to complete sign in.",
-                    username=normalized_username,
-                    mfa_method=effective_method,
-                    mfa_methods=configured_methods,
-                    status_code=401,
-                )
-
-            challenge_ok, reason = _verify_mfa_challenge(user, effective_method, code_value)
-            if not challenge_ok:
-                add_audit_log(
-                    db,
-                    user=user,
-                    event_type=f"signin.failed_{effective_method}_mfa",
-                    details=f"{effective_method.upper()} MFA verification failed: {reason}",
-                    request=request,
-                )
-                db.commit()
-                return _render_login_page(
-                    request,
-                    error=reason,
-                    username=normalized_username,
-                    mfa_method=effective_method,
-                    mfa_methods=configured_methods,
-                    status_code=401,
+                    status_code=503,
                 )
 
             add_audit_log(
                 db,
                 user=user,
-                event_type=f"mfa.verified_{effective_method}",
-                details=f"{effective_method.upper()} MFA challenge verified during sign-in.",
+                event_type=f"mfa.challenge_sent_{selected_method}",
+                details=f"Sent MFA challenge via {selected_method} to {destination_hint}.",
                 request=request,
             )
             db.commit()
+            return _render_login_mfa_page(
+                request,
+                pending_token=pending_token,
+                username=user.username,
+                notice=f"A 6-digit code was sent to {destination_hint}. Enter it to complete sign in.",
+                mfa_method=selected_method,
+                mfa_methods=configured_methods,
+                status_code=200,
+            )
 
-        user.mfa_preferred_method = effective_method
+        challenge_ok, reason = _verify_mfa_challenge(user, selected_method, code_value)
+        if not challenge_ok:
+            add_audit_log(
+                db,
+                user=user,
+                event_type=f"signin.failed_{selected_method}_mfa",
+                details=f"{selected_method.upper()} MFA verification failed: {reason}",
+                request=request,
+            )
+            db.commit()
+            return _render_login_mfa_page(
+                request,
+                pending_token=pending_token,
+                username=user.username,
+                error=reason,
+                mfa_method=selected_method,
+                mfa_methods=configured_methods,
+                status_code=401,
+            )
 
-    ensure_user_key(db, user)
-    add_event(db, user, action="auth", message=f"Signed in as '{user.username}'.")
-    add_audit_log(db, user=user, event_type="signin.success", details="Interactive sign-in completed.", request=request)
-    session = create_session(db, user)
-    user.last_login = datetime.utcnow()
-    db.commit()
+        add_audit_log(
+            db,
+            user=user,
+            event_type=f"mfa.verified_{selected_method}",
+            details=f"{selected_method.upper()} MFA challenge verified during sign-in.",
+            request=request,
+        )
 
-    response = RedirectResponse(url="/ui", status_code=303)
-    response.set_cookie("pfv_session", str(session.id), httponly=True)
-    return response
+    user.mfa_preferred_method = selected_method
+    _clear_pending_login(pending_token)
+    return _complete_signin(request, db, user)
 
 
 @router.get("")
@@ -2012,6 +2783,8 @@ def help_page(
         rows.append(
             {
                 "ticket": ticket,
+                "requester_username": user.username,
+                "assigned_admin_username": ticket.assigned_admin.username if ticket.assigned_admin else "",
                 "description": body,
                 "description_preview": body_preview,
                 "admin_reply": admin_reply,
@@ -2634,6 +3407,8 @@ def audit_log_page(
     user = _get_current_user(db, request)
     if not user:
         return RedirectResponse(url="/ui/login", status_code=303)
+    if not _is_advanced_view_enabled(user):
+        return _advanced_view_redirect("Enable advanced view in Profile to access Audit.")
 
     event_filter = (event or "").strip()
     text_filter = (q or "").strip()
@@ -2699,6 +3474,8 @@ def admin_audit_log_page(
         return RedirectResponse(url="/ui/login", status_code=303)
     if not admin_user.is_admin:
         return RedirectResponse(url="/ui", status_code=303)
+    if not _is_advanced_view_enabled(admin_user):
+        return _advanced_view_redirect("Enable advanced view in Profile to access Admin Audit.")
 
     username_filter = (username or "").strip()
     event_filter = (event or "").strip()
@@ -2836,10 +3613,13 @@ def admin_help_inbox(
         reply = decrypt_message(ticket.admin_reply or "").replace("\n", " ").strip() if ticket.admin_reply else ""
         if len(reply) > 120:
             reply = f"{reply[:117]}..."
+        requester = ticket.requester
         rows.append(
             {
                 "ticket": ticket,
-                "requester_username": ticket.requester.username if ticket.requester else "(unknown)",
+                "requester_username": requester.username if requester else "(unknown)",
+                "requester_email": requester.email if requester and requester.email else "",
+                "requester_mfa_summary": _mfa_summary_for_user(requester) if requester else "Unknown",
                 "assigned_admin_username": ticket.assigned_admin.username if ticket.assigned_admin else "",
                 "description_preview": body or "-",
                 "admin_reply_preview": reply or "",
@@ -2869,6 +3649,16 @@ def admin_help_inbox(
             },
             "status_options": SUPPORT_TICKET_STATUSES,
             "priority_options": SUPPORT_TICKET_PRIORITIES,
+            "shortcut_rows": [
+                {
+                    "key": key,
+                    "label": str(meta.get("label", key)),
+                    "status": str(meta.get("status", "")),
+                    "priority": str(meta.get("priority", "")) if meta.get("priority") else "",
+                }
+                for key, meta in ADMIN_TICKET_SHORTCUTS.items()
+            ],
+            "response_templates": _admin_ticket_response_rows(),
             "notice": request.query_params.get("notice"),
             "error": request.query_params.get("error"),
             "title": "Admin Help Inbox",
@@ -2907,11 +3697,33 @@ def admin_help_detail(ticket_id: str, request: Request, db: Session = Depends(ge
             "request": request,
             "user": admin_user,
             "ticket": ticket,
+            "requester_username": ticket.requester.username if ticket.requester else "(unknown)",
+            "requester_email": (ticket.requester.email or "") if ticket.requester else "",
+            "requester_phone": (ticket.requester.phone_number or "") if ticket.requester else "",
+            "requester_mfa_summary": _mfa_summary_for_user(ticket.requester) if ticket.requester else "Unknown",
             "description": decrypt_message(ticket.description or ""),
             "admin_reply": decrypt_message(ticket.admin_reply or "") if ticket.admin_reply else "",
             "category_label": SUPPORT_TICKET_CATEGORIES.get(ticket.category, ticket.category),
             "status_options": SUPPORT_TICKET_STATUSES,
             "priority_options": SUPPORT_TICKET_PRIORITIES,
+            "shortcut_rows": [
+                {
+                    "key": key,
+                    "label": str(meta.get("label", key)),
+                    "status": str(meta.get("status", "")),
+                    "priority": str(meta.get("priority", "")) if meta.get("priority") else "",
+                }
+                for key, meta in ADMIN_TICKET_SHORTCUTS.items()
+            ],
+            "response_templates": [
+                {
+                    "key": row["key"],
+                    "label": row["label"],
+                    "shortcut": row["shortcut"],
+                    "body": _render_admin_ticket_response_template(row["key"], ticket),
+                }
+                for row in _admin_ticket_response_rows()
+            ],
             "notice": request.query_params.get("notice"),
             "error": request.query_params.get("error"),
             "title": "Help ticket detail",
@@ -2927,6 +3739,8 @@ def admin_help_update_ticket(
     priority: str = Form(...),
     admin_reply: str = Form(""),
     clear_reply: str | None = Form(None),
+    response_template: str | None = Form(None),
+    append_template: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
     admin_user = _get_current_user(db, request)
@@ -2958,6 +3772,14 @@ def admin_help_update_ticket(
         return _admin_help_redirect("Invalid ticket priority.", error=True, ticket_id=str(ticket.id))
 
     reply_text = (admin_reply or "").strip()
+    template_key = (response_template or "").strip().lower()
+    template_text = _render_admin_ticket_response_template(template_key, ticket) if template_key else ""
+    append_template_flag = (append_template or "").strip().lower() in {"1", "true", "on", "yes"}
+    if template_text:
+        if append_template_flag and reply_text:
+            reply_text = f"{reply_text}\n\n{template_text}".strip()
+        elif not reply_text:
+            reply_text = template_text
     if len(reply_text) > 8000:
         return _admin_help_redirect("Admin response is too long (max 8000 characters).", error=True, ticket_id=str(ticket.id))
 
@@ -3000,6 +3822,99 @@ def admin_help_update_ticket(
         )
     db.commit()
     return _admin_help_redirect("Ticket updated.", ticket_id=str(ticket.id))
+
+
+@router.post("/admin/help/{ticket_id}/shortcut")
+def admin_help_shortcut_ticket(
+    ticket_id: str,
+    request: Request,
+    action: str = Form(...),
+    response_template: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    try:
+        tid = uuid.UUID(ticket_id)
+    except ValueError:
+        return _admin_help_redirect("Invalid ticket id.", error=True)
+
+    ticket = (
+        db.query(SupportTicket)
+        .options(joinedload(SupportTicket.requester), joinedload(SupportTicket.assigned_admin))
+        .filter(SupportTicket.id == tid)
+        .first()
+    )
+    if not ticket:
+        return _admin_help_redirect("Ticket not found.", error=True)
+
+    action_key = _normalize_admin_ticket_shortcut(action)
+    if not action_key:
+        return _admin_help_redirect("Unsupported shortcut action.", error=True, ticket_id=str(ticket.id))
+
+    action_meta = ADMIN_TICKET_SHORTCUTS[action_key]
+    status_value = _normalize_ticket_status(str(action_meta.get("status", "")))
+    if not status_value:
+        return _admin_help_redirect("Shortcut action is missing a valid status target.", error=True, ticket_id=str(ticket.id))
+
+    priority_value = (str(action_meta.get("priority", "")) or ticket.priority or "normal").strip().lower()
+    if priority_value not in SUPPORT_TICKET_PRIORITIES:
+        priority_value = ticket.priority if ticket.priority in SUPPORT_TICKET_PRIORITIES else "normal"
+
+    now = datetime.utcnow()
+    ticket.status = status_value
+    ticket.priority = priority_value
+    ticket.assigned_admin_id = admin_user.id
+    ticket.updated_at = now
+    ticket.last_admin_update_at = now
+    if status_value in {"resolved", "closed"}:
+        ticket.closed_at = now
+    else:
+        ticket.closed_at = None
+
+    template_key = (response_template or "").strip().lower()
+    template_text = _render_admin_ticket_response_template(template_key, ticket) if template_key else ""
+    if template_text:
+        existing_reply = decrypt_message(ticket.admin_reply or "").strip() if ticket.admin_reply else ""
+        merged = f"{existing_reply}\n\n{template_text}".strip() if existing_reply else template_text
+        if len(merged) > 8000:
+            return _admin_help_redirect(
+                "Shortcut response would exceed 8000 characters.",
+                error=True,
+                ticket_id=str(ticket.id),
+            )
+        ticket.admin_reply = encrypt_message(merged)
+
+    requester_name = ticket.requester.username if ticket.requester else "(unknown)"
+    shortcut_label = str(action_meta.get("label", action_key))
+    add_audit_log(
+        db,
+        user=admin_user,
+        event_type="admin.support_ticket_shortcut",
+        details=(
+            f"Applied shortcut '{action_key}' on support ticket {ticket.id} "
+            f"for '{requester_name}' (status={status_value}, priority={priority_value}, "
+            f"template={'none' if not template_key else template_key})."
+        ),
+        request=request,
+    )
+    if ticket.requester:
+        add_audit_log(
+            db,
+            user=ticket.requester,
+            event_type="support.ticket_updated_by_admin",
+            details=(
+                f"Support ticket {ticket.id} updated via admin shortcut '{shortcut_label}' "
+                f"(status={status_value})."
+            ),
+            request=request,
+        )
+    db.commit()
+    return _admin_help_redirect(f"Shortcut applied: {shortcut_label}.", ticket_id=str(ticket.id))
 
 
 @router.get("/admin/reports")
@@ -3795,6 +4710,7 @@ def profile_page(request: Request, db: Session = Depends(get_db)):
         {
             "request": request,
             "user": user,
+            "ui_view_mode": _normalize_ui_view_mode(user.ui_view_mode),
             "notice": request.query_params.get("notice"),
             "error": request.query_params.get("error"),
             "smtp_ready": _smtp_configured(),
@@ -3923,6 +4839,43 @@ def profile_remove_avatar(request: Request, db: Session = Depends(get_db)):
             logger.warning("Could not remove avatar file for user %s", user.id)
 
     return _profile_redirect("Profile picture removed.")
+
+
+@router.post("/profile/view-mode")
+def profile_update_view_mode(
+    request: Request,
+    advanced_view: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+
+    wants_advanced_view = (advanced_view or "").strip().lower() in {"1", "true", "on", "yes"}
+    requested_ui_mode = UI_VIEW_ADVANCED if wants_advanced_view else UI_VIEW_BASE
+    current_ui_mode = _normalize_ui_view_mode(user.ui_view_mode)
+    if current_ui_mode == requested_ui_mode and (user.ui_view_mode or "") == requested_ui_mode:
+        return _profile_redirect("View mode is already set.")
+
+    user.ui_view_mode = requested_ui_mode
+    add_audit_log(
+        db,
+        user=user,
+        event_type="account.profile_view_mode_updated",
+        details=f"Updated interface view mode to {requested_ui_mode}.",
+        request=request,
+    )
+    db.commit()
+    label = "Advanced" if requested_ui_mode == UI_VIEW_ADVANCED else "Base"
+    return _profile_redirect(f"View mode updated to {label}.")
+
+
+@router.get("/profile/view-mode")
+def profile_view_mode_redirect(request: Request, db: Session = Depends(get_db)):
+    user = _get_current_user(db, request)
+    if not user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    return RedirectResponse(url="/ui/profile", status_code=303)
 
 
 @router.post("/profile/preferences")
@@ -4718,6 +5671,8 @@ def terminal_command(
     user = _get_current_user(db, request)
     if not user:
         raise HTTPException(status_code=401, detail="Not authenticated")
+    if not _is_advanced_view_enabled(user):
+        raise HTTPException(status_code=403, detail="Terminal is available only in advanced view.")
 
     cmd, args = _parse_terminal_command(command)
     if cmd == "help":
@@ -6326,6 +7281,8 @@ def terminal_suggest(
     user = _get_current_user(db, request)
     if not user:
         raise HTTPException(status_code=401, detail="Not authenticated")
+    if not _is_advanced_view_enabled(user):
+        raise HTTPException(status_code=403, detail="Terminal is available only in advanced view.")
 
     scope = _terminal_get_scope(request)
     root, _ = _terminal_root_for_scope(user, scope)

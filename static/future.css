@@ -913,6 +913,24 @@ body[data-ui="future"].page-register .content {
   justify-items: center;
 }
 
+body[data-ui="future"].page-login .content {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  width: min(580px, calc(100% - 2.2rem));
+  max-width: 580px;
+  margin-inline: auto;
+  padding-inline: 0;
+  padding-top: clamp(1.2rem, 6vh, 3rem);
+  padding-bottom: clamp(1.2rem, 6vh, 3rem);
+}
+
+body[data-ui="future"].page-login .content > .card {
+  width: 100%;
+  margin: 0;
+}
+
 body[data-ui="future"].page-login .site-footer,
 body[data-ui="future"].page-register .site-footer {
   grid-column: auto;
@@ -1822,6 +1840,252 @@ body[data-ui="future"] .filters-form > .filters-actions > * {
   margin: 0;
 }
 
+body[data-ui="future"].page-help .help-ticket-form {
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  align-items: start;
+  gap: 0.78rem;
+}
+
+body[data-ui="future"].page-help .help-ticket-form > label {
+  min-width: 0;
+  grid-column: span 4;
+}
+
+body[data-ui="future"].page-help .help-ticket-form > .help-ticket-subject {
+  grid-column: span 5;
+}
+
+body[data-ui="future"].page-help .help-ticket-form > .help-ticket-category {
+  grid-column: span 3;
+}
+
+body[data-ui="future"].page-help .help-ticket-form > .help-ticket-priority {
+  grid-column: span 4;
+}
+
+body[data-ui="future"].page-help .help-ticket-form > .help-ticket-details {
+  grid-column: 1 / -1;
+}
+
+body[data-ui="future"].page-help .help-ticket-form textarea[name="details"] {
+  min-height: 9.5rem;
+  resize: vertical;
+}
+
+body[data-ui="future"].page-help .help-ticket-form > .help-ticket-actions {
+  grid-column: 1 / -1;
+  margin-top: 0.15rem;
+}
+
+body[data-ui="future"].page-help .help-filters-form .help-filter-status {
+  grid-column: span 8;
+}
+
+body[data-ui="future"].page-help .help-filters-form .help-filter-limit {
+  grid-column: span 4;
+}
+
+body[data-ui="future"].page-help .soft-panel {
+  display: grid;
+  gap: 0.62rem;
+}
+
+body[data-ui="future"].page-help .soft-panel .meta-grid {
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+
+body[data-ui="future"].page-help .soft-panel details {
+  margin-top: 0.08rem;
+}
+
+body[data-ui="future"].page-help .content,
+body[data-ui="future"].page-admin-help .content {
+  max-width: 1440px;
+}
+
+body[data-ui="future"].page-admin-help-detail .content {
+  max-width: 1320px;
+}
+
+body[data-ui="future"].page-help .card,
+body[data-ui="future"].page-admin-help .card,
+body[data-ui="future"].page-admin-help-detail .card {
+  border-color: color-mix(in srgb, var(--edge) 58%, transparent);
+  background: linear-gradient(
+      160deg,
+      color-mix(in srgb, var(--card-strong) 84%, transparent),
+      color-mix(in srgb, var(--card) 74%, transparent)
+    );
+}
+
+body[data-ui="future"].page-help .help-ticket-form {
+  grid-auto-flow: row dense;
+  margin-top: 0.35rem;
+}
+
+body[data-ui="future"].page-help .help-ticket-form > .help-ticket-subject {
+  grid-column: 1 / span 5;
+}
+
+body[data-ui="future"].page-help .help-ticket-form > .help-ticket-category {
+  grid-column: 6 / span 3;
+}
+
+body[data-ui="future"].page-help .help-ticket-form > .help-ticket-priority {
+  grid-column: 9 / span 4;
+}
+
+body[data-ui="future"].page-help .help-ticket-form > .help-ticket-details {
+  grid-column: 1 / -1;
+}
+
+body[data-ui="future"].page-help .help-ticket-form > .help-ticket-actions {
+  justify-content: flex-start;
+}
+
+body[data-ui="future"].page-help .help-ticket-form textarea[name="details"] {
+  min-height: 10.5rem;
+}
+
+body[data-ui="future"].page-help .soft-panel {
+  padding: 0.88rem;
+  border-color: color-mix(in srgb, var(--edge) 58%, transparent);
+}
+
+body[data-ui="future"].page-admin-help .ticket-queue-list {
+  margin-top: 0.3rem;
+  display: grid;
+  gap: 0.9rem;
+}
+
+body[data-ui="future"].page-admin-help .ticket-queue-item {
+  display: grid;
+  gap: 0.74rem;
+  border-color: color-mix(in srgb, var(--edge) 60%, transparent);
+  background: linear-gradient(
+      165deg,
+      color-mix(in srgb, var(--card-strong) 76%, transparent),
+      color-mix(in srgb, var(--card) 66%, transparent)
+    );
+}
+
+body[data-ui="future"].page-admin-help .ticket-queue-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+body[data-ui="future"].page-admin-help .ticket-queue-title {
+  min-width: 0;
+  display: grid;
+  gap: 0.24rem;
+}
+
+body[data-ui="future"].page-admin-help .ticket-queue-title h3 {
+  margin: 0;
+  font-size: clamp(1rem, 1vw, 1.2rem);
+  line-height: 1.25;
+}
+
+body[data-ui="future"].page-admin-help .ticket-queue-badges {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+body[data-ui="future"].page-admin-help .ticket-queue-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.58rem;
+}
+
+body[data-ui="future"].page-admin-help .ticket-queue-meta .meta-item {
+  min-width: 0;
+  padding: 0.5rem 0.58rem;
+  border: 1px solid color-mix(in srgb, var(--edge) 54%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--card-strong) 36%, transparent);
+}
+
+body[data-ui="future"].page-admin-help .ticket-queue-meta .meta-item > * {
+  min-width: 0;
+}
+
+body[data-ui="future"].page-admin-help .ticket-queue-meta .meta-item > :not(.label) {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+body[data-ui="future"].page-admin-help .ticket-queue-preview {
+  display: grid;
+  gap: 0.34rem;
+  padding: 0.56rem 0.62rem;
+  border: 1px solid color-mix(in srgb, var(--edge) 54%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--card-strong) 28%, transparent);
+}
+
+body[data-ui="future"].page-admin-help .ticket-queue-preview p {
+  color: var(--ink-soft);
+}
+
+body[data-ui="future"].page-admin-help .ticket-queue-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.44rem;
+}
+
+body[data-ui="future"].page-admin-help .ticket-queue-actions-primary,
+body[data-ui="future"].page-admin-help .ticket-queue-actions-responses {
+  margin-top: 0.05rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed color-mix(in srgb, var(--edge) 52%, transparent);
+}
+
+body[data-ui="future"].page-admin-help .ticket-queue-actions .inline-form {
+  margin: 0;
+}
+
+body[data-ui="future"].page-admin-help .ticket-queue-actions button,
+body[data-ui="future"].page-admin-help .ticket-queue-actions .pill {
+  padding: 0.42rem 0.8rem;
+  font-size: 0.8rem;
+}
+
+body[data-ui="future"].page-admin-help .ticket-queue-actions-responses .label {
+  margin-right: 0.2rem;
+}
+
+body[data-ui="future"].page-admin-help-detail .actions {
+  margin-top: 0.45rem;
+  margin-bottom: 0;
+}
+
+body[data-ui="future"].page-admin-help-detail .actions .inline-form {
+  margin: 0;
+}
+
+body[data-ui="future"].page-admin-help-detail .ticket-shortcut-actions button,
+body[data-ui="future"].page-admin-help-detail .ticket-shortcut-responses button,
+body[data-ui="future"].page-admin-help-detail .ticket-template-actions button {
+  min-height: 2.3rem;
+}
+
+body[data-ui="future"].page-admin-help-detail .ticket-template-actions {
+  margin-top: 0.7rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed color-mix(in srgb, var(--edge) 52%, transparent);
+}
+
+body[data-ui="future"].page-admin-help-detail #adminHelpReply {
+  min-height: 12rem;
+}
+
 @media (max-width: 760px) {
   body[data-ui="future"] .page {
     display: block;
@@ -1965,6 +2229,66 @@ body[data-ui="future"] .filters-form > .filters-actions > * {
   body[data-ui="future"] .filters-form .filter-field-sm,
   body[data-ui="future"] .filters-form .filter-field-lg {
     grid-column: auto;
+  }
+
+  body[data-ui="future"].page-help .help-ticket-form {
+    grid-template-columns: 1fr;
+  }
+
+  body[data-ui="future"].page-help .help-ticket-form > label,
+  body[data-ui="future"].page-help .help-ticket-form > .help-ticket-subject,
+  body[data-ui="future"].page-help .help-ticket-form > .help-ticket-category,
+  body[data-ui="future"].page-help .help-ticket-form > .help-ticket-priority,
+  body[data-ui="future"].page-help .help-ticket-form > .help-ticket-details,
+  body[data-ui="future"].page-help .help-ticket-form > .help-ticket-actions,
+  body[data-ui="future"].page-help .help-filters-form .help-filter-status,
+  body[data-ui="future"].page-help .help-filters-form .help-filter-limit {
+    grid-column: auto;
+  }
+
+  body[data-ui="future"].page-admin-help .ticket-queue-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  body[data-ui="future"].page-admin-help .ticket-queue-badges {
+    justify-content: flex-start;
+  }
+
+  body[data-ui="future"].page-admin-help .ticket-queue-meta {
+    grid-template-columns: 1fr;
+  }
+
+  body[data-ui="future"].page-admin-help .ticket-queue-actions {
+    align-items: stretch;
+  }
+
+  body[data-ui="future"].page-admin-help .ticket-queue-actions .pill,
+  body[data-ui="future"].page-admin-help .ticket-queue-actions .inline-form {
+    width: 100%;
+  }
+
+  body[data-ui="future"].page-admin-help .ticket-queue-actions .inline-form button {
+    width: 100%;
+  }
+
+  body[data-ui="future"].page-admin-help-detail .ticket-shortcut-actions,
+  body[data-ui="future"].page-admin-help-detail .ticket-shortcut-responses,
+  body[data-ui="future"].page-admin-help-detail .ticket-template-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+    width: 100%;
+  }
+
+  body[data-ui="future"].page-admin-help-detail .ticket-shortcut-actions .inline-form,
+  body[data-ui="future"].page-admin-help-detail .ticket-shortcut-responses .inline-form {
+    width: 100%;
+  }
+
+  body[data-ui="future"].page-admin-help-detail .ticket-shortcut-actions button,
+  body[data-ui="future"].page-admin-help-detail .ticket-shortcut-responses button,
+  body[data-ui="future"].page-admin-help-detail .ticket-template-actions button {
+    width: 100%;
   }
 
   body[data-ui="future"] .explorer-card-full .explorer-pane-files .table-wrap {

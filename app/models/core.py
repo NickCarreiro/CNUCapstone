@@ -33,6 +33,7 @@ class User(Base):
     profile_image_nonce: Mapped[str | None] = mapped_column(String(64), nullable=True)
     profile_image_tag: Mapped[str | None] = mapped_column(String(64), nullable=True)
     profile_image_mime_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ui_view_mode: Mapped[str] = mapped_column(String(16), default="base")
     password_hash: Mapped[str] = mapped_column(String(255))
     totp_secret_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)

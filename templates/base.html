@@ -121,6 +121,30 @@
         stroke-linejoin: round;
       }
 
+      body[data-ui="future"][data-view-mode="base"]::before,
+      body[data-ui="future"][data-view-mode="base"]::after {
+        opacity: 0.4;
+        filter: none;
+      }
+
+      body[data-ui="future"][data-view-mode="base"] .site-header {
+        backdrop-filter: none;
+      }
+
+      body[data-ui="future"][data-view-mode="base"] .nav-group,
+      body[data-ui="future"][data-view-mode="base"] .card,
+      body[data-ui="future"][data-view-mode="base"] .profile-pill {
+        box-shadow: none;
+      }
+
+      body[data-ui="future"][data-view-mode="base"] .hero-card::before {
+        display: none;
+      }
+
+      body[data-ui="future"][data-view-mode="base"] .content > * {
+        animation: none;
+      }
+
       @media (max-width: 760px) {
         html.vp-pending body {
           opacity: 0;
@@ -147,10 +171,10 @@
         href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Fraunces:opsz,wght@9..144,600;9..144,700&family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
       />
     </noscript>
-    <link rel="preload" href="/static/style.css?v=28" as="style" />
-    <link rel="preload" href="/static/future.css?v=9" as="style" />
-    <link rel="stylesheet" href="/static/style.css?v=28" />
-    <link rel="stylesheet" href="/static/future.css?v=9" />
+    <link rel="preload" href="/static/style.css?v=29" as="style" />
+    <link rel="preload" href="/static/future.css?v=14" as="style" />
+    <link rel="stylesheet" href="/static/style.css?v=29" />
+    <link rel="stylesheet" href="/static/future.css?v=14" />
     {% if user %}
     <link rel="prefetch" href="/ui" />
     <link rel="prefetch" href="/ui/groups" />
@@ -164,7 +188,10 @@
   </head>
   {% set _cookie_theme = request.cookies.get("pfv-theme") if request else None %}
   {% set _initial_theme = _cookie_theme if _cookie_theme in ["light", "dark"] else "light" %}
-  <body data-ui="future" data-theme="{{ _initial_theme }}" class="{% block body_class %}{% endblock %}{% if user %} has-user-menu{% endif %}">
+  {% set _ui_raw_mode = user.ui_view_mode if user and user.ui_view_mode else "base" %}
+  {% set _ui_view_mode = "advanced" if _ui_raw_mode|trim|lower == "advanced" else "base" %}
+  {% set _is_advanced_view = _ui_view_mode == "advanced" %}
+  <body data-ui="future" data-view-mode="{{ _ui_view_mode }}" data-theme="{{ _initial_theme }}" class="{% block body_class %}{% endblock %}{% if user %} has-user-menu{% endif %}">
     <div class="page">
       <header class="site-header">
         <div class="container header-inner">
@@ -175,11 +202,12 @@
           <div class="toolbar">
             {% if user %}
             {% set _path = request.url.path if request else "" %}
-            {% set _workspace_open = _path.startswith("/ui/help") or _path == "/ui/audit" or _path == "/ui/trash" %}
+            {% set _workspace_open = _path.startswith("/ui/help") or _path == "/ui/trash" or (_is_advanced_view and _path == "/ui/audit") %}
             {% set _admin_open = _path.startswith("/ui/admin") %}
             <nav class="nav" id="pfvPrimaryNav">
               <section class="nav-group nav-group-user">
                 <div class="nav-group-title">User</div>
+                {% if _is_advanced_view %}
                 <button type="button" class="nav-pill" id="pfvTerminalNav">
                   <span class="nav-link-main">
                     <span class="nav-icon" aria-hidden="true">
@@ -193,6 +221,7 @@
                   </span>
                   <span class="nav-link-tail" aria-hidden="true">&rsaquo;</span>
                 </button>
+                {% endif %}
                 <a href="/ui" {% if _path == "/ui" %}aria-current="page"{% endif %}>
                   <span class="nav-link-main">
                     <span class="nav-icon" aria-hidden="true">
@@ -203,7 +232,7 @@
                         <rect x="3" y="13" width="8" height="8" rx="1.5"></rect>
                       </svg>
                     </span>
-                    <span>Dashboard</span>
+                    <span>Storage</span>
                   </span>
                 </a>
 	                <a
@@ -267,6 +296,7 @@
                         <span>Help</span>
                       </span>
                     </a>
+                    {% if _is_advanced_view %}
 	                  <a href="/ui/audit" {% if _path == "/ui/audit" %}aria-current="page"{% endif %}>
 	                    <span class="nav-link-main">
 	                      <span class="nav-icon" aria-hidden="true">
@@ -278,6 +308,7 @@
 	                      <span>Audit</span>
 	                    </span>
 	                  </a>
+                    {% endif %}
 	                  <a href="/ui/trash" {% if _path == "/ui/trash" %}aria-current="page"{% endif %}>
 	                    <span class="nav-link-main">
 	                      <span class="nav-icon" aria-hidden="true">
@@ -348,6 +379,7 @@
                         <span>Reports</span>
                       </span>
                     </a>
+                    {% if _is_advanced_view %}
                     <a href="/ui/admin/audit" {% if _path == "/ui/admin/audit" %}aria-current="page"{% endif %}>
                       <span class="nav-link-main">
                         <span class="nav-icon" aria-hidden="true">
@@ -359,6 +391,7 @@
                         <span>Admin Audit</span>
                       </span>
                     </a>
+                    {% endif %}
                   </div>
                 </details>
               </section>
@@ -850,7 +883,7 @@
       })();
     </script>
 
-    {% if user %}
+    {% if user and _is_advanced_view %}
     <div class="terminal" id="pfvTerminal" data-open="1" data-max="0" data-theme="dark" data-status="syncing">
       <div class="terminal-bar">
         <div class="terminal-left">

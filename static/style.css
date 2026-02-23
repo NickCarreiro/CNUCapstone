@@ -2527,17 +2527,32 @@ body.page-groups .content > .card:last-child {
   grid-column: 1 / -1;
 }
 
-body.page-login .content,
 body.page-register .content,
 body.page-totp .content {
   max-width: 580px;
 }
 
-body.page-login .content > .card,
 body.page-register .content > .card,
 body.page-totp .content > .card {
   width: 100%;
   margin: 2.8rem auto 0;
+}
+
+body.page-login .content {
+  max-width: 580px;
+  width: min(580px, 100%);
+  margin: 0 auto;
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  padding-top: clamp(1.2rem, 6vh, 3rem);
+  padding-bottom: clamp(1.2rem, 6vh, 3rem);
+}
+
+body.page-login .content > .card {
+  width: 100%;
+  margin: 0 auto;
 }
 
 body.page-trash .content {
@@ -2846,16 +2861,25 @@ a:hover {
     gap: 0.45rem;
   }
 
-  body.page-login .content,
   body.page-register .content,
   body.page-totp .content {
     max-width: 100%;
   }
 
-  body.page-login .content > .card,
   body.page-register .content > .card,
   body.page-totp .content > .card {
     margin: 0.95rem auto 0;
+  }
+
+  body.page-login .content {
+    max-width: 100%;
+    width: 100%;
+    padding-top: 1.2rem;
+    padding-bottom: 1.2rem;
+  }
+
+  body.page-login .content > .card {
+    margin: 0 auto;
   }
 
   body.page-dashboard .content,

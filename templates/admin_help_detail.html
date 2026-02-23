@@ -43,8 +43,20 @@
         <code>{{ ticket.id }}</code>
       </div>
       <div class="meta-item">
-        <div class="label">Requester</div>
-        <div>{{ ticket.requester.username if ticket.requester else "-" }}</div>
+        <div class="label">Requester username</div>
+        <div><code>{{ requester_username }}</code></div>
+      </div>
+      <div class="meta-item">
+        <div class="label">Requester email</div>
+        <div>{{ requester_email or "-" }}</div>
+      </div>
+      <div class="meta-item">
+        <div class="label">Requester phone</div>
+        <div>{{ requester_phone or "-" }}</div>
+      </div>
+      <div class="meta-item">
+        <div class="label">Requester MFA</div>
+        <div>{{ requester_mfa_summary }}</div>
       </div>
       <div class="meta-item">
         <div class="label">Subject</div>
@@ -74,8 +86,55 @@
   </div>
 
   <div class="soft-panel">
-    <div class="label">User details</div>
+    <div class="label">User details (full request body)</div>
     <pre class="mono-block">{{ description or "(empty)" }}</pre>
+  </div>
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Shortcut actions</h2>
+  </div>
+  <div class="actions ticket-shortcut-actions">
+    <form method="post" action="/ui/admin/help/{{ ticket.id }}/shortcut" class="inline-form">
+      <input type="hidden" name="action" value="take" />
+      <button type="submit">Take ownership</button>
+    </form>
+    <form method="post" action="/ui/admin/help/{{ ticket.id }}/shortcut" class="inline-form">
+      <input type="hidden" name="action" value="need_info" />
+      <button type="submit">Need user info</button>
+    </form>
+    <form method="post" action="/ui/admin/help/{{ ticket.id }}/shortcut" class="inline-form">
+      <input type="hidden" name="action" value="resolve" />
+      <button type="submit">Resolve</button>
+    </form>
+    <form method="post" action="/ui/admin/help/{{ ticket.id }}/shortcut" class="inline-form">
+      <input type="hidden" name="action" value="close" />
+      <button type="submit">Close</button>
+    </form>
+    <form method="post" action="/ui/admin/help/{{ ticket.id }}/shortcut" class="inline-form">
+      <input type="hidden" name="action" value="reopen" />
+      <button type="submit" class="ghost">Reopen</button>
+    </form>
+    <form method="post" action="/ui/admin/help/{{ ticket.id }}/shortcut" class="inline-form">
+      <input type="hidden" name="action" value="escalate" />
+      <button type="submit" class="ghost">Escalate urgent</button>
+    </form>
+  </div>
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Shortcut responses</h2>
+  </div>
+  <div class="actions ticket-shortcut-responses">
+    {% for template in response_templates %}
+    <form method="post" action="/ui/admin/help/{{ ticket.id }}/shortcut" class="inline-form">
+      <input type="hidden" name="action" value="{{ template.shortcut }}" />
+      <input type="hidden" name="response_template" value="{{ template.key }}" />
+      <button type="submit" class="ghost">{{ template.label }}</button>
+    </form>
+    {% endfor %}
   </div>
 </section>
 
@@ -102,7 +161,20 @@
     </label>
     <label>
       <span>Admin response (optional)</span>
-      <textarea name="admin_reply" rows="7" maxlength="8000" placeholder="Write a response visible on the user's Help page.">{{ admin_reply }}</textarea>
+      <textarea id="adminHelpReply" name="admin_reply" rows="9" maxlength="8000" placeholder="Write a response visible on the user's Help page.">{{ admin_reply }}</textarea>
+    </label>
+    <label>
+      <span>Response template</span>
+      <select name="response_template" id="adminHelpResponseTemplate">
+        <option value="">No template</option>
+        {% for template in response_templates %}
+        <option value="{{ template.key }}">{{ template.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="toggle-row">
+      <input type="checkbox" name="append_template" checked />
+      <span>Append template to existing text (instead of replacing empty response only)</span>
     </label>
     <label class="toggle-row">
       <input type="checkbox" name="clear_reply" />
@@ -113,5 +185,42 @@
       <a class="pill ghost" href="/ui/admin/help/{{ ticket.id }}">Reset</a>
     </div>
   </form>
+  <div class="actions ticket-template-actions">
+    {% for template in response_templates %}
+    <button
+      type="button"
+      class="ghost"
+      data-help-template-key="{{ template.key }}"
+    >
+      Insert: {{ template.label }}
+    </button>
+    {% endfor %}
+  </div>
 </section>
+<script>
+  (function () {
+    const textarea = document.getElementById("adminHelpReply");
+    const templateSelect = document.getElementById("adminHelpResponseTemplate");
+    if (!textarea || !templateSelect) return;
+    const templates = {
+      {% for template in response_templates %}
+      "{{ template.key }}": {{ template.body|tojson }},
+      {% endfor %}
+    };
+    const insertButtons = document.querySelectorAll("[data-help-template-key]");
+    insertButtons.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const key = btn.getAttribute("data-help-template-key") || "";
+        if (!key) return;
+        templateSelect.value = key;
+        const body = (templates[key] || "").trim();
+        if (!body) return;
+        const prefix = textarea.value.trim();
+        textarea.value = prefix ? `${prefix}\n\n${body}` : body;
+        textarea.focus();
+        textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+      });
+    });
+  })();
+</script>
 {% endblock %}
