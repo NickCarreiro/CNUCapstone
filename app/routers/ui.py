@@ -22,7 +22,7 @@ import logging
 
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, case, func, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
@@ -230,6 +230,20 @@ ADMIN_TICKET_RESPONSE_TEMPLATES: dict[str, dict[str, object]] = {
         ),
     },
 }
+ADMIN_SECURITY_PLAYBOOKS: dict[str, dict[str, str]] = {
+    "contain": {
+        "label": "Contain account",
+        "description": "Disable account, revoke sessions, disable messaging, and lock directory writes.",
+    },
+    "investigate": {
+        "label": "Investigate hold",
+        "description": "Keep account enabled, revoke sessions, and lock directory writes during investigation.",
+    },
+    "release": {
+        "label": "Release account",
+        "description": "Clear compromise flag, enable account/messaging, and unlock directory writes.",
+    },
+}
 
 
 def _normalize_ticket_category(value: str | None) -> str:
@@ -252,6 +266,47 @@ def _normalize_admin_ticket_shortcut(value: str | None) -> str:
     return key if key in ADMIN_TICKET_SHORTCUTS else ""
 
 
+def _next_support_ticket_number(db: Session) -> int:
+    value: int | None = None
+    try:
+        raw = db.execute(text("SELECT nextval('support_ticket_number_seq')")).scalar()
+        if raw is not None:
+            value = int(raw)
+    except Exception:
+        value = None
+
+    if value is None:
+        max_existing = db.query(func.max(SupportTicket.ticket_number)).scalar() or 0
+        value = int(max_existing) + 1
+
+    if value > 999_999:
+        raise HTTPException(status_code=500, detail="Support ticket number range exhausted.")
+    return value
+
+
+def _support_ticket_display_id(ticket: SupportTicket | None) -> str:
+    if not ticket:
+        return "000000"
+    number_value = getattr(ticket, "ticket_number", None)
+    if number_value is not None:
+        try:
+            normalized = int(number_value)
+            if 0 <= normalized <= 999_999:
+                return f"{normalized:06d}"
+        except (TypeError, ValueError):
+            pass
+    try:
+        raw_uuid = uuid.UUID(str(ticket.id)).hex
+        fallback = int(raw_uuid[-6:], 16) % 1_000_000
+        return f"{fallback:06d}"
+    except Exception:
+        return "000000"
+
+
+def _support_ticket_ref(ticket: SupportTicket | None) -> str:
+    return f"#{_support_ticket_display_id(ticket)}"
+
+
 def _render_admin_ticket_response_template(key: str, ticket: SupportTicket) -> str:
     row = ADMIN_TICKET_RESPONSE_TEMPLATES.get((key or "").strip().lower())
     if not row:
@@ -260,7 +315,7 @@ def _render_admin_ticket_response_template(key: str, ticket: SupportTicket) -> s
     body = str(row.get("body", ""))
     return body.format(
         username=requester_name,
-        ticket_id=ticket.id,
+        ticket_id=_support_ticket_display_id(ticket),
         subject=ticket.subject or "",
     ).strip()
 
@@ -580,6 +635,12 @@ def _format_utc(value: datetime | None) -> str:
     if not value:
         return "-"
     return value.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _format_utc_iso(value: datetime | None) -> str:
+    if not value:
+        return ""
+    return value.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _terminal_scope_key(request: Request) -> str:
@@ -1038,6 +1099,16 @@ def _verify_mfa_challenge(user: User, method: str, code: str) -> tuple[bool, str
     return True, ""
 
 
+def _directory_lock_message(user: User | None) -> str:
+    if not user:
+        return "Directory changes are locked by an administrator."
+    reason = (getattr(user, "directory_lock_reason", "") or "").strip()
+    base = "Directory changes are locked by an administrator."
+    if reason:
+        return f"{base} Reason: {reason}"
+    return f"{base} Request an admin release to continue."
+
+
 def _admin_redirect(message: str, *, error: bool = False) -> RedirectResponse:
     key = "error" if error else "notice"
     return RedirectResponse(url=f"/ui/admin/users?{key}={quote_plus(message)}", status_code=303)
@@ -1063,6 +1134,17 @@ def _admin_help_redirect(message: str, *, error: bool = False, ticket_id: str | 
     key = "error" if error else "notice"
     base = f"/ui/admin/help/{ticket_id}" if ticket_id else "/ui/admin/help"
     return RedirectResponse(url=f"{base}?{key}={quote_plus(message)}", status_code=303)
+
+
+def _admin_security_redirect(message: str, *, error: bool = False) -> RedirectResponse:
+    key = "error" if error else "notice"
+    return RedirectResponse(url=f"/ui/admin/security?{key}={quote_plus(message)}", status_code=303)
+
+
+def _redirect_with_message(base_url: str, *, message: str, error: bool = False) -> RedirectResponse:
+    key = "error" if error else "notice"
+    sep = "&" if "?" in base_url else "?"
+    return RedirectResponse(url=f"{base_url}{sep}{key}={quote_plus(message)}", status_code=303)
 
 
 def _safe_join(root: Path, rel_path: str) -> Path:
@@ -1881,11 +1963,12 @@ def _create_forgot_password_ticket(db: Session, user: User, request: Request) ->
         .first()
     )
     if existing:
+        ticket_ref = _support_ticket_ref(existing)
         add_audit_log(
             db,
             user=user,
             event_type="account.password_reset_ticket_reused",
-            details=f"Reused existing open password reset support ticket {existing.id}.",
+            details=f"Reused existing open password reset support ticket {ticket_ref}.",
             request=request,
         )
         db.commit()
@@ -1897,6 +1980,7 @@ def _create_forgot_password_ticket(db: Session, user: User, request: Request) ->
         "Admin verification and manual reset are required."
     )
     ticket = SupportTicket(
+        ticket_number=_next_support_ticket_number(db),
         user_id=user.id,
         subject="Password reset request",
         category="account",
@@ -1910,18 +1994,19 @@ def _create_forgot_password_ticket(db: Session, user: User, request: Request) ->
     )
     db.add(ticket)
     db.flush()
+    ticket_ref = _support_ticket_ref(ticket)
     add_event(
         db,
         user,
         action="support",
-        message=f"Opened support ticket '{ticket.subject}' (high) from forgot-password flow.",
+        message=f"Opened support ticket {ticket_ref} '{ticket.subject}' (high) from forgot-password flow.",
         level="WARN",
     )
     add_audit_log(
         db,
         user=user,
         event_type="account.password_reset_ticket_created",
-        details=f"Created password reset support ticket {ticket.id} (no MFA methods configured).",
+        details=f"Created password reset support ticket {ticket_ref} (no MFA methods configured).",
         request=request,
     )
     db.commit()
@@ -2030,10 +2115,11 @@ def forgot_password_start(
         )
 
     ticket, created = _create_forgot_password_ticket(db, user, request)
+    ticket_ref = _support_ticket_ref(ticket)
     message = (
-        f"No MFA methods are configured. Support ticket {ticket.id} was opened for manual password reset."
+        f"No MFA methods are configured. Support ticket {ticket_ref} was opened for manual password reset."
         if created
-        else f"No MFA methods are configured. Existing support ticket {ticket.id} is still open."
+        else f"No MFA methods are configured. Existing support ticket {ticket_ref} is still open."
     )
     return _render_forgot_password_page(
         request,
@@ -2107,10 +2193,11 @@ def forgot_password_mfa_action(
     if not configured_methods:
         _clear_pending_password_reset(pending_token)
         ticket, created = _create_forgot_password_ticket(db, user, request)
+        ticket_ref = _support_ticket_ref(ticket)
         notice = (
-            f"No MFA methods are configured. Support ticket {ticket.id} was opened for manual password reset."
+            f"No MFA methods are configured. Support ticket {ticket_ref} was opened for manual password reset."
             if created
-            else f"No MFA methods are configured. Existing support ticket {ticket.id} is still open."
+            else f"No MFA methods are configured. Existing support ticket {ticket_ref} is still open."
         )
         return _render_forgot_password_page(request, notice=notice, username=user.username, status_code=200)
 
@@ -2768,7 +2855,12 @@ def help_page(
         db.query(SupportTicket)
         .options(joinedload(SupportTicket.assigned_admin))
         .filter(SupportTicket.user_id == user.id)
-        .order_by(SupportTicket.updated_at.desc(), SupportTicket.created_at.desc(), SupportTicket.id.desc())
+        .order_by(
+            case((SupportTicket.priority == "urgent", 0), else_=1),
+            SupportTicket.updated_at.desc(),
+            SupportTicket.created_at.desc(),
+            SupportTicket.id.desc(),
+        )
     )
     if status_filter:
         query = query.filter(SupportTicket.status == status_filter)
@@ -2783,6 +2875,7 @@ def help_page(
         rows.append(
             {
                 "ticket": ticket,
+                "ticket_display_id": _support_ticket_display_id(ticket),
                 "requester_username": user.username,
                 "assigned_admin_username": ticket.assigned_admin.username if ticket.assigned_admin else "",
                 "description": body,
@@ -2790,6 +2883,10 @@ def help_page(
                 "admin_reply": admin_reply,
                 "admin_reply_preview": admin_reply_preview,
                 "category_label": SUPPORT_TICKET_CATEGORIES.get(ticket.category, ticket.category),
+                "created_utc": _format_utc(ticket.created_at),
+                "updated_utc": _format_utc(ticket.updated_at),
+                "created_iso": _format_utc_iso(ticket.created_at),
+                "updated_iso": _format_utc_iso(ticket.updated_at),
             }
         )
 
@@ -2849,6 +2946,7 @@ def help_create_ticket(
     normalized_priority = _normalize_ticket_priority(priority)
     now = datetime.utcnow()
     ticket = SupportTicket(
+        ticket_number=_next_support_ticket_number(db),
         user_id=user.id,
         subject=subject_value,
         category=normalized_category,
@@ -2861,23 +2959,28 @@ def help_create_ticket(
         last_admin_update_at=None,
     )
     db.add(ticket)
+    db.flush()
+    ticket_ref = _support_ticket_ref(ticket)
 
     add_event(
         db,
         user,
         action="support",
-        message=f"Opened support ticket '{subject_value}' ({normalized_priority}).",
+        message=f"Opened support ticket {ticket_ref} '{subject_value}' ({normalized_priority}).",
         level="INFO",
     )
     add_audit_log(
         db,
         user=user,
         event_type="support.ticket_created",
-        details=f"Created support ticket '{subject_value}' (category={normalized_category}, priority={normalized_priority}).",
+        details=(
+            f"Created support ticket {ticket_ref} '{subject_value}' "
+            f"(category={normalized_category}, priority={normalized_priority})."
+        ),
         request=request,
     )
     db.commit()
-    return _help_redirect("Support ticket submitted. The admin inbox has been notified.")
+    return _help_redirect(f"Support ticket {ticket_ref} submitted. The admin inbox has been notified.")
 
 
 def _messages_redirect(message: str, *, error: bool = False, thread: str | None = None) -> RedirectResponse:
@@ -3396,6 +3499,294 @@ def admin_users_page(request: Request, db: Session = Depends(get_db)):
     )
 
 
+@router.get("/admin/security")
+def admin_security_page(
+    request: Request,
+    q: str = "",
+    limit: int = 250,
+    db: Session = Depends(get_db),
+):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    text_filter = (q or "").strip()
+    limit = max(1, min(limit, 500))
+
+    query = db.query(User)
+    if text_filter:
+        like = f"%{text_filter}%"
+        query = query.filter(or_(User.username.ilike(like), User.email.ilike(like)))
+    users = query.order_by(User.username.asc()).limit(limit).all()
+    user_ids = [row.id for row in users]
+
+    active_sessions_by_user: dict[uuid.UUID, int] = {}
+    roles_map: dict[uuid.UUID, list[str]] = {}
+    if user_ids:
+        now = datetime.utcnow()
+        active_sessions_by_user = {
+            user_id: int(count)
+            for user_id, count in (
+                db.query(SessionModel.user_id, func.count(SessionModel.id))
+                .filter(
+                    SessionModel.user_id.in_(user_ids),
+                    SessionModel.is_active.is_(True),
+                    SessionModel.expires_at > now,
+                )
+                .group_by(SessionModel.user_id)
+                .all()
+            )
+        }
+        membership_rows = (
+            db.query(GroupMembership.user_id, Group.name, GroupMembership.role)
+            .join(Group, Group.id == GroupMembership.group_id)
+            .filter(GroupMembership.user_id.in_(user_ids))
+            .order_by(Group.name.asc())
+            .all()
+        )
+        for user_id, group_name, role in membership_rows:
+            roles_map.setdefault(user_id, []).append(f"{group_name} ({(role or 'member').lower()})")
+
+    rows: list[dict[str, object]] = []
+    compromised_count = 0
+    directory_locked_count = 0
+    email_configured_count = 0
+    for target in users:
+        email_value = (target.email or "").strip()
+        if email_value:
+            email_configured_count += 1
+
+        compromised = bool(getattr(target, "security_compromised", False))
+        if compromised:
+            compromised_count += 1
+
+        directory_locked = bool(getattr(target, "directory_locked", False))
+        if directory_locked:
+            directory_locked_count += 1
+
+        group_roles = roles_map.get(target.id, [])
+        rows.append(
+            {
+                "user": target,
+                "active_sessions": active_sessions_by_user.get(target.id, 0),
+                "group_roles": group_roles,
+                "group_roles_count": len(group_roles),
+                "group_roles_preview": ", ".join(group_roles[:4]) if group_roles else "(none)",
+                "email_value": email_value,
+                "directory_locked": directory_locked,
+                "compromised": compromised,
+            }
+        )
+
+    return templates.TemplateResponse(
+        "admin_security.html",
+        {
+            "request": request,
+            "user": admin_user,
+            "rows": rows,
+            "filters": {
+                "q": text_filter,
+                "limit": limit,
+            },
+            "playbooks": [
+                {"key": key, "label": meta["label"], "description": meta["description"]}
+                for key, meta in ADMIN_SECURITY_PLAYBOOKS.items()
+            ],
+            "summary": {
+                "displayed_users": len(rows),
+                "compromised": compromised_count,
+                "directory_locked": directory_locked_count,
+                "email_configured": email_configured_count,
+            },
+            "notice": request.query_params.get("notice"),
+            "error": request.query_params.get("error"),
+            "title": "Admin Security",
+        },
+    )
+
+
+@router.post("/admin/security/{user_id}/directory-lock")
+def admin_security_directory_lock(
+    user_id: str,
+    request: Request,
+    action: str = Form(...),
+    reason: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    try:
+        target_id = uuid.UUID(user_id)
+    except ValueError:
+        return _admin_security_redirect("Invalid user identifier.", error=True)
+
+    target = db.query(User).filter(User.id == target_id).first()
+    if not target:
+        return _admin_security_redirect("User not found.", error=True)
+
+    action_key = (action or "").strip().lower()
+    note = (reason or "").strip()
+    now = datetime.utcnow()
+
+    if action_key == "lock":
+        target.directory_locked = True
+        target.directory_locked_at = now
+        target.directory_lock_reason = note or "Locked by admin security action."
+        target.directory_locked_by_admin_id = admin_user.id
+        add_audit_log(
+            db,
+            user=target,
+            event_type="account.directory_locked_by_admin",
+            details=f"Admin '{admin_user.username}' locked directory writes. {target.directory_lock_reason}",
+            request=request,
+        )
+        add_audit_log(
+            db,
+            user=admin_user,
+            event_type="admin.directory_locked",
+            details=f"Locked directory writes for '{target.username}'.",
+            request=request,
+        )
+        db.commit()
+        return _admin_security_redirect(f"Directory writes locked for '{target.username}'.")
+
+    if action_key == "unlock":
+        target.directory_locked = False
+        target.directory_locked_at = None
+        target.directory_lock_reason = None
+        target.directory_locked_by_admin_id = None
+        add_audit_log(
+            db,
+            user=target,
+            event_type="account.directory_unlocked_by_admin",
+            details=f"Admin '{admin_user.username}' unlocked directory writes.",
+            request=request,
+        )
+        add_audit_log(
+            db,
+            user=admin_user,
+            event_type="admin.directory_unlocked",
+            details=f"Unlocked directory writes for '{target.username}'.",
+            request=request,
+        )
+        db.commit()
+        return _admin_security_redirect(f"Directory writes unlocked for '{target.username}'.")
+
+    return _admin_security_redirect("Invalid directory lock action.", error=True)
+
+
+@router.post("/admin/security/{user_id}/playbook")
+def admin_security_playbook(
+    user_id: str,
+    request: Request,
+    playbook: str = Form(...),
+    note: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    try:
+        target_id = uuid.UUID(user_id)
+    except ValueError:
+        return _admin_security_redirect("Invalid user identifier.", error=True)
+
+    target = db.query(User).filter(User.id == target_id).first()
+    if not target:
+        return _admin_security_redirect("User not found.", error=True)
+
+    playbook_key = (playbook or "").strip().lower()
+    if playbook_key not in ADMIN_SECURITY_PLAYBOOKS:
+        return _admin_security_redirect("Unknown security playbook.", error=True)
+
+    note_value = (note or "").strip()
+    now = datetime.utcnow()
+    revoked = 0
+
+    if playbook_key == "contain":
+        if getattr(target, "is_superadmin", False) and not getattr(admin_user, "is_superadmin", False):
+            return _admin_security_redirect(
+                "Only a superadmin can apply containment that disables a superadmin account.",
+                error=True,
+            )
+        target.security_compromised = True
+        target.security_compromised_at = now
+        target.security_compromise_note = note_value or "Containment playbook applied by admin."
+        target.is_disabled = True
+        target.disabled_at = now
+        target.disabled_reason = note_value or f"Containment playbook applied by admin '{admin_user.username}'."
+        target.messaging_disabled = True
+        target.messaging_disabled_at = now
+        target.directory_locked = True
+        target.directory_locked_at = now
+        target.directory_lock_reason = note_value or "Containment playbook directory lock."
+        target.directory_locked_by_admin_id = admin_user.id
+        _clear_mfa_challenge(target)
+        revoked = (
+            db.query(SessionModel)
+            .filter(SessionModel.user_id == target.id, SessionModel.is_active.is_(True))
+            .update({SessionModel.is_active: False}, synchronize_session=False)
+        )
+    elif playbook_key == "investigate":
+        target.security_compromised = True
+        if not target.security_compromised_at:
+            target.security_compromised_at = now
+        target.security_compromise_note = note_value or target.security_compromise_note or "Investigate hold applied."
+        target.directory_locked = True
+        target.directory_locked_at = now
+        target.directory_lock_reason = note_value or "Investigate hold directory lock."
+        target.directory_locked_by_admin_id = admin_user.id
+        revoked = (
+            db.query(SessionModel)
+            .filter(SessionModel.user_id == target.id, SessionModel.is_active.is_(True))
+            .update({SessionModel.is_active: False}, synchronize_session=False)
+        )
+    else:  # release
+        target.security_compromised = False
+        target.security_compromised_at = None
+        target.security_compromise_note = note_value or None
+        target.is_disabled = False
+        target.disabled_at = None
+        target.disabled_reason = None
+        target.messaging_disabled = False
+        target.messaging_disabled_at = None
+        target.directory_locked = False
+        target.directory_locked_at = None
+        target.directory_lock_reason = None
+        target.directory_locked_by_admin_id = None
+
+    add_audit_log(
+        db,
+        user=admin_user,
+        event_type="admin.security_playbook_applied",
+        details=(
+            f"Applied security playbook '{playbook_key}' to '{target.username}' "
+            f"(revoked_sessions={revoked})."
+        ),
+        request=request,
+    )
+    add_audit_log(
+        db,
+        user=target,
+        event_type="account.security_playbook_applied_by_admin",
+        details=f"Admin '{admin_user.username}' applied security playbook '{playbook_key}'.",
+        request=request,
+    )
+    db.commit()
+
+    playbook_label = ADMIN_SECURITY_PLAYBOOKS[playbook_key]["label"]
+    return _admin_security_redirect(f"Applied playbook '{playbook_label}' to '{target.username}'.")
+
+
 @router.get("/audit")
 def audit_log_page(
     request: Request,
@@ -3589,7 +3980,12 @@ def admin_help_inbox(
             joinedload(SupportTicket.requester),
             joinedload(SupportTicket.assigned_admin),
         )
-        .order_by(SupportTicket.updated_at.desc(), SupportTicket.created_at.desc(), SupportTicket.id.desc())
+        .order_by(
+            case((SupportTicket.priority == "urgent", 0), else_=1),
+            SupportTicket.updated_at.desc(),
+            SupportTicket.created_at.desc(),
+            SupportTicket.id.desc(),
+        )
     )
     if status_filter:
         query = query.filter(SupportTicket.status == status_filter)
@@ -3617,6 +4013,7 @@ def admin_help_inbox(
         rows.append(
             {
                 "ticket": ticket,
+                "ticket_display_id": _support_ticket_display_id(ticket),
                 "requester_username": requester.username if requester else "(unknown)",
                 "requester_email": requester.email if requester and requester.email else "",
                 "requester_mfa_summary": _mfa_summary_for_user(requester) if requester else "Unknown",
@@ -3624,6 +4021,16 @@ def admin_help_inbox(
                 "description_preview": body or "-",
                 "admin_reply_preview": reply or "",
                 "category_label": SUPPORT_TICKET_CATEGORIES.get(ticket.category, ticket.category),
+                "description_full": decrypt_message(ticket.description or ""),
+                "admin_reply_full": decrypt_message(ticket.admin_reply or "") if ticket.admin_reply else "",
+                "created_utc": _format_utc(ticket.created_at),
+                "updated_utc": _format_utc(ticket.updated_at),
+                "last_admin_update_utc": _format_utc(ticket.last_admin_update_at),
+                "closed_utc": _format_utc(ticket.closed_at),
+                "created_iso": _format_utc_iso(ticket.created_at),
+                "updated_iso": _format_utc_iso(ticket.updated_at),
+                "last_admin_update_iso": _format_utc_iso(ticket.last_admin_update_at),
+                "closed_iso": _format_utc_iso(ticket.closed_at),
             }
         )
 
@@ -3649,6 +4056,7 @@ def admin_help_inbox(
             },
             "status_options": SUPPORT_TICKET_STATUSES,
             "priority_options": SUPPORT_TICKET_PRIORITIES,
+            "category_options": SUPPORT_TICKET_CATEGORIES,
             "shortcut_rows": [
                 {
                     "key": key,
@@ -3697,6 +4105,7 @@ def admin_help_detail(ticket_id: str, request: Request, db: Session = Depends(ge
             "request": request,
             "user": admin_user,
             "ticket": ticket,
+            "ticket_display_id": _support_ticket_display_id(ticket),
             "requester_username": ticket.requester.username if ticket.requester else "(unknown)",
             "requester_email": (ticket.requester.email or "") if ticket.requester else "",
             "requester_phone": (ticket.requester.phone_number or "") if ticket.requester else "",
@@ -3704,8 +4113,17 @@ def admin_help_detail(ticket_id: str, request: Request, db: Session = Depends(ge
             "description": decrypt_message(ticket.description or ""),
             "admin_reply": decrypt_message(ticket.admin_reply or "") if ticket.admin_reply else "",
             "category_label": SUPPORT_TICKET_CATEGORIES.get(ticket.category, ticket.category),
+            "created_utc": _format_utc(ticket.created_at),
+            "updated_utc": _format_utc(ticket.updated_at),
+            "last_admin_update_utc": _format_utc(ticket.last_admin_update_at),
+            "closed_utc": _format_utc(ticket.closed_at),
+            "created_iso": _format_utc_iso(ticket.created_at),
+            "updated_iso": _format_utc_iso(ticket.updated_at),
+            "last_admin_update_iso": _format_utc_iso(ticket.last_admin_update_at),
+            "closed_iso": _format_utc_iso(ticket.closed_at),
             "status_options": SUPPORT_TICKET_STATUSES,
             "priority_options": SUPPORT_TICKET_PRIORITIES,
+            "category_options": SUPPORT_TICKET_CATEGORIES,
             "shortcut_rows": [
                 {
                     "key": key,
@@ -3737,6 +4155,7 @@ def admin_help_update_ticket(
     request: Request,
     status: str = Form(...),
     priority: str = Form(...),
+    category: str = Form(""),
     admin_reply: str = Form(""),
     clear_reply: str | None = Form(None),
     response_template: str | None = Form(None),
@@ -3771,6 +4190,10 @@ def admin_help_update_ticket(
     if priority_value not in SUPPORT_TICKET_PRIORITIES:
         return _admin_help_redirect("Invalid ticket priority.", error=True, ticket_id=str(ticket.id))
 
+    category_value = (category or ticket.category or "general").strip().lower()
+    if category_value not in SUPPORT_TICKET_CATEGORIES:
+        return _admin_help_redirect("Invalid ticket category.", error=True, ticket_id=str(ticket.id))
+
     reply_text = (admin_reply or "").strip()
     template_key = (response_template or "").strip().lower()
     template_text = _render_admin_ticket_response_template(template_key, ticket) if template_key else ""
@@ -3786,6 +4209,7 @@ def admin_help_update_ticket(
     now = datetime.utcnow()
     ticket.status = status_value
     ticket.priority = priority_value
+    ticket.category = category_value
     ticket.assigned_admin_id = admin_user.id
     ticket.updated_at = now
     ticket.last_admin_update_at = now
@@ -3807,8 +4231,8 @@ def admin_help_update_ticket(
         user=admin_user,
         event_type="admin.support_ticket_updated",
         details=(
-            f"Updated support ticket {ticket.id} for '{requester_name}' "
-            f"(status={status_value}, priority={priority_value})."
+            f"Updated support ticket {_support_ticket_ref(ticket)} for '{requester_name}' "
+            f"(status={status_value}, priority={priority_value}, category={category_value})."
         ),
         request=request,
     )
@@ -3817,7 +4241,7 @@ def admin_help_update_ticket(
             db,
             user=ticket.requester,
             event_type="support.ticket_updated_by_admin",
-            details=f"Support ticket {ticket.id} updated to status '{status_value}'.",
+            details=f"Support ticket {_support_ticket_ref(ticket)} updated to status '{status_value}'.",
             request=request,
         )
     db.commit()
@@ -3896,7 +4320,7 @@ def admin_help_shortcut_ticket(
         user=admin_user,
         event_type="admin.support_ticket_shortcut",
         details=(
-            f"Applied shortcut '{action_key}' on support ticket {ticket.id} "
+            f"Applied shortcut '{action_key}' on support ticket {_support_ticket_ref(ticket)} "
             f"for '{requester_name}' (status={status_value}, priority={priority_value}, "
             f"template={'none' if not template_key else template_key})."
         ),
@@ -3908,7 +4332,7 @@ def admin_help_shortcut_ticket(
             user=ticket.requester,
             event_type="support.ticket_updated_by_admin",
             details=(
-                f"Support ticket {ticket.id} updated via admin shortcut '{shortcut_label}' "
+                f"Support ticket {_support_ticket_ref(ticket)} updated via admin shortcut '{shortcut_label}' "
                 f"(status={status_value})."
             ),
             request=request,
@@ -4717,6 +5141,7 @@ def profile_page(request: Request, db: Session = Depends(get_db)):
             "sms_ready": _sms_configured(user),
             "sms_provider_mode": _sms_provider_mode(),
             "sms_provider_label": _sms_provider_label(),
+            "sms_carrier_label": SMS_CARRIER_LABELS.get(_normalize_sms_carrier(user.sms_carrier), ""),
             "mfa_methods_active": active_methods,
             "mfa_method_preferred": _resolve_mfa_method(user, user.mfa_preferred_method, active_methods),
             "mfa_method_labels": MFA_METHOD_LABELS,

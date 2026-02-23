@@ -51,5 +51,4 @@ class Settings(BaseSettings):
     twilio_auth_token: str = ""
     twilio_from_number: str = ""
 
-
 settings = Settings()

@@ -38,30 +38,59 @@ find_running_servers() {
   '
 }
 
+find_port_listener_pids() {
+  ss -ltnp "sport = :$PORT" 2>/dev/null | awk '
+    NR > 1 {
+      line = $0
+      while (match(line, /pid=[0-9]+/)) {
+        pid = substr(line, RSTART + 4, RLENGTH - 4)
+        print pid
+        line = substr(line, RSTART + RLENGTH)
+      }
+    }
+  ' | sort -u
+}
+
+find_port_listeners() {
+  local pid
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    ps -p "$pid" -o pid=,args= 2>/dev/null || true
+  done < <(find_port_listener_pids)
+}
+
 wait_until_stopped() {
   local timeout_seconds="${1:-5}"
   local elapsed=0
   while (( elapsed < timeout_seconds )); do
-    if [[ -z "$(find_running_servers)" ]]; then
+    if [[ -z "$(find_running_servers)" && -z "$(find_port_listener_pids)" ]]; then
       return 0
     fi
     sleep 1
     elapsed=$((elapsed + 1))
   done
-  [[ -z "$(find_running_servers)" ]]
+  [[ -z "$(find_running_servers)" && -z "$(find_port_listener_pids)" ]]
 }
 
 stop_matching_servers() {
   local grace_seconds="${1:-5}"
   local running
+  local listeners
+  local pids=()
   running="$(find_running_servers)"
-  if [[ -z "$running" ]]; then
+  listeners="$(find_port_listeners)"
+  if [[ -z "$running" && -z "$listeners" ]]; then
     echo "No matching server running on port $PORT."
     return 0
   fi
 
   echo "Stopping existing server(s) on port $PORT..."
-  mapfile -t pids < <(echo "$running" | awk '{print $1}' | sort -u)
+  mapfile -t pids < <(
+    {
+      echo "$running" | awk '{print $1}'
+      echo "$listeners" | awk '{print $1}'
+    } | awk 'NF' | sort -u
+  )
   for pid in "${pids[@]}"; do
     kill -TERM "$pid" 2>/dev/null || true
   done
@@ -81,8 +110,13 @@ stop_matching_servers() {
     return 0
   fi
 
-  echo "Some server process(es) are still running:"
-  find_running_servers
+  echo "Some process(es) are still holding port $PORT:"
+  find_port_listeners
+  local still_running
+  still_running="$(find_running_servers)"
+  if [[ -n "$still_running" ]]; then
+    echo "$still_running"
+  fi
   return 1
 }
 
@@ -97,9 +131,14 @@ elif [[ "$MODE" != "start" ]]; then
 fi
 
 RUNNING="$(find_running_servers)"
-if [[ -n "$RUNNING" ]]; then
+LISTENERS="$(find_port_listeners)"
+if [[ -n "$RUNNING" || -n "$LISTENERS" ]]; then
   echo "Server already running on port $PORT:"
-  echo "$RUNNING"
+  if [[ -n "$RUNNING" ]]; then
+    echo "$RUNNING"
+  else
+    echo "$LISTENERS"
+  fi
   echo "Use ./start_script.sh --restart to restart cleanly."
   exit 0
 fi

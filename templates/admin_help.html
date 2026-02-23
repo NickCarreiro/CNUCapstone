@@ -4,7 +4,7 @@
 <section class="card hero-card admin-hero">
   <div class="eyebrow">System Administration</div>
   <h1>Help inbox</h1>
-  <p class="muted">Shared support queue for all administrators.</p>
+  <p class="muted">Shared support queue for all administrators. Urgent tickets are pinned to the top.</p>
   <div class="stat-row">
     <div class="stat-chip">
       <div class="stat-number">{{ counts.total }}</div>
@@ -93,6 +93,7 @@
   <div class="card-header">
     <h2>Ticket queue</h2>
     <div class="card-tools">
+      <span class="muted">Click requester or subject to open a full ticket window.</span>
       <button
         type="button"
         class="ghost filter-toggle"
@@ -110,85 +111,281 @@
   </div>
 
   {% if rows %}
-  <div class="ticket-queue-list">
+  <div class="ticket-window-list ticket-window-list-admin">
     {% for row in rows %}
     {% set ticket = row.ticket %}
-    <article class="soft-panel ticket-queue-item">
-      <div class="ticket-queue-head">
-        <div class="ticket-queue-title">
-          <div class="label">Ticket {{ ticket.id }}</div>
-          <h3>{{ ticket.subject }}</h3>
+    <article class="soft-panel ticket-window-row {% if ticket.priority == 'urgent' %}is-urgent{% endif %}">
+      <div class="ticket-window-top">
+        <div class="ticket-window-main">
+          <div class="ticket-window-id">Ticket #{{ row.ticket_display_id }}</div>
+          <button type="button" class="ticket-window-open" data-ticket-open="adminTicketDialog-{{ ticket.id }}">
+            {{ ticket.subject }}
+          </button>
+          <div class="ticket-window-sub">
+            Requester:
+            <button type="button" class="ticket-window-link" data-ticket-open="adminTicketDialog-{{ ticket.id }}">
+              {{ row.requester_username }}
+            </button>
+          </div>
         </div>
-        <div class="ticket-queue-badges">
+        <div class="ticket-window-status">
           <code>{{ ticket.status }}</code>
-          <code>{{ ticket.priority }}</code>
+          <code class="{% if ticket.priority == 'urgent' %}priority-urgent{% endif %}">{{ ticket.priority }}</code>
           <span class="pill ghost">{{ row.category_label }}</span>
         </div>
       </div>
-
-      <div class="ticket-queue-meta">
-        <div class="meta-item">
-          <div class="label">Requester username</div>
-          <div><code>{{ row.requester_username }}</code></div>
-        </div>
-        <div class="meta-item">
-          <div class="label">Requester email</div>
-          <div>{{ row.requester_email or "-" }}</div>
-        </div>
-        <div class="meta-item">
-          <div class="label">Requester MFA</div>
-          <div>{{ row.requester_mfa_summary }}</div>
-        </div>
-        <div class="meta-item">
-          <div class="label">Created</div>
-          <div>{{ ticket.created_at.strftime("%Y-%m-%d %H:%M:%S UTC") if ticket.created_at else "-" }}</div>
-        </div>
-        <div class="meta-item">
-          <div class="label">Updated</div>
-          <div>{{ ticket.updated_at.strftime("%Y-%m-%d %H:%M:%S UTC") if ticket.updated_at else "-" }}</div>
-        </div>
-        <div class="meta-item">
-          <div class="label">Assigned admin</div>
-          <div>{{ row.assigned_admin_username or "-" }}</div>
-        </div>
-      </div>
-
-      <div class="ticket-queue-preview">
-        <div class="label">User details preview</div>
-        <p>{{ row.description_preview }}</p>
-      </div>
+      <p class="ticket-window-preview">{{ row.description_preview or "(no details provided)" }}</p>
       {% if row.admin_reply_preview %}
-      <div class="ticket-queue-preview">
-        <div class="label">Latest admin response</div>
-        <p>{{ row.admin_reply_preview }}</p>
-      </div>
+      <p class="ticket-window-note">Latest admin reply: {{ row.admin_reply_preview }}</p>
       {% endif %}
-
-      <div class="ticket-queue-actions ticket-queue-actions-primary">
-        <a class="pill" href="/ui/admin/help/{{ ticket.id }}">Open full ticket</a>
-        {% for shortcut in shortcut_rows %}
-        <form method="post" action="/ui/admin/help/{{ ticket.id }}/shortcut" class="inline-form">
-          <input type="hidden" name="action" value="{{ shortcut.key }}" />
-          <button type="submit" class="ghost">{{ shortcut.label }}</button>
-        </form>
-        {% endfor %}
+      <div class="ticket-window-meta">
+        <span class="ticket-window-meta-item">
+          <span class="label">Assigned</span>
+          {{ row.assigned_admin_username or "Unassigned" }}
+        </span>
+        <span class="ticket-window-meta-item">
+          <span class="label">Last admin update</span>
+          <time class="js-local-time" data-utc="{{ row.last_admin_update_iso }}">{{ row.last_admin_update_utc }}</time>
+        </span>
       </div>
-
-      <div class="ticket-queue-actions ticket-queue-actions-responses">
-        <div class="label">Shortcut responses</div>
-        {% for template in response_templates %}
-        <form method="post" action="/ui/admin/help/{{ ticket.id }}/shortcut" class="inline-form">
-          <input type="hidden" name="action" value="{{ template.shortcut }}" />
-          <input type="hidden" name="response_template" value="{{ template.key }}" />
-          <button type="submit" class="ghost">{{ template.label }}</button>
-        </form>
-        {% endfor %}
+      <div class="ticket-window-foot">
+        <div class="ticket-window-when">
+          Updated:
+          <time class="js-local-time" data-utc="{{ row.updated_iso }}">{{ row.updated_utc }}</time>
+        </div>
+        <div class="ticket-window-actions">
+          <button type="button" class="ghost" data-ticket-open="adminTicketDialog-{{ ticket.id }}">Open window</button>
+        </div>
       </div>
     </article>
     {% endfor %}
   </div>
+
+  {% for row in rows %}
+  {% set ticket = row.ticket %}
+  <dialog id="adminTicketDialog-{{ ticket.id }}" class="modal modal-wide ticket-window-dialog">
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">Admin ticket</div>
+        <h2>#{{ row.ticket_display_id }} {{ ticket.subject }}</h2>
+      </div>
+      <div class="modal-header-actions">
+        <a class="pill ghost" href="/ui/admin/help/{{ ticket.id }}">Open full page</a>
+        <button type="button" class="ghost" data-ticket-close>Close</button>
+      </div>
+    </div>
+
+    <div class="ticket-window-dialog-body">
+      <section class="ticket-window-panel">
+        <h3>Overview</h3>
+        <div class="meta-grid">
+          <div class="meta-item">
+            <div class="label">Requester username</div>
+            <div><code>{{ row.requester_username }}</code></div>
+          </div>
+          <div class="meta-item">
+            <div class="label">Requester email</div>
+            <div>{{ row.requester_email or "-" }}</div>
+          </div>
+          <div class="meta-item">
+            <div class="label">Requester MFA</div>
+            <div>{{ row.requester_mfa_summary }}</div>
+          </div>
+          <div class="meta-item">
+            <div class="label">Status</div>
+            <code>{{ ticket.status }}</code>
+          </div>
+          <div class="meta-item">
+            <div class="label">Priority</div>
+            <code class="{% if ticket.priority == 'urgent' %}priority-urgent{% endif %}">{{ ticket.priority }}</code>
+          </div>
+          <div class="meta-item">
+            <div class="label">Category</div>
+            <div>{{ row.category_label }}</div>
+          </div>
+          <div class="meta-item">
+            <div class="label">Created</div>
+            <time class="js-local-time" data-utc="{{ row.created_iso }}">{{ row.created_utc }}</time>
+          </div>
+          <div class="meta-item">
+            <div class="label">Updated</div>
+            <time class="js-local-time" data-utc="{{ row.updated_iso }}">{{ row.updated_utc }}</time>
+          </div>
+          <div class="meta-item">
+            <div class="label">Assigned admin</div>
+            <div>{{ row.assigned_admin_username or "-" }}</div>
+          </div>
+          <div class="meta-item">
+            <div class="label">Last admin update</div>
+            <time class="js-local-time" data-utc="{{ row.last_admin_update_iso }}">{{ row.last_admin_update_utc }}</time>
+          </div>
+          <div class="meta-item">
+            <div class="label">Closed</div>
+            <time class="js-local-time" data-utc="{{ row.closed_iso }}">{{ row.closed_utc }}</time>
+          </div>
+        </div>
+      </section>
+
+      <section class="ticket-window-panel">
+        <h3>User details</h3>
+        <pre class="mono-block">{{ row.description_full or "(empty)" }}</pre>
+      </section>
+
+      <section class="ticket-window-panel">
+        <h3>Admin response</h3>
+        {% if row.admin_reply_full %}
+        <pre class="mono-block">{{ row.admin_reply_full }}</pre>
+        {% else %}
+        <p class="muted">No admin response yet.</p>
+        {% endif %}
+      </section>
+
+      <section class="ticket-window-panel">
+        <h3>Shortcut actions</h3>
+        <div class="ticket-window-actions-grid">
+          {% for shortcut in shortcut_rows %}
+          <form method="post" action="/ui/admin/help/{{ ticket.id }}/shortcut" class="inline-form">
+            <input type="hidden" name="action" value="{{ shortcut.key }}" />
+            <button type="submit" class="ghost">{{ shortcut.label }}</button>
+          </form>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="ticket-window-panel">
+        <h3>Shortcut responses</h3>
+        <div class="ticket-window-actions-grid">
+          {% for template in response_templates %}
+          <form method="post" action="/ui/admin/help/{{ ticket.id }}/shortcut" class="inline-form">
+            <input type="hidden" name="action" value="{{ template.shortcut }}" />
+            <input type="hidden" name="response_template" value="{{ template.key }}" />
+            <button type="submit" class="ghost">{{ template.label }}</button>
+          </form>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="ticket-window-panel ticket-window-panel-full">
+        <h3>Update ticket</h3>
+        <form method="post" action="/ui/admin/help/{{ ticket.id }}/update" class="form compact ticket-window-update-form">
+          <label>
+            <span>Status</span>
+            <select name="status" required>
+              {% for value in status_options %}
+              <option value="{{ value }}" {% if ticket.status == value %}selected{% endif %}>{{ value }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            <span>Priority</span>
+            <select name="priority" required>
+              {% for value in priority_options %}
+              <option value="{{ value }}" {% if ticket.priority == value %}selected{% endif %}>{{ value }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            <span>Category</span>
+            <select name="category" required>
+              {% for value, label in category_options.items() %}
+              <option value="{{ value }}" {% if ticket.category == value %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            <span>Response template</span>
+            <select name="response_template">
+              <option value="">No template</option>
+              {% for template in response_templates %}
+              <option value="{{ template.key }}">{{ template.label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="ticket-window-update-reply">
+            <span>Admin response (optional)</span>
+            <textarea name="admin_reply" rows="8" maxlength="8000" placeholder="Write a response visible on the user's Help page.">{{ row.admin_reply_full }}</textarea>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" name="append_template" checked />
+            <span>Append selected template to the response text.</span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" name="clear_reply" />
+            <span>Clear saved response.</span>
+          </label>
+          <div class="inline-form">
+            <button type="submit">Save update</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  </dialog>
+  {% endfor %}
   {% else %}
   <p class="muted">No support tickets matched the current filters.</p>
   {% endif %}
 </section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  (function () {
+    function openDialog(dialog) {
+      if (!dialog) return;
+      if (typeof dialog.showModal === "function") {
+        dialog.showModal();
+      } else {
+        dialog.setAttribute("open", "open");
+      }
+    }
+
+    function closeDialog(dialog) {
+      if (!dialog) return;
+      if (typeof dialog.close === "function") {
+        dialog.close();
+      } else {
+        dialog.removeAttribute("open");
+      }
+    }
+
+    document.querySelectorAll("[data-ticket-open]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const dialogId = (button.dataset.ticketOpen || "").trim();
+        if (!dialogId) return;
+        openDialog(document.getElementById(dialogId));
+      });
+    });
+
+    document.querySelectorAll(".ticket-window-dialog").forEach((dialog) => {
+      dialog.querySelectorAll("[data-ticket-close]").forEach((button) => {
+        button.addEventListener("click", () => closeDialog(dialog));
+      });
+      dialog.addEventListener("click", (event) => {
+        if (event.target === dialog) {
+          closeDialog(dialog);
+        }
+      });
+    });
+
+    const formatter = new Intl.DateTimeFormat(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+      timeZoneName: "short",
+    });
+
+    document.querySelectorAll(".js-local-time").forEach((el) => {
+      const iso = (el.getAttribute("data-utc") || "").trim();
+      if (!iso) return;
+      const dt = new Date(iso);
+      if (Number.isNaN(dt.getTime())) return;
+      el.textContent = formatter.format(dt);
+      el.setAttribute("title", `${iso} UTC`);
+    });
+  })();
+</script>
 {% endblock %}

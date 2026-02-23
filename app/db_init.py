@@ -104,6 +104,20 @@ def ensure_schema() -> str:
             stmts.append("ALTER TABLE users ADD COLUMN messaging_disabled BOOLEAN NOT NULL DEFAULT FALSE")
         if not has_column("users", "messaging_disabled_at"):
             stmts.append("ALTER TABLE users ADD COLUMN messaging_disabled_at TIMESTAMP")
+        if not has_column("users", "security_compromised"):
+            stmts.append("ALTER TABLE users ADD COLUMN security_compromised BOOLEAN NOT NULL DEFAULT FALSE")
+        if not has_column("users", "security_compromised_at"):
+            stmts.append("ALTER TABLE users ADD COLUMN security_compromised_at TIMESTAMP")
+        if not has_column("users", "security_compromise_note"):
+            stmts.append("ALTER TABLE users ADD COLUMN security_compromise_note TEXT")
+        if not has_column("users", "directory_locked"):
+            stmts.append("ALTER TABLE users ADD COLUMN directory_locked BOOLEAN NOT NULL DEFAULT FALSE")
+        if not has_column("users", "directory_locked_at"):
+            stmts.append("ALTER TABLE users ADD COLUMN directory_locked_at TIMESTAMP")
+        if not has_column("users", "directory_lock_reason"):
+            stmts.append("ALTER TABLE users ADD COLUMN directory_lock_reason TEXT")
+        if not has_column("users", "directory_locked_by_admin_id"):
+            stmts.append("ALTER TABLE users ADD COLUMN directory_locked_by_admin_id UUID")
 
     if "direct_messages" in table_names:
         if not has_column("direct_messages", "thread_id"):
@@ -126,6 +140,10 @@ def ensure_schema() -> str:
     if "audit_logs" in table_names:
         if not has_column("audit_logs", "ip_address"):
             stmts.append("ALTER TABLE audit_logs ADD COLUMN ip_address VARCHAR(64)")
+
+    if "support_tickets" in table_names:
+        if not has_column("support_tickets", "ticket_number"):
+            stmts.append("ALTER TABLE support_tickets ADD COLUMN ticket_number INTEGER")
 
     schema_changed = False
     with engine.begin() as conn:
@@ -156,6 +174,68 @@ def ensure_schema() -> str:
                 ),
                 {"scheme": DM_ATTACHMENT_SCHEME_RECIPIENT},
             )
+
+        if "support_tickets" in table_names:
+            # Human-readable 6-digit ticket number (starts at 000001).
+            conn.execute(text("CREATE SEQUENCE IF NOT EXISTS support_ticket_number_seq START WITH 1 INCREMENT BY 1"))
+            conn.execute(
+                text(
+                    """
+                    WITH duplicate_rows AS (
+                        SELECT id
+                        FROM (
+                            SELECT
+                                id,
+                                row_number() OVER (PARTITION BY ticket_number ORDER BY created_at ASC NULLS LAST, id ASC) AS rn
+                            FROM support_tickets
+                            WHERE ticket_number BETWEEN 1 AND 999999
+                        ) ranked
+                        WHERE ranked.rn > 1
+                    )
+                    UPDATE support_tickets st
+                    SET ticket_number = NULL
+                    FROM duplicate_rows d
+                    WHERE st.id = d.id
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    WITH bounds AS (
+                        SELECT MAX(ticket_number) AS max_number
+                        FROM support_tickets
+                        WHERE ticket_number BETWEEN 1 AND 999999
+                    )
+                    SELECT setval(
+                        'support_ticket_number_seq',
+                        COALESCE((SELECT max_number FROM bounds), 1),
+                        (SELECT max_number IS NOT NULL FROM bounds)
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    UPDATE support_tickets
+                    SET ticket_number = nextval('support_ticket_number_seq')
+                    WHERE ticket_number IS NULL
+                       OR ticket_number < 1
+                       OR ticket_number > 999999
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    ALTER TABLE support_tickets
+                    ALTER COLUMN ticket_number
+                    SET DEFAULT nextval('support_ticket_number_seq')
+                    """
+                )
+            )
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_support_tickets_ticket_number ON support_tickets (ticket_number)"))
 
         # Ensure at least one system administrator exists for admin UI bootstrap.
         if "users" in table_names:

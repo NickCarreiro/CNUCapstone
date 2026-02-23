@@ -3,7 +3,7 @@
 {% block content %}
 <section class="card hero-card admin-hero">
   <div class="eyebrow">System Administration</div>
-  <h1>Support ticket review</h1>
+  <h1>Support ticket #{{ ticket_display_id }}</h1>
   <p class="muted">Review user-submitted support requests and update status for the shared inbox.</p>
   <div class="stat-row">
     <div class="stat-chip">
@@ -40,7 +40,7 @@
     <div class="meta-grid">
       <div class="meta-item">
         <div class="label">Ticket id</div>
-        <code>{{ ticket.id }}</code>
+        <code>#{{ ticket_display_id }}</code>
       </div>
       <div class="meta-item">
         <div class="label">Requester username</div>
@@ -64,11 +64,11 @@
       </div>
       <div class="meta-item">
         <div class="label">Created</div>
-        <div>{{ ticket.created_at.strftime("%Y-%m-%d %H:%M:%S UTC") if ticket.created_at else "-" }}</div>
+        <time class="js-local-time" data-utc="{{ created_iso }}">{{ created_utc }}</time>
       </div>
       <div class="meta-item">
         <div class="label">Updated</div>
-        <div>{{ ticket.updated_at.strftime("%Y-%m-%d %H:%M:%S UTC") if ticket.updated_at else "-" }}</div>
+        <time class="js-local-time" data-utc="{{ updated_iso }}">{{ updated_utc }}</time>
       </div>
       <div class="meta-item">
         <div class="label">Assigned admin</div>
@@ -76,11 +76,11 @@
       </div>
       <div class="meta-item">
         <div class="label">Last admin update</div>
-        <div>{{ ticket.last_admin_update_at.strftime("%Y-%m-%d %H:%M:%S UTC") if ticket.last_admin_update_at else "-" }}</div>
+        <time class="js-local-time" data-utc="{{ last_admin_update_iso }}">{{ last_admin_update_utc }}</time>
       </div>
       <div class="meta-item">
         <div class="label">Closed</div>
-        <div>{{ ticket.closed_at.strftime("%Y-%m-%d %H:%M:%S UTC") if ticket.closed_at else "-" }}</div>
+        <time class="js-local-time" data-utc="{{ closed_iso }}">{{ closed_utc }}</time>
       </div>
     </div>
   </div>
@@ -142,8 +142,8 @@
   <div class="card-header">
     <h2>Admin response and status</h2>
   </div>
-  <form method="post" action="/ui/admin/help/{{ ticket.id }}/update" class="form compact">
-    <label>
+  <form method="post" action="/ui/admin/help/{{ ticket.id }}/update" class="form compact admin-ticket-update-form">
+    <label class="admin-ticket-field admin-ticket-field-status">
       <span>Status</span>
       <select name="status" required>
         {% for value in status_options %}
@@ -151,7 +151,7 @@
         {% endfor %}
       </select>
     </label>
-    <label>
+    <label class="admin-ticket-field admin-ticket-field-priority">
       <span>Priority</span>
       <select name="priority" required>
         {% for value in priority_options %}
@@ -159,11 +159,15 @@
         {% endfor %}
       </select>
     </label>
-    <label>
-      <span>Admin response (optional)</span>
-      <textarea id="adminHelpReply" name="admin_reply" rows="9" maxlength="8000" placeholder="Write a response visible on the user's Help page.">{{ admin_reply }}</textarea>
+    <label class="admin-ticket-field admin-ticket-field-category">
+      <span>Category</span>
+      <select name="category" required>
+        {% for value, label in category_options.items() %}
+        <option value="{{ value }}" {% if ticket.category == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
     </label>
-    <label>
+    <label class="admin-ticket-field admin-ticket-field-template">
       <span>Response template</span>
       <select name="response_template" id="adminHelpResponseTemplate">
         <option value="">No template</option>
@@ -172,15 +176,19 @@
         {% endfor %}
       </select>
     </label>
-    <label class="toggle-row">
+    <label class="admin-ticket-field admin-ticket-field-response">
+      <span>Admin response (optional)</span>
+      <textarea id="adminHelpReply" name="admin_reply" rows="9" maxlength="8000" placeholder="Write a response visible on the user's Help page.">{{ admin_reply }}</textarea>
+    </label>
+    <label class="toggle-row admin-ticket-field admin-ticket-field-append">
       <input type="checkbox" name="append_template" checked />
       <span>Append template to existing text (instead of replacing empty response only)</span>
     </label>
-    <label class="toggle-row">
+    <label class="toggle-row admin-ticket-field admin-ticket-field-clear">
       <input type="checkbox" name="clear_reply" />
       <span>Clear saved response</span>
     </label>
-    <div class="inline-form">
+    <div class="inline-form admin-ticket-field admin-ticket-field-actions">
       <button type="submit">Save ticket update</button>
       <a class="pill ghost" href="/ui/admin/help/{{ ticket.id }}">Reset</a>
     </div>
@@ -220,6 +228,26 @@
         textarea.focus();
         textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
       });
+    });
+
+    const formatter = new Intl.DateTimeFormat(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+      timeZoneName: "short",
+    });
+
+    document.querySelectorAll(".js-local-time").forEach((el) => {
+      const iso = (el.getAttribute("data-utc") || "").trim();
+      if (!iso) return;
+      const dt = new Date(iso);
+      if (Number.isNaN(dt.getTime())) return;
+      el.textContent = formatter.format(dt);
+      el.setAttribute("title", `${iso} UTC`);
     });
   })();
 </script>

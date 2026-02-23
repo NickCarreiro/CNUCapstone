@@ -44,6 +44,13 @@ class User(Base):
     disabled_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     messaging_disabled: Mapped[bool] = mapped_column(Boolean, default=False)
     messaging_disabled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    security_compromised: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    security_compromised_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    security_compromise_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    directory_locked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    directory_locked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    directory_lock_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    directory_locked_by_admin_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     last_login: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -233,6 +240,7 @@ class SupportTicket(Base):
     __tablename__ = "support_tickets"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    ticket_number: Mapped[int | None] = mapped_column(Integer, unique=True, index=True, nullable=True)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
     assigned_admin_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
     subject: Mapped[str] = mapped_column(String(200))

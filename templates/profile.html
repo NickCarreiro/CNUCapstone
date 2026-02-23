@@ -67,80 +67,218 @@
   </div>
 </section>
 
+{% set email_configured = (user.email or "")|trim != "" %}
+{% set email_verified = email_configured and user.email_verified %}
+{% set email_channel_ready = email_verified and smtp_ready %}
+{% set sms_phone_configured = (user.phone_number or "")|trim != "" %}
+{% set sms_carrier_configured = (user.sms_carrier or "")|trim != "" %}
+{% set sms_channel_ready = sms_phone_configured and sms_carrier_configured and sms_ready %}
+
 <section class="card">
   <div class="card-header">
-    <h2>Contact and visibility</h2>
+    <h2>MFA setup center</h2>
+    <div class="card-tools">
+      <a class="pill ghost" href="/ui/mfa">Open authenticator setup</a>
+    </div>
   </div>
-  <p class="muted">Manage contact visibility and MFA delivery channels (SMTP email and SMS).</p>
-  <form method="post" action="/ui/profile/preferences" class="form compact">
-    <label>
-      <span>Email</span>
-      <input type="email" name="email" value="{{ user.email or '' }}" placeholder="you@example.com" />
-    </label>
-    <label class="toggle-row">
-      <input type="checkbox" name="email_visible" {% if user.email_visible %}checked{% endif %} />
-      <span>Allow other users to see my verified email</span>
-    </label>
-    <div class="muted">
-      Email status:
-      {% if user.email and user.email_verified %}
-      Verified
-      {% elif user.email %}
-      Not verified
-      {% else %}
-      Not set
-      {% endif %}
+  <p class="muted">Set up methods in this order: contact channels, enable methods, then choose a default challenge method.</p>
+  <div class="mfa-overview-grid">
+    <article class="soft-panel mfa-method-card">
+      <div class="mfa-method-head">
+        <h3>Authenticator app</h3>
+        <span class="mfa-status-badge {% if user.totp_enabled %}is-enabled{% else %}is-off{% endif %}">
+          {% if user.totp_enabled %}Enabled{% else %}Not enabled{% endif %}
+        </span>
+      </div>
+      <p class="muted">Best security option. Uses time-based one-time codes in an authenticator app.</p>
+      <p class="mfa-method-detail">
+        {% if user.totp_enabled %}
+        Your account already has TOTP enabled.
+        {% else %}
+        Open MFA setup, scan the secret, then verify one code to turn it on.
+        {% endif %}
+      </p>
+      <a class="pill" href="/ui/mfa">{% if user.totp_enabled %}Manage authenticator{% else %}Set up authenticator{% endif %}</a>
+    </article>
+
+    <article class="soft-panel mfa-method-card">
+      <div class="mfa-method-head">
+        <h3>Email code</h3>
+        <span class="mfa-status-badge {% if user.email_mfa_enabled %}is-enabled{% elif email_channel_ready %}is-ready{% else %}is-warn{% endif %}">
+          {% if user.email_mfa_enabled %}
+          Enabled
+          {% elif email_channel_ready %}
+          Ready to enable
+          {% elif not email_configured %}
+          Email required
+          {% elif not email_verified %}
+          Verify required
+          {% elif not smtp_ready %}
+          Server unavailable
+          {% else %}
+          Not ready
+          {% endif %}
+        </span>
+      </div>
+      <p class="muted">Requires a verified email and SMTP configured on the server.</p>
+      <p class="mfa-method-detail">
+        Email:
+        {% if email_configured %}<code>{{ user.email }}</code>{% else %}not set{% endif %}
+        |
+        Verification:
+        {% if email_verified %}verified{% else %}not verified{% endif %}
+      </p>
+      <p class="mfa-method-detail">
+        SMTP:
+        {% if smtp_ready %}ready{% else %}not configured{% endif %}
+      </p>
+    </article>
+
+    <article class="soft-panel mfa-method-card">
+      <div class="mfa-method-head">
+        <h3>SMS code</h3>
+        <span class="mfa-status-badge {% if user.sms_mfa_enabled %}is-enabled{% elif sms_channel_ready %}is-ready{% else %}is-warn{% endif %}">
+          {% if user.sms_mfa_enabled %}
+          Enabled
+          {% elif sms_channel_ready %}
+          Ready to enable
+          {% elif not sms_phone_configured %}
+          Phone required
+          {% elif not sms_carrier_configured %}
+          Carrier required
+          {% elif not sms_ready %}
+          Delivery unavailable
+          {% else %}
+          Not ready
+          {% endif %}
+        </span>
+      </div>
+      <p class="muted">Requires a phone number, supported carrier, and working SMS transport.</p>
+      <p class="mfa-method-detail">
+        Phone:
+        {% if sms_phone_configured %}<code>{{ user.phone_number }}</code>{% else %}not set{% endif %}
+        |
+        Carrier:
+        {% if sms_carrier_configured %}<code>{{ sms_carrier_label or user.sms_carrier }}</code>{% else %}not set{% endif %}
+      </p>
+      <p class="mfa-method-detail">
+        SMS mode: {{ sms_provider_label }} |
+        Transport:
+        {% if sms_ready %}ready{% else %}not configured{% endif %}
+      </p>
+    </article>
+  </div>
+  <p class="muted">
+    Active methods:
+    {% if mfa_methods_active %}
+      {% for method in mfa_methods_active %}
+      <code>{{ mfa_method_labels.get(method, method) }}</code>{% if not loop.last %}, {% endif %}
+      {% endfor %}
+    {% else %}
+    none
+    {% endif %}
+    |
+    Preferred:
+    {% if mfa_method_preferred %}
+    <code>{{ mfa_method_labels.get(mfa_method_preferred, mfa_method_preferred) }}</code>
+    {% else %}
+    not set
+    {% endif %}
+  </p>
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Contact and MFA preferences</h2>
+  </div>
+  <p class="muted">Use this form to configure email/SMS channels and toggle delivery-based MFA methods.</p>
+  <form method="post" action="/ui/profile/preferences" class="form compact profile-mfa-form">
+    <div class="soft-panel profile-mfa-step">
+      <h3>Step 1: Configure contact channels</h3>
+      <div class="profile-mfa-grid">
+        <label class="profile-mfa-field-full">
+          <span>Email</span>
+          <input type="email" name="email" value="{{ user.email or '' }}" placeholder="you@example.com" />
+        </label>
+        <label class="toggle-row profile-mfa-field-full">
+          <input type="checkbox" name="email_visible" {% if user.email_visible %}checked{% endif %} />
+          <span>Allow other users to see my verified email</span>
+        </label>
+        <div class="profile-mfa-field-full mfa-channel-status">
+          Email status:
+          {% if email_verified %}
+          <code>verified</code>
+          {% elif email_configured %}
+          <code>not verified</code>
+          {% else %}
+          <code>not set</code>
+          {% endif %}
+        </div>
+
+        <label>
+          <span>Phone number</span>
+          <input type="text" name="phone_number" value="{{ user.phone_number or '' }}" placeholder="+1 555 555 5555" />
+        </label>
+        <label>
+          <span>Carrier (supported gateways)</span>
+          <select name="sms_carrier">
+            <option value="">Select carrier</option>
+            {% for carrier in sms_carrier_options %}
+            <option value="{{ carrier.value }}" {% if user.sms_carrier == carrier.value %}selected{% endif %}>{{ carrier.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <div class="mfa-channel-status">
+          SMTP:
+          {% if smtp_ready %}
+          <code>ready</code>
+          {% else %}
+          <code>not configured</code>
+          {% endif %}
+        </div>
+        <div class="mfa-channel-status">
+          SMS transport:
+          {% if sms_ready %}
+          <code>ready</code>
+          {% else %}
+          <code>not configured</code>
+          {% endif %}
+        </div>
+      </div>
+      <p class="muted">If you changed your email, save this form first, then send verification.</p>
     </div>
-    <label class="toggle-row">
-      <input type="checkbox" name="email_mfa_enabled" {% if user.email_mfa_enabled %}checked{% endif %} />
-      <span>Enable email MFA codes (via SMTP)</span>
-    </label>
-    <div class="muted">
-      SMTP status:
-      {% if smtp_ready %}
-      Ready
-      {% else %}
-      Not configured
-      {% endif %}
+
+    <div class="soft-panel profile-mfa-step">
+      <h3>Step 2: Enable or disable delivery MFA methods</h3>
+      <label class="toggle-row">
+        <input type="checkbox" name="email_mfa_enabled" {% if user.email_mfa_enabled %}checked{% endif %} />
+        <span>Enable email MFA codes (requires verified email + SMTP)</span>
+      </label>
+      <label class="toggle-row">
+        <input type="checkbox" name="sms_mfa_enabled" {% if user.sms_mfa_enabled %}checked{% endif %} />
+        <span>Enable SMS MFA codes (requires phone + carrier + SMS transport)</span>
+      </label>
+      <div class="mfa-channel-status">SMS delivery mode: <code>{{ sms_provider_label }}</code></div>
+      <div class="actions">
+        <a class="pill ghost" href="/ui/mfa">Set up authenticator app (TOTP)</a>
+      </div>
     </div>
-    <label>
-      <span>Phone number (for SMS MFA option)</span>
-      <input type="text" name="phone_number" value="{{ user.phone_number or '' }}" placeholder="+1 555 555 5555" />
-    </label>
-    <label>
-      <span>Carrier (supported gateways)</span>
-      <select name="sms_carrier">
-        <option value="">Select carrier</option>
-        {% for carrier in sms_carrier_options %}
-        <option value="{{ carrier.value }}" {% if user.sms_carrier == carrier.value %}selected{% endif %}>{{ carrier.label }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label class="toggle-row">
-      <input type="checkbox" name="sms_mfa_enabled" {% if user.sms_mfa_enabled %}checked{% endif %} />
-      <span>Enable SMS MFA option for this account</span>
-    </label>
-    <div class="muted">
-      SMS delivery mode: {{ sms_provider_label }}
+
+    <div class="soft-panel profile-mfa-step">
+      <h3>Step 3: Choose preferred challenge method</h3>
+      <label>
+        <span>Preferred MFA method</span>
+        <select name="mfa_method">
+          <option value="totp" {% if mfa_method_preferred == "totp" %}selected{% endif %}>Authenticator app (TOTP)</option>
+          <option value="email" {% if mfa_method_preferred == "email" %}selected{% endif %}>Email code (SMTP)</option>
+          <option value="sms" {% if mfa_method_preferred == "sms" %}selected{% endif %}>SMS code</option>
+        </select>
+      </label>
+      <p class="muted">When multiple methods are active, this method is selected first during sign-in.</p>
     </div>
-    <div class="muted">
-      SMS transport status:
-      {% if sms_ready %}
-      Ready
-      {% else %}
-      Not configured
-      {% endif %}
-    </div>
-    <label>
-      <span>Preferred MFA method</span>
-      <select name="mfa_method">
-        <option value="totp" {% if mfa_method_preferred == "totp" %}selected{% endif %}>Authenticator app (TOTP)</option>
-        <option value="email" {% if mfa_method_preferred == "email" %}selected{% endif %}>Email code (SMTP)</option>
-        <option value="sms" {% if mfa_method_preferred == "sms" %}selected{% endif %}>SMS code</option>
-      </select>
-    </label>
+
     <div class="modal-actions">
-      <button type="submit">Save preferences</button>
+      <button type="submit">Save contact + MFA settings</button>
       <button
         type="submit"
         formaction="/ui/profile/email/send-verification"
@@ -158,14 +296,6 @@
       SMTP is not configured yet. Verification can still be generated as a manual link for development.
       {% endif %}
     </p>
-    {% if mfa_methods_active %}
-    <p class="muted">
-      Active MFA methods:
-      {% for method in mfa_methods_active %}
-      <code>{{ mfa_method_labels.get(method, method) }}</code>{% if not loop.last %}, {% endif %}
-      {% endfor %}
-    </p>
-    {% endif %}
   </form>
 </section>
 

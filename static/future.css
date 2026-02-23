@@ -1574,6 +1574,7 @@ body[data-ui="future"] .admin-action-grid .inline-form {
 
 body[data-ui="future"].page-groups .content,
 body[data-ui="future"].page-admin-users .content,
+body[data-ui="future"].page-admin-security .content,
 body[data-ui="future"].page-admin-reports .content,
 body[data-ui="future"].page-admin-report-detail .content,
 body[data-ui="future"].page-audit .content,
@@ -1604,6 +1605,119 @@ body[data-ui="future"].page-mfa .content {
 
 body[data-ui="future"].page-profile .hero-card {
   margin-bottom: 0.1rem;
+}
+
+body[data-ui="future"].page-profile .mfa-overview-grid {
+  margin-top: 0.35rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0.75rem;
+}
+
+body[data-ui="future"].page-profile .mfa-method-card {
+  display: grid;
+  gap: 0.5rem;
+  border-color: color-mix(in srgb, var(--edge) 60%, transparent);
+}
+
+body[data-ui="future"].page-profile .mfa-method-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+body[data-ui="future"].page-profile .mfa-method-head h3 {
+  margin: 0;
+  font-size: 1.02rem;
+}
+
+body[data-ui="future"].page-profile .mfa-status-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--edge) 66%, transparent);
+  padding: 0.2rem 0.58rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: color-mix(in srgb, var(--card-strong) 44%, transparent);
+  color: var(--ink-soft);
+}
+
+body[data-ui="future"].page-profile .mfa-status-badge.is-enabled {
+  border-color: color-mix(in srgb, var(--ok) 56%, transparent);
+  background: color-mix(in srgb, var(--ok) 18%, transparent);
+  color: color-mix(in srgb, var(--ok) 82%, var(--ink));
+}
+
+body[data-ui="future"].page-profile .mfa-status-badge.is-ready {
+  border-color: color-mix(in srgb, var(--accent) 52%, transparent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+body[data-ui="future"].page-profile .mfa-status-badge.is-warn {
+  border-color: color-mix(in srgb, var(--warn) 48%, transparent);
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+}
+
+body[data-ui="future"].page-profile .mfa-status-badge.is-off {
+  border-color: color-mix(in srgb, var(--edge) 66%, transparent);
+  background: color-mix(in srgb, var(--card-strong) 38%, transparent);
+}
+
+body[data-ui="future"].page-profile .mfa-method-detail {
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+
+body[data-ui="future"].page-profile .profile-mfa-form {
+  margin-top: 0.35rem;
+}
+
+body[data-ui="future"].page-profile .profile-mfa-step {
+  display: grid;
+  gap: 0.62rem;
+  padding: 0.82rem;
+  border-color: color-mix(in srgb, var(--edge) 58%, transparent);
+  background: color-mix(in srgb, var(--card-strong) 28%, transparent);
+}
+
+body[data-ui="future"].page-profile .profile-mfa-step h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+body[data-ui="future"].page-profile .profile-mfa-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.72rem;
+  align-items: end;
+}
+
+body[data-ui="future"].page-profile .profile-mfa-field-full {
+  grid-column: 1 / -1;
+}
+
+body[data-ui="future"].page-profile .mfa-channel-status {
+  font-size: 0.86rem;
+  font-weight: 650;
+  color: var(--ink-soft);
+}
+
+body[data-ui="future"].page-profile .mfa-channel-status code {
+  font-size: 0.78rem;
+}
+
+body[data-ui="future"].page-profile .profile-mfa-form .toggle-row {
+  align-items: flex-start;
+}
+
+body[data-ui="future"].page-profile .profile-mfa-form .modal-actions {
+  margin-top: 0.2rem;
 }
 
 body[data-ui="future"] .file-explorer-list {
@@ -1903,6 +2017,402 @@ body[data-ui="future"].page-admin-help .content {
   max-width: 1440px;
 }
 
+body[data-ui="future"] .ticket-window-list {
+  margin-top: 0.34rem;
+  display: grid;
+  gap: 0.76rem;
+}
+
+body[data-ui="future"] .ticket-window-row {
+  display: grid;
+  gap: 0.62rem;
+  padding: 0.8rem 0.82rem;
+  border-color: color-mix(in srgb, var(--edge) 60%, transparent);
+  background: linear-gradient(
+      165deg,
+      color-mix(in srgb, var(--card-strong) 76%, transparent),
+      color-mix(in srgb, var(--card) 66%, transparent)
+    );
+}
+
+body[data-ui="future"] .ticket-window-row.is-urgent {
+  border-color: color-mix(in srgb, var(--danger) 62%, var(--edge));
+  background: linear-gradient(
+      144deg,
+      color-mix(in srgb, var(--danger) 16%, transparent),
+      rgba(0, 0, 0, 0) 60%
+    ),
+    color-mix(in srgb, var(--card-strong) 72%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 20%, transparent);
+}
+
+body[data-ui="future"] .ticket-window-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.72rem;
+}
+
+body[data-ui="future"] .ticket-window-main {
+  min-width: 0;
+  display: grid;
+  gap: 0.24rem;
+}
+
+body[data-ui="future"] .ticket-window-id {
+  font-family: var(--ff-mono);
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+
+body[data-ui="future"] .ticket-window-open {
+  justify-self: start;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  color: var(--ink);
+  font-size: 1.02rem;
+  font-weight: 780;
+  text-align: left;
+  line-height: 1.28;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+body[data-ui="future"] .ticket-window-open:hover {
+  color: color-mix(in srgb, var(--accent) 72%, var(--ink));
+}
+
+body[data-ui="future"] .ticket-window-sub {
+  color: var(--ink-muted);
+  font-size: 0.84rem;
+}
+
+body[data-ui="future"] .ticket-window-link {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+body[data-ui="future"] .ticket-window-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.38rem;
+  justify-content: flex-end;
+  align-items: center;
+}
+
+body[data-ui="future"] .ticket-window-preview,
+body[data-ui="future"] .ticket-window-note {
+  margin: 0;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--edge) 50%, transparent);
+  background: color-mix(in srgb, var(--card-strong) 34%, transparent);
+  padding: 0.52rem 0.62rem;
+  color: var(--ink-soft);
+  font-size: 0.88rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+body[data-ui="future"] .ticket-window-note {
+  border-style: dashed;
+  color: var(--ink-muted);
+  font-size: 0.82rem;
+}
+
+body[data-ui="future"] .ticket-window-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.44rem 0.85rem;
+}
+
+body[data-ui="future"] .ticket-window-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  font-size: 0.82rem;
+  color: var(--ink-muted);
+}
+
+body[data-ui="future"] .ticket-window-meta-item .label {
+  margin: 0;
+  font-size: 0.67rem;
+  letter-spacing: 0.12em;
+}
+
+body[data-ui="future"] .ticket-window-meta-item time,
+body[data-ui="future"] .ticket-window-meta-item div,
+body[data-ui="future"] .ticket-window-meta-item span {
+  overflow-wrap: anywhere;
+}
+
+body[data-ui="future"] .ticket-window-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  padding-top: 0.38rem;
+  border-top: 1px dashed color-mix(in srgb, var(--edge) 42%, transparent);
+}
+
+body[data-ui="future"] .ticket-window-when {
+  color: var(--ink-muted);
+  font-size: 0.83rem;
+  overflow-wrap: anywhere;
+}
+
+body[data-ui="future"] .ticket-window-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+body[data-ui="future"] code.priority-urgent {
+  border-color: color-mix(in srgb, var(--danger) 66%, transparent);
+  background: color-mix(in srgb, var(--danger) 24%, transparent);
+  color: color-mix(in srgb, var(--danger) 84%, var(--ink));
+}
+
+body[data-ui="future"] .ticket-window-dialog {
+  width: min(1180px, 96vw);
+}
+
+body[data-ui="future"] .ticket-window-dialog .modal-header h2 {
+  margin: 0.14rem 0 0;
+}
+
+body[data-ui="future"] .ticket-window-dialog-body {
+  padding: 0.15rem 1.15rem 1.2rem;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+body[data-ui="future"] .ticket-window-panel {
+  border: 1px solid color-mix(in srgb, var(--edge) 58%, transparent);
+  border-radius: var(--ff-radius-md);
+  background: color-mix(in srgb, var(--card-strong) 28%, transparent);
+  padding: 0.72rem;
+  display: grid;
+  gap: 0.58rem;
+  min-width: 0;
+}
+
+body[data-ui="future"] .ticket-window-panel h3 {
+  margin: 0;
+  font-size: 1.02rem;
+}
+
+body[data-ui="future"] .ticket-window-panel .meta-item,
+body[data-ui="future"] .ticket-window-panel .meta-item > div,
+body[data-ui="future"] .ticket-window-panel .meta-item > time,
+body[data-ui="future"] .ticket-window-panel .mono-block {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+body[data-ui="future"] .ticket-window-panel-full {
+  grid-column: 1 / -1;
+}
+
+body[data-ui="future"] .ticket-window-actions-grid {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+body[data-ui="future"] .ticket-window-actions-grid .inline-form {
+  margin: 0;
+}
+
+body[data-ui="future"] .ticket-window-actions-grid button {
+  min-height: 2.2rem;
+}
+
+body[data-ui="future"] .ticket-window-update-form {
+  margin-top: 0.1rem;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+body[data-ui="future"] .ticket-window-update-form > label {
+  min-width: 0;
+  grid-column: span 3;
+}
+
+body[data-ui="future"] .ticket-window-update-form > .ticket-window-update-reply {
+  grid-column: 1 / -1;
+}
+
+body[data-ui="future"] .ticket-window-update-form > .toggle-row {
+  grid-column: span 6;
+}
+
+body[data-ui="future"] .ticket-window-update-form > .inline-form {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+body[data-ui="future"] .ticket-window-update-form textarea {
+  min-height: 10rem;
+}
+
+body[data-ui="future"].page-admin-security .security-user-list {
+  margin-top: 0.3rem;
+  display: grid;
+  gap: 0.72rem;
+}
+
+body[data-ui="future"].page-admin-security .security-user-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.2fr) minmax(180px, 1fr) minmax(220px, 1fr) auto;
+  gap: 0.7rem;
+  align-items: center;
+  border-color: color-mix(in srgb, var(--edge) 60%, transparent);
+  background: linear-gradient(
+      165deg,
+      color-mix(in srgb, var(--card-strong) 76%, transparent),
+      color-mix(in srgb, var(--card) 66%, transparent)
+    );
+}
+
+body[data-ui="future"].page-admin-security .security-user-main {
+  min-width: 0;
+  display: grid;
+  gap: 0.25rem;
+}
+
+body[data-ui="future"].page-admin-security .security-user-open {
+  justify-self: start;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  color: var(--ink);
+  font-size: 1rem;
+  font-weight: 780;
+  text-align: left;
+  cursor: pointer;
+}
+
+body[data-ui="future"].page-admin-security .security-user-open:hover {
+  color: color-mix(in srgb, var(--accent) 72%, var(--ink));
+}
+
+body[data-ui="future"].page-admin-security .security-user-email {
+  color: var(--ink-muted);
+  font-size: 0.83rem;
+  overflow-wrap: anywhere;
+}
+
+body[data-ui="future"].page-admin-security .security-user-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.38rem;
+}
+
+body[data-ui="future"].page-admin-security .security-user-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.38rem;
+}
+
+body[data-ui="future"].page-admin-security .security-user-actions {
+  justify-self: end;
+}
+
+body[data-ui="future"].page-admin-security .security-user-dialog {
+  width: min(1080px, 96vw);
+}
+
+body[data-ui="future"].page-admin-security .security-user-dialog .modal-header h2 {
+  margin: 0.14rem 0 0;
+}
+
+body[data-ui="future"].page-admin-security .security-user-dialog-body {
+  padding: 0.15rem 1.15rem 1.2rem;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+body[data-ui="future"].page-admin-security .security-user-panel {
+  border: 1px solid color-mix(in srgb, var(--edge) 58%, transparent);
+  border-radius: var(--ff-radius-md);
+  background: color-mix(in srgb, var(--card-strong) 28%, transparent);
+  padding: 0.72rem;
+  display: grid;
+  gap: 0.58rem;
+  min-width: 0;
+}
+
+body[data-ui="future"].page-admin-security .security-user-panel h3 {
+  margin: 0;
+  font-size: 1.02rem;
+}
+
+body[data-ui="future"].page-admin-security .security-user-panel-full {
+  grid-column: 1 / -1;
+}
+
+body[data-ui="future"].page-admin-security .security-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 0.52rem;
+}
+
+body[data-ui="future"].page-admin-security .security-overview-grid .meta-item {
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--edge) 54%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--card-strong) 36%, transparent);
+  padding: 0.52rem 0.58rem;
+}
+
+body[data-ui="future"].page-admin-security .security-overview-grid .meta-item > :not(.label) {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+body[data-ui="future"].page-admin-security .security-user-form {
+  margin: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+body[data-ui="future"].page-admin-security .security-user-form-lock {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+body[data-ui="future"].page-admin-security .security-user-form-playbook {
+  grid-template-columns: minmax(150px, 220px) minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+body[data-ui="future"].page-admin-security .security-user-form input[type="text"],
+body[data-ui="future"].page-admin-security .security-user-form select {
+  min-height: 2.2rem;
+  border-radius: 12px;
+}
+
+body[data-ui="future"].page-admin-security .security-role-list {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: 0.36rem;
+}
+
 body[data-ui="future"].page-admin-help-detail .content {
   max-width: 1320px;
 }
@@ -1952,118 +2462,70 @@ body[data-ui="future"].page-help .soft-panel {
   border-color: color-mix(in srgb, var(--edge) 58%, transparent);
 }
 
-body[data-ui="future"].page-admin-help .ticket-queue-list {
-  margin-top: 0.3rem;
-  display: grid;
-  gap: 0.9rem;
-}
-
-body[data-ui="future"].page-admin-help .ticket-queue-item {
-  display: grid;
-  gap: 0.74rem;
-  border-color: color-mix(in srgb, var(--edge) 60%, transparent);
-  background: linear-gradient(
-      165deg,
-      color-mix(in srgb, var(--card-strong) 76%, transparent),
-      color-mix(in srgb, var(--card) 66%, transparent)
-    );
-}
-
-body[data-ui="future"].page-admin-help .ticket-queue-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 0.6rem;
-  flex-wrap: wrap;
-}
-
-body[data-ui="future"].page-admin-help .ticket-queue-title {
-  min-width: 0;
-  display: grid;
-  gap: 0.24rem;
-}
-
-body[data-ui="future"].page-admin-help .ticket-queue-title h3 {
-  margin: 0;
-  font-size: clamp(1rem, 1vw, 1.2rem);
-  line-height: 1.25;
-}
-
-body[data-ui="future"].page-admin-help .ticket-queue-badges {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-}
-
-body[data-ui="future"].page-admin-help .ticket-queue-meta {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 0.58rem;
-}
-
-body[data-ui="future"].page-admin-help .ticket-queue-meta .meta-item {
-  min-width: 0;
-  padding: 0.5rem 0.58rem;
-  border: 1px solid color-mix(in srgb, var(--edge) 54%, transparent);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--card-strong) 36%, transparent);
-}
-
-body[data-ui="future"].page-admin-help .ticket-queue-meta .meta-item > * {
-  min-width: 0;
-}
-
-body[data-ui="future"].page-admin-help .ticket-queue-meta .meta-item > :not(.label) {
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-
-body[data-ui="future"].page-admin-help .ticket-queue-preview {
-  display: grid;
-  gap: 0.34rem;
-  padding: 0.56rem 0.62rem;
-  border: 1px solid color-mix(in srgb, var(--edge) 54%, transparent);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--card-strong) 28%, transparent);
-}
-
-body[data-ui="future"].page-admin-help .ticket-queue-preview p {
-  color: var(--ink-soft);
-}
-
-body[data-ui="future"].page-admin-help .ticket-queue-actions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.44rem;
-}
-
-body[data-ui="future"].page-admin-help .ticket-queue-actions-primary,
-body[data-ui="future"].page-admin-help .ticket-queue-actions-responses {
-  margin-top: 0.05rem;
-  padding-top: 0.5rem;
-  border-top: 1px dashed color-mix(in srgb, var(--edge) 52%, transparent);
-}
-
-body[data-ui="future"].page-admin-help .ticket-queue-actions .inline-form {
-  margin: 0;
-}
-
-body[data-ui="future"].page-admin-help .ticket-queue-actions button,
-body[data-ui="future"].page-admin-help .ticket-queue-actions .pill {
-  padding: 0.42rem 0.8rem;
-  font-size: 0.8rem;
-}
-
-body[data-ui="future"].page-admin-help .ticket-queue-actions-responses .label {
-  margin-right: 0.2rem;
-}
-
 body[data-ui="future"].page-admin-help-detail .actions {
   margin-top: 0.45rem;
   margin-bottom: 0;
+}
+
+body[data-ui="future"].page-admin-help-detail .admin-ticket-update-form {
+  margin-top: 0.35rem;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  align-items: start;
+  gap: 0.72rem;
+}
+
+body[data-ui="future"].page-admin-help-detail .admin-ticket-update-form > .admin-ticket-field {
+  min-width: 0;
+  margin: 0;
+}
+
+body[data-ui="future"].page-admin-help-detail .admin-ticket-field-status {
+  grid-column: 1 / span 3;
+}
+
+body[data-ui="future"].page-admin-help-detail .admin-ticket-field-priority {
+  grid-column: 4 / span 3;
+}
+
+body[data-ui="future"].page-admin-help-detail .admin-ticket-field-category {
+  grid-column: 7 / span 3;
+}
+
+body[data-ui="future"].page-admin-help-detail .admin-ticket-field-template {
+  grid-column: 10 / span 3;
+}
+
+body[data-ui="future"].page-admin-help-detail .admin-ticket-field-response {
+  grid-column: 1 / -1;
+}
+
+body[data-ui="future"].page-admin-help-detail .admin-ticket-field-append {
+  grid-column: 1 / span 9;
+}
+
+body[data-ui="future"].page-admin-help-detail .admin-ticket-field-clear {
+  grid-column: 10 / span 3;
+}
+
+body[data-ui="future"].page-admin-help-detail .admin-ticket-field-actions {
+  grid-column: 1 / -1;
+}
+
+body[data-ui="future"].page-admin-help-detail .admin-ticket-update-form .toggle-row {
+  padding: 0.46rem 0.58rem;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--edge) 58%, transparent);
+  background: color-mix(in srgb, var(--card-strong) 28%, transparent);
+  align-items: flex-start;
+}
+
+body[data-ui="future"].page-admin-help-detail .admin-ticket-update-form .toggle-row > span {
+  color: var(--ink-soft);
+  line-height: 1.32;
+}
+
+body[data-ui="future"].page-admin-help-detail .admin-ticket-update-form .toggle-row input[type="checkbox"] {
+  margin-top: 0.15rem;
 }
 
 body[data-ui="future"].page-admin-help-detail .actions .inline-form {
@@ -2165,6 +2627,14 @@ body[data-ui="future"].page-admin-help-detail #adminHelpReply {
     justify-items: start;
   }
 
+  body[data-ui="future"].page-profile .mfa-overview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  body[data-ui="future"].page-profile .profile-mfa-grid {
+    grid-template-columns: 1fr;
+  }
+
   body[data-ui="future"] .nav-menu-toggle {
     display: inline-flex;
     width: 100%;
@@ -2246,30 +2716,93 @@ body[data-ui="future"].page-admin-help-detail #adminHelpReply {
     grid-column: auto;
   }
 
-  body[data-ui="future"].page-admin-help .ticket-queue-head {
+  body[data-ui="future"] .ticket-window-row {
+    align-items: stretch;
+  }
+
+  body[data-ui="future"] .ticket-window-top,
+  body[data-ui="future"] .ticket-window-foot {
     flex-direction: column;
     align-items: flex-start;
   }
 
-  body[data-ui="future"].page-admin-help .ticket-queue-badges {
+  body[data-ui="future"] .ticket-window-status {
     justify-content: flex-start;
   }
 
-  body[data-ui="future"].page-admin-help .ticket-queue-meta {
+  body[data-ui="future"] .ticket-window-meta {
+    display: grid;
     grid-template-columns: 1fr;
+    gap: 0.36rem;
   }
 
-  body[data-ui="future"].page-admin-help .ticket-queue-actions {
+  body[data-ui="future"].page-admin-security .security-user-row {
+    grid-template-columns: 1fr;
     align-items: stretch;
   }
 
-  body[data-ui="future"].page-admin-help .ticket-queue-actions .pill,
-  body[data-ui="future"].page-admin-help .ticket-queue-actions .inline-form {
+  body[data-ui="future"].page-admin-security .security-user-actions {
+    justify-self: stretch;
+  }
+
+  body[data-ui="future"].page-admin-security .security-user-actions button {
     width: 100%;
   }
 
-  body[data-ui="future"].page-admin-help .ticket-queue-actions .inline-form button {
+  body[data-ui="future"].page-admin-security .security-user-dialog {
+    width: min(100vw - 1rem, 100vw - 1rem);
+    max-width: none;
+  }
+
+  body[data-ui="future"].page-admin-security .security-user-dialog-body {
+    padding: 0.15rem 0.72rem 0.95rem;
+    grid-template-columns: 1fr;
+    gap: 0.62rem;
+  }
+
+  body[data-ui="future"].page-admin-security .security-user-form-lock,
+  body[data-ui="future"].page-admin-security .security-user-form-playbook {
+    grid-template-columns: 1fr;
+  }
+
+  body[data-ui="future"].page-admin-security .security-user-form button {
     width: 100%;
+  }
+
+  body[data-ui="future"] .ticket-window-actions {
+    width: 100%;
+  }
+
+  body[data-ui="future"] .ticket-window-actions button,
+  body[data-ui="future"] .ticket-window-actions a {
+    width: 100%;
+  }
+
+  body[data-ui="future"] .ticket-window-dialog {
+    width: min(100vw - 1rem, 100vw - 1rem);
+    max-width: none;
+  }
+
+  body[data-ui="future"] .ticket-window-dialog-body {
+    padding: 0.15rem 0.72rem 0.95rem;
+    grid-template-columns: 1fr;
+    gap: 0.62rem;
+  }
+
+  body[data-ui="future"] .ticket-window-actions-grid .inline-form,
+  body[data-ui="future"] .ticket-window-actions-grid button {
+    width: 100%;
+  }
+
+  body[data-ui="future"] .ticket-window-update-form {
+    grid-template-columns: 1fr;
+  }
+
+  body[data-ui="future"] .ticket-window-update-form > label,
+  body[data-ui="future"] .ticket-window-update-form > .ticket-window-update-reply,
+  body[data-ui="future"] .ticket-window-update-form > .toggle-row,
+  body[data-ui="future"] .ticket-window-update-form > .inline-form {
+    grid-column: auto;
   }
 
   body[data-ui="future"].page-admin-help-detail .ticket-shortcut-actions,
@@ -2278,6 +2811,22 @@ body[data-ui="future"].page-admin-help-detail #adminHelpReply {
     display: grid;
     grid-template-columns: 1fr;
     width: 100%;
+  }
+
+  body[data-ui="future"].page-admin-help-detail .admin-ticket-update-form {
+    grid-template-columns: 1fr;
+    gap: 0.65rem;
+  }
+
+  body[data-ui="future"].page-admin-help-detail .admin-ticket-field-status,
+  body[data-ui="future"].page-admin-help-detail .admin-ticket-field-priority,
+  body[data-ui="future"].page-admin-help-detail .admin-ticket-field-category,
+  body[data-ui="future"].page-admin-help-detail .admin-ticket-field-template,
+  body[data-ui="future"].page-admin-help-detail .admin-ticket-field-response,
+  body[data-ui="future"].page-admin-help-detail .admin-ticket-field-append,
+  body[data-ui="future"].page-admin-help-detail .admin-ticket-field-clear,
+  body[data-ui="future"].page-admin-help-detail .admin-ticket-field-actions {
+    grid-column: auto;
   }
 
   body[data-ui="future"].page-admin-help-detail .ticket-shortcut-actions .inline-form,

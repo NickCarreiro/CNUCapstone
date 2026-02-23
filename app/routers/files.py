@@ -2,7 +2,7 @@ import os
 import mimetypes
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -23,6 +23,12 @@ def upload_file(
     folder: str = Form(""),
     db: Session = Depends(get_db),
 ):
+    if getattr(user, "directory_locked", False):
+        raise HTTPException(
+            status_code=423,
+            detail="Directory changes are locked by an administrator. Request an admin release to continue.",
+        )
+
     ensure_user_key(db, user)
     dek = get_user_dek(db, user)
 
