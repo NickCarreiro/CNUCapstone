@@ -1,5 +1,3 @@
-@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap");
-
 /*
   FileFort "Future" UI layer.
   This file intentionally overrides the legacy theme in static/style.css.
@@ -57,7 +55,8 @@ body[data-ui="future"] {
   -moz-osx-font-smoothing: grayscale;
 }
 
-body[data-ui="future"][data-theme="dark"] {
+body[data-ui="future"][data-theme="dark"],
+html[data-theme="dark"] body[data-ui="future"] {
   --ink: #ebf2ff;
   --ink-soft: rgba(235, 242, 255, 0.86);
   --ink-muted: rgba(235, 242, 255, 0.62);
@@ -321,6 +320,57 @@ body[data-ui="future"] .nav .nav-pill {
   transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
 }
 
+body[data-ui="future"] .nav-link-main {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+body[data-ui="future"] .nav-link-main > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body[data-ui="future"] .nav-icon {
+  width: 1.02rem;
+  height: 1.02rem;
+  display: inline-grid;
+  place-items: center;
+  color: color-mix(in srgb, var(--ink-muted) 90%, transparent);
+  flex: 0 0 auto;
+}
+
+body[data-ui="future"] .nav-icon svg {
+  width: 100%;
+  height: 100%;
+  stroke: currentColor;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.85;
+}
+
+body[data-ui="future"] .nav a:hover .nav-icon,
+body[data-ui="future"] .nav .nav-pill:hover .nav-icon,
+body[data-ui="future"] .nav a[aria-current="page"] .nav-icon,
+body[data-ui="future"] .nav .nav-pill[aria-current="page"] .nav-icon {
+  color: var(--ink);
+}
+
+body[data-ui="future"] .nav-link-tail {
+  color: var(--ink-muted);
+  font-size: 1.02rem;
+  line-height: 1;
+  padding-left: 0.2rem;
+}
+
+body[data-ui="future"] .nav-section > summary .nav-link-main {
+  padding-right: 0.45rem;
+}
+
 body[data-ui="future"] .nav a:hover,
 body[data-ui="future"] .nav .nav-pill:hover {
   background: color-mix(in srgb, var(--card-strong) 55%, transparent);
@@ -388,7 +438,8 @@ body[data-ui="future"] .nav-count {
   font-weight: 800;
 }
 
-body[data-ui="future"][data-theme="dark"] .nav-count {
+body[data-ui="future"][data-theme="dark"] .nav-count,
+html[data-theme="dark"] body[data-ui="future"] .nav-count {
   color: #0a0d14;
 }
 
@@ -428,7 +479,8 @@ body[data-ui="future"] .profile-pill {
   text-align: left;
 }
 
-body[data-ui="future"][data-theme="dark"] .profile-pill {
+body[data-ui="future"][data-theme="dark"] .profile-pill,
+html[data-theme="dark"] body[data-ui="future"] .profile-pill {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
@@ -608,7 +660,8 @@ body[data-ui="future"] .user-pill {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
 }
 
-body[data-ui="future"][data-theme="dark"] .user-pill {
+body[data-ui="future"][data-theme="dark"] .user-pill,
+html[data-theme="dark"] body[data-ui="future"] .user-pill {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
@@ -804,7 +857,8 @@ body[data-ui="future"] .hero-card::before {
   opacity: 0.35;
 }
 
-body[data-ui="future"][data-theme="dark"] .hero-card::before {
+body[data-ui="future"][data-theme="dark"] .hero-card::before,
+html[data-theme="dark"] body[data-ui="future"] .hero-card::before {
   opacity: 0.18;
 }
 
@@ -947,7 +1001,8 @@ body[data-ui="future"] .stat-chip {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28);
 }
 
-body[data-ui="future"][data-theme="dark"] .stat-chip {
+body[data-ui="future"][data-theme="dark"] .stat-chip,
+html[data-theme="dark"] body[data-ui="future"] .stat-chip {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07);
 }
 
@@ -1035,6 +1090,88 @@ body[data-ui="future"] .folder-tree {
   border-radius: var(--ff-radius-lg);
   padding: 0.85rem;
   background: color-mix(in srgb, var(--card-strong) 42%, transparent);
+}
+
+body[data-ui="future"] .file-drag-handle::before {
+  content: "";
+  width: 2px;
+  height: 2px;
+  margin: 3px 0 0 5px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--ink-muted) 88%, transparent);
+  box-shadow:
+    0 4px 0 color-mix(in srgb, var(--ink-muted) 88%, transparent),
+    0 8px 0 color-mix(in srgb, var(--ink-muted) 88%, transparent),
+    4px 0 0 color-mix(in srgb, var(--ink-muted) 88%, transparent),
+    4px 4px 0 color-mix(in srgb, var(--ink-muted) 88%, transparent),
+    4px 8px 0 color-mix(in srgb, var(--ink-muted) 88%, transparent);
+  opacity: 1;
+}
+
+body[data-ui="future"] .file-type-logo {
+  width: 1.44rem;
+  height: 1.44rem;
+  border-radius: 0.42rem;
+  border: 1px solid color-mix(in srgb, var(--edge) 72%, transparent);
+  background: color-mix(in srgb, var(--card-strong) 56%, transparent);
+  color: var(--ink-soft);
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+body[data-ui="future"][data-theme="dark"] .file-type-logo,
+html[data-theme="dark"] body[data-ui="future"] .file-type-logo {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+body[data-ui="future"] .file-type-logo svg {
+  width: 1.02rem;
+  height: 1.02rem;
+  stroke: currentColor;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+body[data-ui="future"] .file-type-logo.file-type-pdf {
+  color: #f46d7f;
+  border-color: color-mix(in srgb, #f46d7f 58%, var(--edge));
+  background: color-mix(in srgb, #f46d7f 16%, transparent);
+}
+
+body[data-ui="future"] .file-type-logo.file-type-image {
+  color: #5ec6ff;
+  border-color: color-mix(in srgb, #5ec6ff 58%, var(--edge));
+  background: color-mix(in srgb, #5ec6ff 16%, transparent);
+}
+
+body[data-ui="future"] .file-type-logo.file-type-doc,
+body[data-ui="future"] .file-type-logo.file-type-sheet {
+  color: #7ecf9f;
+  border-color: color-mix(in srgb, #7ecf9f 58%, var(--edge));
+  background: color-mix(in srgb, #7ecf9f 16%, transparent);
+}
+
+body[data-ui="future"] .file-type-logo.file-type-archive {
+  color: #d0a65b;
+  border-color: color-mix(in srgb, #d0a65b 58%, var(--edge));
+  background: color-mix(in srgb, #d0a65b 16%, transparent);
+}
+
+body[data-ui="future"] .file-type-logo.file-type-audio,
+body[data-ui="future"] .file-type-logo.file-type-video {
+  color: #a992f7;
+  border-color: color-mix(in srgb, #a992f7 58%, var(--edge));
+  background: color-mix(in srgb, #a992f7 16%, transparent);
+}
+
+body[data-ui="future"] .file-type-logo.file-type-code {
+  color: #8dd7f1;
+  border-color: color-mix(in srgb, #8dd7f1 58%, var(--edge));
+  background: color-mix(in srgb, #8dd7f1 16%, transparent);
 }
 
 body[data-ui="future"] .tree-count {
@@ -1143,7 +1280,8 @@ body[data-ui="future"] .dm-thread-unread {
   font-weight: 760;
 }
 
-body[data-ui="future"][data-theme="dark"] .dm-thread-unread {
+body[data-ui="future"][data-theme="dark"] .dm-thread-unread,
+html[data-theme="dark"] body[data-ui="future"] .dm-thread-unread {
   color: #0a0d14;
 }
 
@@ -1305,7 +1443,9 @@ body[data-ui="future"] .pill:active {
 }
 
 body[data-ui="future"][data-theme="dark"] button:hover,
-body[data-ui="future"][data-theme="dark"] .pill:hover {
+body[data-ui="future"][data-theme="dark"] .pill:hover,
+html[data-theme="dark"] body[data-ui="future"] button:hover,
+html[data-theme="dark"] body[data-ui="future"] .pill:hover {
   box-shadow: 0 18px 44px rgba(0, 0, 0, 0.42);
 }
 
@@ -1577,6 +1717,15 @@ body[data-ui="future"] .terminal-input input {
   font-family: var(--ff-mono);
 }
 
+body[data-ui="future"] .terminal-metric-toggle {
+  border-color: color-mix(in srgb, var(--edge) 72%, transparent);
+  background: color-mix(in srgb, var(--card-strong) 40%, transparent);
+}
+
+body[data-ui="future"] .terminal-checkline input[type="checkbox"] {
+  accent-color: color-mix(in srgb, var(--accent) 78%, white 22%);
+}
+
 body[data-ui="future"] .filter-toggle {
   border-radius: var(--ff-radius-sm);
   border-color: color-mix(in srgb, var(--edge) 72%, transparent);
@@ -1663,14 +1812,19 @@ body[data-ui="future"] .filters-form > .filters-actions > * {
 
 @media (max-width: 760px) {
   body[data-ui="future"] .page {
-    display: flex;
-    flex-direction: column;
+    display: block;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto;
   }
 
   body[data-ui="future"] .site-header {
     height: auto;
-    position: sticky;
-    top: 0;
+    position: relative;
+    top: auto;
+    overflow: visible;
+    z-index: 40;
+    grid-column: 1 / -1;
+    grid-row: auto;
   }
 
   body[data-ui="future"] .site-header::after {
@@ -1678,11 +1832,13 @@ body[data-ui="future"] .filters-form > .filters-actions > * {
   }
 
   body[data-ui="future"] .header-inner {
+    min-height: 0;
     padding: 0.85rem 0.9rem;
     gap: 0.7rem;
   }
 
   body[data-ui="future"] .toolbar {
+    flex: 0 0 auto;
     gap: 0.65rem;
   }
 
@@ -1697,6 +1853,8 @@ body[data-ui="future"] .filters-form > .filters-actions > * {
   }
 
   body[data-ui="future"] .toolbar-actions {
+    margin-top: 0;
+    padding-top: 0.55rem;
     grid-template-columns: 1fr 1fr;
   }
 
@@ -1737,6 +1895,8 @@ body[data-ui="future"] .filters-form > .filters-actions > * {
   }
 
   body[data-ui="future"] .content {
+    grid-column: 1 / -1;
+    min-width: 0;
     padding: 1.1rem 0.9rem 2rem;
   }
 
@@ -2138,6 +2298,41 @@ body[data-ui="future"] .messages-reply-side button {
 
 body[data-ui="future"] .messages-reply-form :disabled {
   opacity: 0.6;
+}
+
+body[data-ui="future"] .dm-preview-dialog {
+  width: min(1120px, 96vw);
+}
+
+body[data-ui="future"] .dm-preview-conversation {
+  border: 1px solid color-mix(in srgb, var(--edge) 58%, transparent);
+  border-radius: var(--ff-radius-md);
+  background: color-mix(in srgb, var(--card-strong) 38%, transparent);
+}
+
+body[data-ui="future"] .dm-preview-conversation-head {
+  border-bottom: 1px solid color-mix(in srgb, var(--edge) 56%, transparent);
+}
+
+body[data-ui="future"] .dm-preview-line {
+  border-radius: var(--ff-radius-sm);
+  border: 1px solid color-mix(in srgb, var(--edge) 58%, transparent);
+  background: color-mix(in srgb, var(--card-strong) 56%, transparent);
+}
+
+body[data-ui="future"] .dm-preview-line.outbound {
+  border-color: color-mix(in srgb, var(--accent) 44%, transparent);
+  background: linear-gradient(
+      146deg,
+      color-mix(in srgb, var(--accent) 14%, transparent),
+      rgba(0, 0, 0, 0) 62%
+    ),
+    color-mix(in srgb, var(--card-strong) 56%, transparent);
+}
+
+body[data-ui="future"] .dm-preview-line.is-active {
+  border-color: color-mix(in srgb, var(--accent-2) 56%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-2) 34%, transparent);
 }
 
 @media (max-width: 1340px) {

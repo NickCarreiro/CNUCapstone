@@ -6,6 +6,25 @@
     <title>{{ title or "FileFort" }}</title>
     <script>
       (function () {
+        const key = "pfv-theme";
+        let initialTheme = "light";
+        try {
+          const stored = localStorage.getItem(key);
+          if (stored === "dark" || stored === "light") {
+            initialTheme = stored;
+          } else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+            initialTheme = "dark";
+          }
+        } catch {
+          if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+            initialTheme = "dark";
+          }
+        }
+        document.documentElement.setAttribute("data-theme", initialTheme);
+      })();
+    </script>
+    <script>
+      (function () {
         const root = document.documentElement;
         root.classList.add("vp-pending");
 
@@ -65,10 +84,87 @@
         }
       })();
     </script>
-    <link rel="stylesheet" href="/static/style.css?v=27" />
-    <link rel="stylesheet" href="/static/future.css?v=7" />
+    <style>
+      html,
+      body {
+        min-height: 100%;
+        height: 100%;
+        margin: 0;
+      }
+
+      html[data-theme="dark"] {
+        background: #050913;
+      }
+
+      html[data-theme="light"] {
+        background: #f6f7fb;
+      }
+
+      html[data-theme="dark"] body {
+        background: #050913;
+        color: #ebf2ff;
+      }
+
+      html[data-theme="light"] body {
+        background: #f6f7fb;
+        color: #0b1020;
+      }
+
+      body[data-ui="future"] .nav-icon svg,
+      body[data-ui="future"] .file-type-logo svg {
+        width: 1rem;
+        height: 1rem;
+        display: block;
+        fill: none;
+        stroke: currentColor;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      @media (max-width: 760px) {
+        html.vp-pending body {
+          opacity: 0;
+          pointer-events: none;
+        }
+
+        html.vp-ready body {
+          opacity: 1;
+          pointer-events: auto;
+        }
+      }
+    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Fraunces:opsz,wght@9..144,600;9..144,700&family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+      media="print"
+      onload="this.media='all'"
+    />
+    <noscript>
+      <link
+        rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Fraunces:opsz,wght@9..144,600;9..144,700&family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+      />
+    </noscript>
+    <link rel="preload" href="/static/style.css?v=28" as="style" />
+    <link rel="preload" href="/static/future.css?v=9" as="style" />
+    <link rel="stylesheet" href="/static/style.css?v=28" />
+    <link rel="stylesheet" href="/static/future.css?v=9" />
+    {% if user %}
+    <link rel="prefetch" href="/ui" />
+    <link rel="prefetch" href="/ui/groups" />
+    <link rel="prefetch" href="/ui/messages" />
+    <link rel="prefetch" href="/ui/help" />
+    {% if user.is_admin %}
+    <link rel="prefetch" href="/ui/admin/users" />
+    <link rel="prefetch" href="/ui/admin/reports" />
+    {% endif %}
+    {% endif %}
   </head>
-  <body data-ui="future" data-theme="light" class="{% block body_class %}{% endblock %}{% if user %} has-user-menu{% endif %}">
+  {% set _cookie_theme = request.cookies.get("pfv-theme") if request else None %}
+  {% set _initial_theme = _cookie_theme if _cookie_theme in ["light", "dark"] else "light" %}
+  <body data-ui="future" data-theme="{{ _initial_theme }}" class="{% block body_class %}{% endblock %}{% if user %} has-user-menu{% endif %}">
     <div class="page">
       <header class="site-header">
         <div class="container header-inner">
@@ -84,15 +180,49 @@
             <nav class="nav" id="pfvPrimaryNav">
               <section class="nav-group nav-group-user">
                 <div class="nav-group-title">User</div>
-                <button type="button" class="nav-pill" id="pfvTerminalNav">Terminal</button>
-                <a href="/ui" {% if _path == "/ui" %}aria-current="page"{% endif %}>Dashboard</a>
+                <button type="button" class="nav-pill" id="pfvTerminalNav">
+                  <span class="nav-link-main">
+                    <span class="nav-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24">
+                        <rect x="3" y="5" width="18" height="14" rx="2"></rect>
+                        <path d="M7.5 10l2.5 2-2.5 2"></path>
+                        <path d="M11.5 14h4.5"></path>
+                      </svg>
+                    </span>
+                    <span>Terminal</span>
+                  </span>
+                  <span class="nav-link-tail" aria-hidden="true">&rsaquo;</span>
+                </button>
+                <a href="/ui" {% if _path == "/ui" %}aria-current="page"{% endif %}>
+                  <span class="nav-link-main">
+                    <span class="nav-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24">
+                        <rect x="3" y="3" width="8" height="8" rx="1.5"></rect>
+                        <rect x="13" y="3" width="8" height="5" rx="1.5"></rect>
+                        <rect x="13" y="10" width="8" height="11" rx="1.5"></rect>
+                        <rect x="3" y="13" width="8" height="8" rx="1.5"></rect>
+                      </svg>
+                    </span>
+                    <span>Dashboard</span>
+                  </span>
+                </a>
 	                <a
 	                  href="/ui/groups"
 	                  class="nav-link-with-badge"
 	                  id="pfvNavGroupsLink"
 	                  {% if _path.startswith("/ui/groups") %}aria-current="page"{% endif %}
 	                >
-	                  <span>Groups</span>
+	                  <span class="nav-link-main">
+	                    <span class="nav-icon" aria-hidden="true">
+	                      <svg viewBox="0 0 24 24">
+	                        <circle cx="8" cy="8" r="2.5"></circle>
+	                        <circle cx="16.5" cy="9.5" r="2.2"></circle>
+	                        <path d="M4.2 17c.7-2.2 2.4-3.3 4.8-3.3s4.1 1.1 4.8 3.3"></path>
+	                        <path d="M13.1 16.7c.5-1.6 1.8-2.4 3.6-2.4 1.3 0 2.4.4 3.1 1.3"></path>
+	                      </svg>
+	                    </span>
+	                    <span>Groups</span>
+	                  </span>
 	                  <span class="nav-count" id="pfvNavBadgeGroups" hidden>0</span>
 	                </a>
 	                <a
@@ -101,16 +231,65 @@
 	                  id="pfvNavMessagesLink"
 	                  {% if _path.startswith("/ui/messages") %}aria-current="page"{% endif %}
 	                >
-	                  <span>Messages</span>
+	                  <span class="nav-link-main">
+	                    <span class="nav-icon" aria-hidden="true">
+	                      <svg viewBox="0 0 24 24">
+	                        <rect x="3" y="5" width="18" height="14" rx="2"></rect>
+	                        <path d="M4.5 7l7.5 6 7.5-6"></path>
+	                      </svg>
+	                    </span>
+	                    <span>Messages</span>
+	                  </span>
 	                  <span class="nav-count" id="pfvNavBadgeMessages" hidden>0</span>
 	                </a>
 
                 <details class="nav-section" {% if _workspace_open %}open{% endif %}>
-                  <summary>Workspace</summary>
+                  <summary>
+                    <span class="nav-link-main">
+                      <span class="nav-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24">
+                          <path d="M3 9.5a2 2 0 0 1 2-2h5l1.5 2h7.5a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+                        </svg>
+                      </span>
+                      <span>Workspace</span>
+                    </span>
+                  </summary>
                   <div class="nav-section-links">
-                    <a href="/ui/help" {% if _path.startswith("/ui/help") %}aria-current="page"{% endif %}>Help</a>
-	                  <a href="/ui/audit" {% if _path == "/ui/audit" %}aria-current="page"{% endif %}>Audit</a>
-	                  <a href="/ui/trash" {% if _path == "/ui/trash" %}aria-current="page"{% endif %}>Trash</a>
+                    <a href="/ui/help" {% if _path.startswith("/ui/help") %}aria-current="page"{% endif %}>
+                      <span class="nav-link-main">
+                        <span class="nav-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24">
+                            <circle cx="12" cy="12" r="8.5"></circle>
+                            <path d="M9.8 9.7a2.4 2.4 0 1 1 4 1.8c-.9.6-1.3 1-1.3 2.1"></path>
+                            <circle cx="12" cy="16.8" r=".7" fill="currentColor" stroke="none"></circle>
+                          </svg>
+                        </span>
+                        <span>Help</span>
+                      </span>
+                    </a>
+	                  <a href="/ui/audit" {% if _path == "/ui/audit" %}aria-current="page"{% endif %}>
+	                    <span class="nav-link-main">
+	                      <span class="nav-icon" aria-hidden="true">
+	                        <svg viewBox="0 0 24 24">
+	                          <path d="M9 3h6l2 2h2a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h2z"></path>
+	                          <path d="M8 12l2.2 2.2L16 8.5"></path>
+	                        </svg>
+	                      </span>
+	                      <span>Audit</span>
+	                    </span>
+	                  </a>
+	                  <a href="/ui/trash" {% if _path == "/ui/trash" %}aria-current="page"{% endif %}>
+	                    <span class="nav-link-main">
+	                      <span class="nav-icon" aria-hidden="true">
+	                        <svg viewBox="0 0 24 24">
+	                          <path d="M4.5 7h15"></path>
+	                          <path d="M9 7V5.8A1.8 1.8 0 0 1 10.8 4h2.4A1.8 1.8 0 0 1 15 5.8V7"></path>
+	                          <path d="M7 7l1 12h8l1-12"></path>
+	                        </svg>
+	                      </span>
+	                      <span>Trash</span>
+	                    </span>
+	                  </a>
                   </div>
                 </details>
               </section>
@@ -119,12 +298,67 @@
               <section class="nav-group nav-group-admin">
                 <div class="nav-group-title">Admin</div>
                 <details class="nav-section" {% if _admin_open %}open{% endif %}>
-                  <summary>Administration</summary>
+                  <summary>
+                    <span class="nav-link-main">
+                      <span class="nav-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24">
+                          <path d="M12 3l7 3.5v5.2c0 4.4-2.7 7.8-7 9.3-4.3-1.5-7-4.9-7-9.3V6.5z"></path>
+                          <path d="M9.5 12.5l1.5 1.5 3.5-3.5"></path>
+                        </svg>
+                      </span>
+                      <span>Administration</span>
+                    </span>
+                  </summary>
                   <div class="nav-section-links">
-                    <a href="/ui/admin/users" {% if _path.startswith("/ui/admin/users") %}aria-current="page"{% endif %}>Admin</a>
-                    <a href="/ui/admin/help" {% if _path.startswith("/ui/admin/help") %}aria-current="page"{% endif %}>Help Inbox</a>
-                    <a href="/ui/admin/reports" {% if _path.startswith("/ui/admin/reports") %}aria-current="page"{% endif %}>Reports</a>
-                    <a href="/ui/admin/audit" {% if _path == "/ui/admin/audit" %}aria-current="page"{% endif %}>Admin Audit</a>
+                    <a href="/ui/admin/users" {% if _path.startswith("/ui/admin/users") %}aria-current="page"{% endif %}>
+                      <span class="nav-link-main">
+                        <span class="nav-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24">
+                            <circle cx="9" cy="8" r="2.5"></circle>
+                            <path d="M4.5 17c.8-2.2 2.4-3.3 4.9-3.3 2.4 0 4.1 1.1 4.8 3.3"></path>
+                            <circle cx="17.2" cy="8.8" r="1.8"></circle>
+                            <path d="M14.5 15.9c.5-1.4 1.5-2.1 3.1-2.1 1.2 0 2.1.4 2.8 1.1"></path>
+                          </svg>
+                        </span>
+                        <span>Admin</span>
+                      </span>
+                    </a>
+                    <a href="/ui/admin/help" {% if _path.startswith("/ui/admin/help") %}aria-current="page"{% endif %}>
+                      <span class="nav-link-main">
+                        <span class="nav-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24">
+                            <path d="M4 7.5h16"></path>
+                            <path d="M5 5h14a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"></path>
+                            <path d="M8 11h8"></path>
+                          </svg>
+                        </span>
+                        <span>Help Inbox</span>
+                      </span>
+                    </a>
+                    <a href="/ui/admin/reports" {% if _path.startswith("/ui/admin/reports") %}aria-current="page"{% endif %}>
+                      <span class="nav-link-main">
+                        <span class="nav-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24">
+                            <path d="M5 18V6"></path>
+                            <path d="M9 18V10"></path>
+                            <path d="M13 18V8"></path>
+                            <path d="M17 18V12"></path>
+                          </svg>
+                        </span>
+                        <span>Reports</span>
+                      </span>
+                    </a>
+                    <a href="/ui/admin/audit" {% if _path == "/ui/admin/audit" %}aria-current="page"{% endif %}>
+                      <span class="nav-link-main">
+                        <span class="nav-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24">
+                            <circle cx="11" cy="11" r="6"></circle>
+                            <path d="M16 16l4 4"></path>
+                          </svg>
+                        </span>
+                        <span>Admin Audit</span>
+                      </span>
+                    </a>
                   </div>
                 </details>
               </section>
@@ -233,9 +467,18 @@
         return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
       }
 
+      function writeThemeCookie(value) {
+        try {
+          const normalized = value === "dark" ? "dark" : "light";
+          document.cookie = `pfv-theme=${normalized}; Max-Age=31536000; Path=/; SameSite=Lax`;
+        } catch {}
+      }
+
       function applyTheme(next) {
         const value = next === "dark" ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", value);
         root.dataset.theme = value;
+        writeThemeCookie(value);
         if (toggle) toggle.textContent = value === "dark" ? "Light mode" : "Dark mode";
       }
 
@@ -521,6 +764,27 @@
       }
 
       (function () {
+        const prefetched = new Set();
+
+        function prefetchPath(rawHref) {
+          if (!rawHref) return;
+          if (!rawHref.startsWith("/ui")) return;
+          if (prefetched.has(rawHref)) return;
+          prefetched.add(rawHref);
+          const link = document.createElement("link");
+          link.rel = "prefetch";
+          link.href = rawHref;
+          document.head.appendChild(link);
+        }
+
+        document.querySelectorAll("a[href^='/ui']").forEach((anchor) => {
+          const href = anchor.getAttribute("href") || "";
+          anchor.addEventListener("pointerenter", () => prefetchPath(href), { passive: true, once: true });
+          anchor.addEventListener("focus", () => prefetchPath(href), { passive: true, once: true });
+        });
+      })();
+
+      (function () {
         const COLLAPSE_PREFIX = "pfv-collapse:";
 
         function normalizeSelector(raw) {
@@ -603,6 +867,13 @@
         <div class="terminal-metric"><span class="metric-key">Status</span><span class="metric-value" id="pfvTerminalStatus">SYNCING</span></div>
         <div class="terminal-metric"><span class="metric-key">Events</span><span class="metric-value" id="pfvTerminalEventCount">0</span></div>
         <div class="terminal-metric"><span class="metric-key">Scroll</span><span class="metric-value" id="pfvTerminalScrollState">AUTO</span></div>
+        <label class="terminal-metric terminal-metric-toggle" for="pfvTerminalEncTimeline">
+          <span class="metric-key">Trace</span>
+          <span class="terminal-checkline">
+            <input type="checkbox" id="pfvTerminalEncTimeline" />
+            <span class="metric-value">ENC TIMELINE</span>
+          </span>
+        </label>
       </div>
       <div class="terminal-body" id="pfvTerminalBody" role="log" aria-live="polite" aria-relevant="additions"></div>
       <div class="terminal-shortcuts" id="pfvTerminalShortcuts">
@@ -615,12 +886,14 @@
         <button type="button" class="terminal-shortcut" data-cmd="stat">stat</button>
         <button type="button" class="terminal-shortcut" data-cmd="quota">quota</button>
         <button type="button" class="terminal-shortcut" data-cmd="encstatus">encstatus</button>
+        <button type="button" class="terminal-shortcut" data-cmd="enctimeline">enctimeline</button>
         <button type="button" class="terminal-shortcut" data-cmd="encproof">encproof</button>
+        <button type="button" class="terminal-shortcut" data-cmd="encrotate all">encrotate</button>
         <button type="button" class="terminal-shortcut" data-cmd="directory">directory</button>
       </div>
       <form class="terminal-input" id="pfvTerminalForm">
         <span class="terminal-prompt" aria-hidden="true">vault$</span>
-	        <input type="text" id="pfvTerminalCommand" name="command" placeholder="Type: help, list, tree, find, stat, view, hash, quota, encstatus, clear" autocomplete="off" />
+	        <input type="text" id="pfvTerminalCommand" name="command" placeholder="Type: help, list, tree, find, stat, view, hash, quota, encstatus, enctimeline, encrotate all, clear" autocomplete="off" />
         <button type="submit">Execute</button>
       </form>
       <span class="resize-handle handle-e" data-resize="e"></span>
@@ -641,6 +914,7 @@
         const terminalStatus = document.getElementById("pfvTerminalStatus");
 	        const terminalEventCount = document.getElementById("pfvTerminalEventCount");
 	        const terminalScrollState = document.getElementById("pfvTerminalScrollState");
+	        const terminalEncTimelineToggle = document.getElementById("pfvTerminalEncTimeline");
 	        const terminalShortcuts = document.querySelectorAll(".terminal-shortcut");
 	        if (!term || !body || !closeDot || !minDot || !maxDot) return;
         const VIEW_MARGIN = 12;
@@ -648,6 +922,7 @@
         const DESKTOP_MIN_HEIGHT = 220;
         const TERMINAL_BODY_MIN_HEIGHT = 64;
         const TERMINAL_LAYOUT_VERSION = "2";
+        const TERMINAL_ENC_TIMELINE_KEY = "pfv-terminal-enc-timeline";
 
         if (localStorage.getItem("pfv-terminal-layout-version") !== TERMINAL_LAYOUT_VERSION) {
           localStorage.removeItem("pfv-terminal-pos");
@@ -954,38 +1229,123 @@
           }
         }
 
+        async function runTerminalCommand(raw, options = {}) {
+          const trimmed = String(raw || "").trim();
+          if (!trimmed) return;
+
+          const echoCommand = options.echoCommand !== false;
+          const commandAction = options.commandAction || "cmd";
+          const resultAction = options.resultAction || "cmd";
+          const resultLevel = options.resultLevel || "SUCCESS";
+          const clearInput = options.clearInput !== false;
+          const pageContext = `${window.location.pathname}${window.location.search}`;
+
+          if (trimmed.toLowerCase() === "clear") {
+            clearTerminal();
+            if (termCommand && clearInput) termCommand.value = "";
+            setStatus("LIVE");
+            return;
+          }
+
+          if (echoCommand) appendEvent({ level: "INFO", action: commandAction, message: raw });
+          if (termCommand && clearInput) termCommand.value = "";
+          setStatus("RUNNING");
+          try {
+            const res = await fetch("/ui/terminal", {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({ command: raw, page_context: pageContext }),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+              appendEvent({ level: "ERROR", action: resultAction, message: data.detail || "Command failed" });
+            } else {
+              appendEvent({ level: resultLevel, action: resultAction, message: data.message || "OK" });
+            }
+            setStatus("LIVE");
+          } catch {
+            appendEvent({ level: "ERROR", action: resultAction, message: "Terminal command failed to send." });
+            setStatus("OFFLINE");
+          }
+        }
+
+        let encTimelineIntervalId = 0;
+        let encTimelineBusy = false;
+
+        async function runEncTimelineSnapshot({ announce = false } = {}) {
+          if (!terminalEncTimelineToggle?.checked || encTimelineBusy) return;
+          encTimelineBusy = true;
+          if (announce) {
+            appendEvent({ level: "INFO", action: "encwatch", message: "Encryption timeline enabled (auto refresh)." });
+          }
+          try {
+            await runTerminalCommand("enctimeline", {
+              echoCommand: false,
+              resultAction: "encwatch",
+              resultLevel: "INFO",
+              clearInput: false,
+            });
+          } finally {
+            encTimelineBusy = false;
+          }
+        }
+
+        function stopEncTimelinePolling() {
+          if (!encTimelineIntervalId) return;
+          clearInterval(encTimelineIntervalId);
+          encTimelineIntervalId = 0;
+        }
+
+        function setEncTimelineEnabled(enabled, { announce = true } = {}) {
+          const next = !!enabled;
+          if (terminalEncTimelineToggle) terminalEncTimelineToggle.checked = next;
+          localStorage.setItem(TERMINAL_ENC_TIMELINE_KEY, next ? "1" : "0");
+          stopEncTimelinePolling();
+          if (!next) {
+            if (announce) {
+              appendEvent({ level: "INFO", action: "encwatch", message: "Encryption timeline disabled." });
+            }
+            return;
+          }
+
+          runEncTimelineSnapshot({ announce });
+          encTimelineIntervalId = window.setInterval(() => {
+            runEncTimelineSnapshot({ announce: false });
+          }, 30000);
+        }
+
+        const encTimelineStored = localStorage.getItem(TERMINAL_ENC_TIMELINE_KEY);
+        if (terminalEncTimelineToggle) {
+          terminalEncTimelineToggle.checked = encTimelineStored === "1";
+          terminalEncTimelineToggle.addEventListener("change", () => {
+            setEncTimelineEnabled(terminalEncTimelineToggle.checked, { announce: true });
+          });
+          if (terminalEncTimelineToggle.checked) {
+            setEncTimelineEnabled(true, { announce: false });
+          }
+        }
+
+        window.addEventListener(
+          "beforeunload",
+          () => {
+            stopEncTimelinePolling();
+          },
+          { once: true }
+        );
+
 	        termForm?.addEventListener("submit", async (e) => {
 	          e.preventDefault();
 	          const raw = termCommand?.value || "";
 	          const trimmed = raw.trim();
 	          if (!trimmed) return;
-	          if (trimmed.toLowerCase() === "clear") {
-	            clearTerminal();
-	            if (termCommand) termCommand.value = "";
-	            setStatus("LIVE");
-	            return;
-	          }
-	          appendEvent({ level: "INFO", action: "cmd", message: raw });
-	          if (termCommand) termCommand.value = "";
-	          setStatus("RUNNING");
-          try {
-            const res = await fetch("/ui/terminal", {
-              method: "POST",
-              headers: { "Content-Type": "application/x-www-form-urlencoded" },
-              body: new URLSearchParams({ command: raw }),
-            });
-            const data = await res.json();
-            if (!res.ok) {
-              appendEvent({ level: "ERROR", action: "cmd", message: data.detail || "Command failed" });
-            } else {
-              appendEvent({ level: "SUCCESS", action: "cmd", message: data.message || "OK" });
-            }
-            setStatus("LIVE");
-          } catch {
-            appendEvent({ level: "ERROR", action: "cmd", message: "Terminal command failed to send." });
-            setStatus("OFFLINE");
-          }
-        });
+	          await runTerminalCommand(raw, {
+	            echoCommand: true,
+	            commandAction: "cmd",
+	            resultAction: "cmd",
+	            resultLevel: "SUCCESS",
+	            clearInput: true,
+	          });
+	        });
 
         terminalShortcuts.forEach((shortcut) => {
           shortcut.addEventListener("click", () => {

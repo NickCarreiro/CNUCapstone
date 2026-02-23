@@ -84,7 +84,10 @@
           <div class="messages-stream" id="dmStream">
             {% if thread_messages %}
               {% for item in thread_messages %}
-              <article class="messages-bubble{% if item.is_outbound %} outbound{% else %} inbound{% endif %}">
+              <article
+                class="messages-bubble{% if item.is_outbound %} outbound{% else %} inbound{% endif %}"
+                data-message-id="{{ item.id }}"
+              >
                 <div class="messages-bubble-meta">
                   <span class="messages-bubble-sender">{{ item.sender_username }} to {{ item.recipient_username }}</span>
                   <span>{{ item.created_at_utc }}</span>
@@ -94,7 +97,19 @@
                 {% endif %}
                 {% if item.has_attachment %}
                   <div class="messages-bubble-attachment">
-                    <a href="{{ item.attachment_url }}">{{ item.attachment_name }}</a>
+                    <a
+                      href="{{ item.attachment_preview_url or item.attachment_url }}"
+                      class="dm-attachment-link"
+                      data-message-id="{{ item.id }}"
+                      data-attachment-name="{{ item.attachment_name }}"
+                      data-attachment-size="{{ item.attachment_size }}"
+                      data-attachment-mime="{{ item.attachment_mime_type }}"
+                      data-created-at="{{ item.created_at_utc }}"
+                      data-preview-url="{{ item.attachment_preview_url or item.attachment_url }}"
+                      data-download-url="{{ item.attachment_download_url or item.attachment_url }}"
+                    >
+                      {{ item.attachment_name }}
+                    </a>
                     <span class="muted">({{ item.attachment_size }} bytes)</span>
                   </div>
                 {% endif %}
@@ -231,6 +246,46 @@
   </form>
 </dialog>
 
+<dialog id="dmAttachmentPreviewDialog" class="modal modal-wide dm-preview-dialog">
+  <div class="modal-header">
+    <div class="modal-header-text">
+      <h2 id="dmAttachmentPreviewTitle">Attachment preview</h2>
+      <p class="muted" id="dmAttachmentPreviewSubtitle"></p>
+    </div>
+    <div class="modal-header-actions">
+      <a class="pill" id="dmAttachmentPreviewOpen" target="_blank" rel="noopener">Open</a>
+      <a class="pill" id="dmAttachmentPreviewDownload" target="_blank" rel="noopener">Download</a>
+      <button type="button" class="ghost" id="dmAttachmentPreviewClose">Close</button>
+    </div>
+  </div>
+  <div class="dm-preview-body">
+    <aside class="dm-preview-conversation" id="dmAttachmentConversation">
+      <div class="dm-preview-conversation-head">Conversation context</div>
+      <div class="dm-preview-conversation-list" id="dmAttachmentConversationList"></div>
+    </aside>
+    <section class="dm-preview-frame-wrap">
+      <iframe id="dmAttachmentPreviewFrame" title="Message attachment preview"></iframe>
+      <p class="muted" id="dmAttachmentPreviewFallback">
+        If preview does not load, use Open (new tab) or Download.
+      </p>
+    </section>
+  </div>
+</dialog>
+
+<div class="context-menu" id="dmAttachmentMenu" hidden role="menu" aria-label="Attachment actions">
+  <div class="context-menu-header">
+    <div class="context-menu-title">Attachment</div>
+    <button type="button" class="ghost context-menu-close" data-action="close" aria-label="Close menu">Esc</button>
+  </div>
+  <div class="context-menu-body">
+    <div class="context-menu-section">
+      <div class="context-menu-kicker">Actions</div>
+      <button type="button" class="context-menu-item" data-action="preview">Preview</button>
+      <button type="button" class="context-menu-item" data-action="download">Download</button>
+    </div>
+  </div>
+</div>
+
 <script>
   (function () {
     const clearButton = document.getElementById("dmNewThread");
@@ -280,6 +335,220 @@
         const haystack = row.dataset.threadSearch || "";
         row.hidden = !!q && !haystack.includes(q);
       });
+    });
+  })();
+
+  (function () {
+    const menu = document.getElementById("dmAttachmentMenu");
+    const dialog = document.getElementById("dmAttachmentPreviewDialog");
+    const previewFrame = document.getElementById("dmAttachmentPreviewFrame");
+    const previewTitle = document.getElementById("dmAttachmentPreviewTitle");
+    const previewSubtitle = document.getElementById("dmAttachmentPreviewSubtitle");
+    const previewOpen = document.getElementById("dmAttachmentPreviewOpen");
+    const previewDownload = document.getElementById("dmAttachmentPreviewDownload");
+    const previewClose = document.getElementById("dmAttachmentPreviewClose");
+    const conversationList = document.getElementById("dmAttachmentConversationList");
+    if (!menu || !dialog || !previewFrame || !previewTitle || !previewSubtitle || !previewOpen || !previewDownload || !conversationList) {
+      return;
+    }
+
+    const closeButton = menu.querySelector("[data-action='close']");
+    const previewButton = menu.querySelector("[data-action='preview']");
+    const downloadButton = menu.querySelector("[data-action='download']");
+    const links = Array.from(document.querySelectorAll(".dm-attachment-link"));
+    const bubbles = Array.from(document.querySelectorAll(".messages-bubble"));
+
+    let activeLink = null;
+    let previewUrl = "";
+    let downloadUrl = "";
+
+    function formatBytes(bytesRaw) {
+      const bytes = Number(bytesRaw || 0);
+      if (!Number.isFinite(bytes) || bytes <= 0) return "size unknown";
+      const units = ["B", "KB", "MB", "GB"];
+      let value = bytes;
+      let unit = units[0];
+      for (const current of units) {
+        unit = current;
+        if (value < 1024 || current === units[units.length - 1]) break;
+        value /= 1024;
+      }
+      if (unit === "B") return `${Math.round(value)} B`;
+      return `${value.toFixed(2)} ${unit}`;
+    }
+
+    function buildConversationContext(messageId) {
+      conversationList.replaceChildren();
+      if (!bubbles.length) {
+        const empty = document.createElement("p");
+        empty.className = "muted";
+        empty.textContent = "No conversation context available.";
+        conversationList.appendChild(empty);
+        return;
+      }
+
+      let focusIndex = bubbles.findIndex((row) => (row.dataset.messageId || "").trim() === messageId);
+      if (focusIndex < 0) focusIndex = bubbles.length - 1;
+      const start = Math.max(0, focusIndex - 3);
+      const end = Math.min(bubbles.length, focusIndex + 4);
+
+      const fragment = document.createDocumentFragment();
+      for (let idx = start; idx < end; idx += 1) {
+        const row = bubbles[idx];
+        const item = document.createElement("article");
+        item.className = "dm-preview-line";
+        if (row.classList.contains("outbound")) item.classList.add("outbound");
+        if (idx === focusIndex) item.classList.add("is-active");
+
+        const metaText = (row.querySelector(".messages-bubble-meta")?.textContent || "").trim().replace(/\s+/g, " ");
+        const bodyText = (row.querySelector(".messages-bubble-body")?.textContent || "").trim().replace(/\s+/g, " ");
+        const attachmentText = (row.querySelector(".messages-bubble-attachment .dm-attachment-link")?.textContent || "")
+          .trim()
+          .replace(/\s+/g, " ");
+
+        let previewText = bodyText;
+        if (!previewText && attachmentText) previewText = `Attachment: ${attachmentText}`;
+        if (!previewText) previewText = "(no message body)";
+        if (previewText.length > 240) previewText = `${previewText.slice(0, 237)}...`;
+
+        const meta = document.createElement("div");
+        meta.className = "dm-preview-line-meta";
+        meta.textContent = metaText || "Message";
+
+        const content = document.createElement("div");
+        content.className = "dm-preview-line-body";
+        content.textContent = previewText;
+
+        item.append(meta, content);
+        fragment.appendChild(item);
+      }
+
+      conversationList.appendChild(fragment);
+      const active = conversationList.querySelector(".dm-preview-line.is-active");
+      active?.scrollIntoView({ block: "nearest" });
+    }
+
+    function closePreviewDialog() {
+      previewFrame.removeAttribute("src");
+      if (typeof dialog.close === "function") {
+        dialog.close();
+      } else {
+        dialog.removeAttribute("open");
+      }
+    }
+
+    function closeMenu() {
+      menu.hidden = true;
+      activeLink = null;
+      previewUrl = "";
+      downloadUrl = "";
+    }
+
+    function openMenu(x, y, nextPreviewUrl, nextDownloadUrl) {
+      previewUrl = String(nextPreviewUrl || "").trim();
+      if (!previewUrl) return;
+      downloadUrl = String(nextDownloadUrl || "").trim();
+      if (!downloadUrl) {
+        const separator = previewUrl.includes("?") ? "&" : "?";
+        downloadUrl = `${previewUrl}${separator}download=1`;
+      }
+
+      menu.hidden = false;
+      menu.style.left = "0px";
+      menu.style.top = "0px";
+
+      const menuWidth = Math.ceil(menu.offsetWidth || 220);
+      const menuHeight = Math.ceil(menu.offsetHeight || 120);
+      const maxX = Math.max(8, window.innerWidth - menuWidth - 8);
+      const maxY = Math.max(8, window.innerHeight - menuHeight - 8);
+      const finalX = Math.min(Math.max(8, Math.round(x)), maxX);
+      const finalY = Math.min(Math.max(8, Math.round(y)), maxY);
+      menu.style.left = `${finalX}px`;
+      menu.style.top = `${finalY}px`;
+    }
+
+    function openPreviewFromLink(link) {
+      const nextPreviewUrl = String(link?.dataset?.previewUrl || link?.getAttribute("href") || "").trim();
+      if (!nextPreviewUrl) return;
+      const nextDownloadUrl = String(link?.dataset?.downloadUrl || "").trim();
+      const resolvedDownloadUrl = nextDownloadUrl || `${nextPreviewUrl}${nextPreviewUrl.includes("?") ? "&" : "?"}download=1`;
+      const attachmentName = String(link?.dataset?.attachmentName || link?.textContent || "Attachment").trim();
+      const attachmentMime = String(link?.dataset?.attachmentMime || "application/octet-stream").trim();
+      const attachmentSize = formatBytes(link?.dataset?.attachmentSize || "");
+      const createdAt = String(link?.dataset?.createdAt || "").trim();
+
+      previewUrl = nextPreviewUrl;
+      downloadUrl = resolvedDownloadUrl;
+      previewOpen.setAttribute("href", previewUrl);
+      previewDownload.setAttribute("href", downloadUrl);
+      previewDownload.setAttribute("download", attachmentName || "attachment");
+
+      previewTitle.textContent = attachmentName || "Attachment preview";
+      previewSubtitle.textContent = `${attachmentSize} • ${attachmentMime}${createdAt ? ` • ${createdAt}` : ""}`;
+      buildConversationContext(String(link?.dataset?.messageId || "").trim());
+      previewFrame.setAttribute("src", previewUrl);
+
+      if (typeof dialog.showModal === "function") {
+        dialog.showModal();
+      } else {
+        dialog.setAttribute("open", "open");
+      }
+      closeMenu();
+    }
+
+    closeButton?.addEventListener("click", closeMenu);
+    previewClose?.addEventListener("click", closePreviewDialog);
+
+    previewButton?.addEventListener("click", () => {
+      if (!activeLink) return closeMenu();
+      openPreviewFromLink(activeLink);
+    });
+
+    downloadButton?.addEventListener("click", () => {
+      if (!downloadUrl) return closeMenu();
+      window.open(downloadUrl, "_blank", "noopener");
+      closeMenu();
+    });
+
+    links.forEach((link) => {
+      link.addEventListener("click", (event) => {
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+        event.preventDefault();
+        openPreviewFromLink(link);
+      });
+
+      link.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        activeLink = link;
+        const nextPreviewUrl = link.dataset.previewUrl || link.getAttribute("href") || "";
+        const nextDownloadUrl = link.dataset.downloadUrl || "";
+        openMenu(event.clientX, event.clientY, nextPreviewUrl, nextDownloadUrl);
+      });
+    });
+
+    menu.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+    });
+
+    document.addEventListener("click", (event) => {
+      if (menu.hidden) return;
+      if (event.target instanceof Element && menu.contains(event.target)) return;
+      closeMenu();
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      closeMenu();
+      closePreviewDialog();
+    });
+
+    window.addEventListener("resize", closeMenu, { passive: true });
+    window.addEventListener("scroll", closeMenu, { passive: true });
+
+    dialog.addEventListener("click", (event) => {
+      if (event.target === dialog) {
+        closePreviewDialog();
+      }
     });
   })();
 

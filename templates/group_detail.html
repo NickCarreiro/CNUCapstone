@@ -17,6 +17,80 @@
     </details>
   {% endfor %}
 {% endmacro %}
+{% macro render_file_type_logo(file_name) %}
+  {% set lower_name = (file_name or "")|lower %}
+  {% set ext = lower_name.rsplit(".", 1)[1] if "." in lower_name else "" %}
+  {% set family = "generic" %}
+  {% if ext in ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif", "heic"] %}
+    {% set family = "image" %}
+  {% elif ext == "pdf" %}
+    {% set family = "pdf" %}
+  {% elif ext in ["doc", "docx", "odt", "rtf"] %}
+    {% set family = "doc" %}
+  {% elif ext in ["xls", "xlsx", "csv", "ods"] %}
+    {% set family = "sheet" %}
+  {% elif ext in ["zip", "rar", "7z", "tar", "gz", "bz2", "xz"] %}
+    {% set family = "archive" %}
+  {% elif ext in ["mp3", "wav", "flac", "m4a", "aac", "ogg"] %}
+    {% set family = "audio" %}
+  {% elif ext in ["mp4", "mov", "mkv", "avi", "webm", "m4v"] %}
+    {% set family = "video" %}
+  {% elif ext in ["py", "js", "ts", "html", "css", "json", "yaml", "yml", "xml", "toml", "ini", "md", "txt", "sh", "sql", "java", "go", "rs", "c", "cpp", "h"] %}
+    {% set family = "code" %}
+  {% endif %}
+  <span class="file-type-logo file-type-{{ family }}" title="{{ (ext|upper) if ext else 'FILE' }}" aria-hidden="true">
+    {% if family == "image" %}
+    <svg viewBox="0 0 24 24">
+      <rect x="3.5" y="4.5" width="17" height="15" rx="2"></rect>
+      <circle cx="10" cy="10" r="1.7"></circle>
+      <path d="M5.8 17l4.2-4.2 2.8 2.8 2.1-2.1 3.3 3.5"></path>
+    </svg>
+    {% elif family == "pdf" %}
+    <svg viewBox="0 0 24 24">
+      <path d="M6 3.5h8l4 4V20a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1z"></path>
+      <path d="M14 3.5V8h4"></path>
+      <path d="M8 14h8M8 17h6"></path>
+    </svg>
+    {% elif family == "doc" %}
+    <svg viewBox="0 0 24 24">
+      <path d="M6 3.5h8l4 4V20a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1z"></path>
+      <path d="M14 3.5V8h4"></path>
+      <path d="M8.2 12.2h7.6M8.2 15h7.6M8.2 17.8h5.4"></path>
+    </svg>
+    {% elif family == "sheet" %}
+    <svg viewBox="0 0 24 24">
+      <path d="M6 3.5h8l4 4V20a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1z"></path>
+      <path d="M14 3.5V8h4"></path>
+      <path d="M8.3 11.8h7.4M8.3 14.6h7.4M8.3 17.4h7.4M11 10.5v8.4"></path>
+    </svg>
+    {% elif family == "archive" %}
+    <svg viewBox="0 0 24 24">
+      <rect x="4.2" y="4.5" width="15.6" height="16" rx="2"></rect>
+      <path d="M8.2 7.2h7.6M12 7.2v10M10.5 10h3M10.5 12.8h3M10.5 15.6h3"></path>
+    </svg>
+    {% elif family == "audio" %}
+    <svg viewBox="0 0 24 24">
+      <path d="M14 6v8.8a2.4 2.4 0 1 1-1.7-2.3V8.2l7-1.5v6.1a2.4 2.4 0 1 1-1.7-2.3V4.7z"></path>
+    </svg>
+    {% elif family == "video" %}
+    <svg viewBox="0 0 24 24">
+      <rect x="3.5" y="5.5" width="17" height="13" rx="2"></rect>
+      <path d="M10 9.3l5.4 2.7-5.4 2.7z"></path>
+    </svg>
+    {% elif family == "code" %}
+    <svg viewBox="0 0 24 24">
+      <path d="M9 8L5 12l4 4"></path>
+      <path d="M15 8l4 4-4 4"></path>
+      <path d="M13.5 6.5l-3 11"></path>
+    </svg>
+    {% else %}
+    <svg viewBox="0 0 24 24">
+      <path d="M6 3.5h8l4 4V20a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1z"></path>
+      <path d="M14 3.5V8h4"></path>
+    </svg>
+    {% endif %}
+  </span>
+{% endmacro %}
 {% macro render_group_tree_file_row(file_row, rel_path) %}
   {% if file_row %}
   <article
@@ -36,6 +110,7 @@
         data-file-id="{{ file_row.id }}"
         data-display-name="{{ file_row.display_name }}"
       ></span>
+      {{ render_file_type_logo(file_row.display_name) }}
       <div class="file-row-main-text">
         <div class="file-row-name">{{ file_row.display_name }}</div>
         <div class="file-row-path">/{{ rel_path }}</div>

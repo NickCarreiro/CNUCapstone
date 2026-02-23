@@ -12,7 +12,7 @@ import base64
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
-from urllib.parse import quote_plus, urlencode
+from urllib.parse import parse_qs, quote_plus, urlencode, urlsplit
 from urllib.request import Request as UrlRequest, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -44,8 +44,16 @@ from app.models.core import (
     User,
     UserKey,
 )
-from app.services.crypto import b64d, decrypt_file_iter, encrypt_file_to_path, unwrap_key
-from app.services.key_derivation import master_key_bytes, using_passphrase
+from app.services.crypto import (
+    b64d,
+    decrypt_file_iter,
+    encrypt_file_to_path,
+    generate_key_32,
+    reencrypt_file_to_path,
+    unwrap_key,
+    wrap_key,
+)
+from app.services.key_derivation import master_key_bytes, message_attachment_key_bytes, using_passphrase
 from app.services.group_keystore import ensure_group_key, get_group_dek
 from app.services.keystore import ensure_user_key, get_user_dek
 from app.services.activity import add_event
@@ -86,6 +94,8 @@ _TERMINAL_COMMANDS = [
     "quota",
     "encstatus",
     "encproof",
+    "enctimeline",
+    "encrotate",
     "gfiles",
     "gdownload",
     "directory",
@@ -99,6 +109,11 @@ _TERMINAL_PREVIEW_MAX_BYTES = 256 * 1024
 _TERMINAL_PREVIEW_MAX_LINES = 200
 _TERMINAL_ENCPROOF_MAX_DECRYPT_BYTES = 32 * 1024
 _TERMINAL_ENCPROOF_PREVIEW_LINES = 40
+_TERMINAL_ENCPROOF_MAX_FILES = 200
+_TERMINAL_ROTATE_TARGETS = {"all", "files", "messages", "groups"}
+_TERMINAL_TIMELINE_DEFAULT_LIMIT = 80
+_TERMINAL_TIMELINE_MAX_LIMIT = 200
+_TERMINAL_TIMELINE_MESSAGE_LIMIT = 60
 _TERMINAL_TEXT_EXTS = {
     ".txt",
     ".md",
@@ -991,6 +1006,10 @@ def _parse_terminal_command(raw: str) -> tuple[str, list[str]]:
         "encryption": "encstatus",
         "cryptostatus": "encstatus",
         "keys": "encstatus",
+        "timeline": "enctimeline",
+        "enctrace": "enctimeline",
+        "rekey": "encrotate",
+        "rotate": "encrotate",
     }
     cmd = aliases.get(cmd, cmd)
     return cmd, tokens[1:]
@@ -1076,6 +1095,439 @@ def _build_tree_lines(root: Path, start: Path, *, depth: int) -> list[str]:
 
     walk(start, "", 0)
     return lines
+
+
+def _rotation_work_path(path: Path, marker: str) -> Path:
+    token = uuid.uuid4().hex
+    return path.with_name(f".{path.name}.{marker}.{token}")
+
+
+def _cleanup_rotation_paths(paths: list[Path]) -> None:
+    for path in paths:
+        try:
+            if path.exists():
+                path.unlink()
+        except Exception:
+            logger.warning("Rotation cleanup failed for %s", path, exc_info=True)
+
+
+def _restore_rotation_swaps(swapped_paths: list[tuple[Path, Path]]) -> None:
+    for active_path, backup_path in reversed(swapped_paths):
+        if not backup_path.exists():
+            continue
+        try:
+            if active_path.exists():
+                active_path.unlink()
+            backup_path.replace(active_path)
+        except Exception:
+            logger.warning(
+                "Failed to restore rotated file from backup (%s <- %s)",
+                active_path,
+                backup_path,
+                exc_info=True,
+            )
+
+
+def _rotate_blob_in_place(
+    *,
+    old_dek: bytes,
+    new_dek: bytes,
+    path: Path,
+    nonce_b64: str,
+    tag_b64: str,
+    swapped_paths: list[tuple[Path, Path]],
+    temp_paths: list[Path],
+) -> tuple[str, str, int]:
+    tmp_path = _rotation_work_path(path, "encrotate.tmp")
+    backup_path = _rotation_work_path(path, "encrotate.bak")
+    temp_paths.append(tmp_path)
+
+    new_nonce, new_tag, plain_size = reencrypt_file_to_path(
+        old_dek=old_dek,
+        new_dek=new_dek,
+        src_path=path,
+        src_nonce_b64=nonce_b64,
+        src_tag_b64=tag_b64,
+        dst_path=tmp_path,
+    )
+
+    moved_to_backup = False
+    try:
+        path.replace(backup_path)
+        moved_to_backup = True
+        swapped_paths.append((path, backup_path))
+        tmp_path.replace(path)
+    except Exception:
+        if moved_to_backup and backup_path.exists():
+            try:
+                backup_path.replace(path)
+            except Exception:
+                logger.warning("Failed to restore original file during rotate rollback: %s", path, exc_info=True)
+        raise
+
+    return new_nonce, new_tag, plain_size
+
+
+def _rotate_user_key_material(db: Session, user: User) -> dict[str, int]:
+    key_row = ensure_user_key(db, user)
+    old_key_version = int(key_row.key_version or 1)
+
+    old_dek = get_user_dek(db, user)
+    new_dek = generate_key_32()
+
+    summary = {
+        "files_total": 0,
+        "files_rotated": 0,
+        "files_plain_skipped": 0,
+        "files_missing_meta": 0,
+        "files_missing_path": 0,
+        "files_invalid_path": 0,
+        "avatar_rotated": 0,
+        "avatar_missing_meta": 0,
+        "avatar_missing_path": 0,
+        "avatar_invalid_path": 0,
+        "recipient_attachments_total": 0,
+        "recipient_attachments_rotated": 0,
+        "recipient_attachments_missing_meta": 0,
+        "recipient_attachments_missing_path": 0,
+        "recipient_attachments_invalid_path": 0,
+        "recipient_attachments_non_recipient_scheme": 0,
+        "key_version_from": old_key_version,
+        "key_version_to": old_key_version + 1,
+    }
+
+    swapped_paths: list[tuple[Path, Path]] = []
+    temp_paths: list[Path] = []
+    committed = False
+
+    try:
+        user_root = _user_root(user)
+        file_rows = db.query(FileRecord).filter(FileRecord.user_id == user.id).all()
+        summary["files_total"] = len(file_rows)
+        for row in file_rows:
+            if not row.is_encrypted:
+                summary["files_plain_skipped"] += 1
+                continue
+            if not row.enc_nonce or not row.enc_tag:
+                summary["files_missing_meta"] += 1
+                continue
+
+            try:
+                path = _resolve_user_file_path(user, row.file_path)
+            except HTTPException:
+                summary["files_invalid_path"] += 1
+                continue
+
+            if not path.exists() or not path.is_file():
+                summary["files_missing_path"] += 1
+                continue
+
+            _ensure_no_symlink(path, user_root)
+            nonce_b64, tag_b64, plain_size = _rotate_blob_in_place(
+                old_dek=old_dek,
+                new_dek=new_dek,
+                path=path,
+                nonce_b64=row.enc_nonce,
+                tag_b64=row.enc_tag,
+                swapped_paths=swapped_paths,
+                temp_paths=temp_paths,
+            )
+            row.enc_nonce = nonce_b64
+            row.enc_tag = tag_b64
+            row.file_size = plain_size
+            summary["files_rotated"] += 1
+
+        if user.profile_image_path:
+            if not user.profile_image_nonce or not user.profile_image_tag:
+                summary["avatar_missing_meta"] += 1
+            else:
+                try:
+                    avatar_path = _safe_profile_asset_path(user.profile_image_path)
+                except HTTPException:
+                    summary["avatar_invalid_path"] += 1
+                else:
+                    if not avatar_path.exists() or not avatar_path.is_file():
+                        summary["avatar_missing_path"] += 1
+                    else:
+                        nonce_b64, tag_b64, _ = _rotate_blob_in_place(
+                            old_dek=old_dek,
+                            new_dek=new_dek,
+                            path=avatar_path,
+                            nonce_b64=user.profile_image_nonce,
+                            tag_b64=user.profile_image_tag,
+                            swapped_paths=swapped_paths,
+                            temp_paths=temp_paths,
+                        )
+                        user.profile_image_nonce = nonce_b64
+                        user.profile_image_tag = tag_b64
+                        summary["avatar_rotated"] = 1
+
+        dm_rows = (
+            db.query(DirectMessage)
+            .filter(
+                DirectMessage.recipient_id == user.id,
+                DirectMessage.attachment_path.is_not(None),
+            )
+            .all()
+        )
+        summary["recipient_attachments_total"] = len(dm_rows)
+        for row in dm_rows:
+            scheme = (row.attachment_key_scheme or "").strip().lower()
+            if scheme and scheme != DM_ATTACHMENT_SCHEME_RECIPIENT:
+                summary["recipient_attachments_non_recipient_scheme"] += 1
+                continue
+            if not row.attachment_enc_nonce or not row.attachment_enc_tag:
+                summary["recipient_attachments_missing_meta"] += 1
+                continue
+            if not row.attachment_path:
+                summary["recipient_attachments_missing_path"] += 1
+                continue
+
+            try:
+                attachment_path = _safe_message_attachment_path(row.attachment_path)
+            except HTTPException:
+                summary["recipient_attachments_invalid_path"] += 1
+                continue
+
+            if not attachment_path.exists() or not attachment_path.is_file():
+                summary["recipient_attachments_missing_path"] += 1
+                continue
+
+            nonce_b64, tag_b64, plain_size = _rotate_blob_in_place(
+                old_dek=old_dek,
+                new_dek=new_dek,
+                path=attachment_path,
+                nonce_b64=row.attachment_enc_nonce,
+                tag_b64=row.attachment_enc_tag,
+                swapped_paths=swapped_paths,
+                temp_paths=temp_paths,
+            )
+            row.attachment_enc_nonce = nonce_b64
+            row.attachment_enc_tag = tag_b64
+            row.attachment_size = plain_size
+            row.attachment_key_scheme = DM_ATTACHMENT_SCHEME_RECIPIENT
+            summary["recipient_attachments_rotated"] += 1
+
+        wrap_nonce, wrapped_dek = wrap_key(master_key_bytes(), new_dek, aad=str(user.id).encode())
+        key_row.wrap_nonce = wrap_nonce
+        key_row.wrapped_dek = wrapped_dek
+        key_row.key_version = old_key_version + 1
+        key_row.created_at = datetime.utcnow()
+
+        db.commit()
+        committed = True
+        return summary
+    except Exception:
+        db.rollback()
+        _restore_rotation_swaps(swapped_paths)
+        raise
+    finally:
+        _cleanup_rotation_paths(temp_paths)
+        if committed:
+            _cleanup_rotation_paths([backup_path for _, backup_path in swapped_paths])
+
+
+def _rotate_message_ciphertexts(
+    db: Session,
+    user: User,
+    *,
+    include_recipient_attachments: bool = True,
+) -> dict[str, int]:
+    summary = {
+        "messages_total": 0,
+        "messages_rotated": 0,
+        "messages_upgraded_plaintext": 0,
+        "messages_unavailable": 0,
+        "attachments_total": 0,
+        "attachments_system_rotated": 0,
+        "attachments_recipient_rotated": 0,
+        "attachments_recipient_skipped": 0,
+        "attachments_missing_meta": 0,
+        "attachments_missing_path": 0,
+        "attachments_invalid_path": 0,
+        "attachments_unknown_scheme": 0,
+    }
+
+    swapped_paths: list[tuple[Path, Path]] = []
+    temp_paths: list[Path] = []
+    committed = False
+
+    try:
+        dm_rows = (
+            db.query(DirectMessage)
+            .filter(or_(DirectMessage.sender_id == user.id, DirectMessage.recipient_id == user.id))
+            .all()
+        )
+        summary["messages_total"] = len(dm_rows)
+
+        system_attachment_key = message_attachment_key_bytes()
+        recipient_dek = get_user_dek(db, user) if include_recipient_attachments else b""
+
+        for row in dm_rows:
+            body = row.body or ""
+            if body:
+                if is_message_encrypted(body):
+                    plain = decrypt_message(body)
+                    if plain == "[message unavailable]":
+                        summary["messages_unavailable"] += 1
+                    else:
+                        row.body = encrypt_message(plain)
+                        summary["messages_rotated"] += 1
+                else:
+                    row.body = encrypt_message(body)
+                    summary["messages_upgraded_plaintext"] += 1
+
+            if not row.attachment_path:
+                continue
+
+            summary["attachments_total"] += 1
+            if not row.attachment_enc_nonce or not row.attachment_enc_tag:
+                summary["attachments_missing_meta"] += 1
+                continue
+
+            try:
+                attachment_path = _safe_message_attachment_path(row.attachment_path)
+            except HTTPException:
+                summary["attachments_invalid_path"] += 1
+                continue
+
+            if not attachment_path.exists() or not attachment_path.is_file():
+                summary["attachments_missing_path"] += 1
+                continue
+
+            scheme = (row.attachment_key_scheme or "").strip().lower()
+            if scheme in {"", DM_ATTACHMENT_SCHEME_RECIPIENT}:
+                if not include_recipient_attachments or row.recipient_id != user.id:
+                    summary["attachments_recipient_skipped"] += 1
+                    continue
+
+                nonce_b64, tag_b64, plain_size = _rotate_blob_in_place(
+                    old_dek=recipient_dek,
+                    new_dek=recipient_dek,
+                    path=attachment_path,
+                    nonce_b64=row.attachment_enc_nonce,
+                    tag_b64=row.attachment_enc_tag,
+                    swapped_paths=swapped_paths,
+                    temp_paths=temp_paths,
+                )
+                row.attachment_enc_nonce = nonce_b64
+                row.attachment_enc_tag = tag_b64
+                row.attachment_size = plain_size
+                row.attachment_key_scheme = DM_ATTACHMENT_SCHEME_RECIPIENT
+                summary["attachments_recipient_rotated"] += 1
+                continue
+
+            if scheme == DM_ATTACHMENT_SCHEME_SYSTEM:
+                nonce_b64, tag_b64, plain_size = _rotate_blob_in_place(
+                    old_dek=system_attachment_key,
+                    new_dek=system_attachment_key,
+                    path=attachment_path,
+                    nonce_b64=row.attachment_enc_nonce,
+                    tag_b64=row.attachment_enc_tag,
+                    swapped_paths=swapped_paths,
+                    temp_paths=temp_paths,
+                )
+                row.attachment_enc_nonce = nonce_b64
+                row.attachment_enc_tag = tag_b64
+                row.attachment_size = plain_size
+                row.attachment_key_scheme = DM_ATTACHMENT_SCHEME_SYSTEM
+                summary["attachments_system_rotated"] += 1
+                continue
+
+            summary["attachments_unknown_scheme"] += 1
+
+        db.commit()
+        committed = True
+        return summary
+    except Exception:
+        db.rollback()
+        _restore_rotation_swaps(swapped_paths)
+        raise
+    finally:
+        _cleanup_rotation_paths(temp_paths)
+        if committed:
+            _cleanup_rotation_paths([backup_path for _, backup_path in swapped_paths])
+
+
+def _rotate_group_key_material(db: Session, group: Group) -> dict[str, int | str]:
+    group_key = ensure_group_key(db, group)
+    old_key_version = int(group_key.key_version or 1)
+    old_dek = get_group_dek(db, group)
+    new_dek = generate_key_32()
+
+    summary: dict[str, int | str] = {
+        "group_id": str(group.id),
+        "group_name": group.name,
+        "files_total": 0,
+        "files_rotated": 0,
+        "files_plain_skipped": 0,
+        "files_missing_meta": 0,
+        "files_missing_path": 0,
+        "files_invalid_path": 0,
+        "key_version_from": old_key_version,
+        "key_version_to": old_key_version + 1,
+    }
+
+    swapped_paths: list[tuple[Path, Path]] = []
+    temp_paths: list[Path] = []
+    committed = False
+
+    try:
+        root = _group_root(group.id)
+        rows = db.query(GroupFileRecord).filter(GroupFileRecord.group_id == group.id).all()
+        summary["files_total"] = len(rows)
+        for row in rows:
+            if not row.is_encrypted:
+                summary["files_plain_skipped"] += 1
+                continue
+            if not row.enc_nonce or not row.enc_tag:
+                summary["files_missing_meta"] += 1
+                continue
+            try:
+                path = Path(row.file_path).resolve()
+            except Exception:
+                summary["files_invalid_path"] += 1
+                continue
+            if not path.is_relative_to(root.resolve()):
+                summary["files_invalid_path"] += 1
+                continue
+
+            if not path.exists() or not path.is_file():
+                summary["files_missing_path"] += 1
+                continue
+
+            _ensure_no_symlink(path, root)
+            nonce_b64, tag_b64, plain_size = _rotate_blob_in_place(
+                old_dek=old_dek,
+                new_dek=new_dek,
+                path=path,
+                nonce_b64=row.enc_nonce,
+                tag_b64=row.enc_tag,
+                swapped_paths=swapped_paths,
+                temp_paths=temp_paths,
+            )
+            row.enc_nonce = nonce_b64
+            row.enc_tag = tag_b64
+            row.file_size = plain_size
+            summary["files_rotated"] += 1
+
+        wrap_nonce, wrapped_dek = wrap_key(master_key_bytes(), new_dek, aad=f"group:{group.id}".encode())
+        group_key.wrap_nonce = wrap_nonce
+        group_key.wrapped_dek = wrapped_dek
+        group_key.key_version = old_key_version + 1
+        group_key.created_at = datetime.utcnow()
+
+        db.commit()
+        committed = True
+        return summary
+    except Exception:
+        db.rollback()
+        _restore_rotation_swaps(swapped_paths)
+        raise
+    finally:
+        _cleanup_rotation_paths(temp_paths)
+        if committed:
+            _cleanup_rotation_paths([backup_path for _, backup_path in swapped_paths])
 
 
 def _render_login_page(
@@ -1722,7 +2174,14 @@ def messages_home(
                 "has_attachment": bool(row.attachment_name and row.attachment_path),
                 "attachment_name": row.attachment_name,
                 "attachment_size": row.attachment_size,
+                "attachment_mime_type": row.attachment_mime_type or "",
                 "attachment_url": f"/ui/messages/{row.id}/attachment"
+                if row.attachment_name and row.attachment_path
+                else None,
+                "attachment_preview_url": f"/ui/messages/{row.id}/attachment"
+                if row.attachment_name and row.attachment_path
+                else None,
+                "attachment_download_url": f"/ui/messages/{row.id}/attachment?download=1"
                 if row.attachment_name and row.attachment_path
                 else None,
             }
@@ -1942,7 +2401,12 @@ def report_message(
 
 
 @router.get("/messages/{message_id}/attachment")
-def open_message_attachment(message_id: str, request: Request, db: Session = Depends(get_db)):
+def open_message_attachment(
+    message_id: str,
+    request: Request,
+    download: bool = False,
+    db: Session = Depends(get_db),
+):
     user = _get_current_user(db, request)
     if not user:
         return RedirectResponse(url="/ui/login", status_code=303)
@@ -1968,10 +2432,11 @@ def open_message_attachment(message_id: str, request: Request, db: Session = Dep
 
     _ensure_message_attachment_encrypted(message, path)
 
+    disposition = "attachment" if download else "inline"
     headers = {
         "Cache-Control": "no-store",
         "X-Content-Type-Options": "nosniff",
-        "Content-Disposition": f'attachment; filename="{message.attachment_name}"',
+        "Content-Disposition": f'{disposition}; filename="{message.attachment_name}"',
     }
 
     if not message.attachment_enc_nonce or not message.attachment_enc_tag:
@@ -1981,7 +2446,10 @@ def open_message_attachment(message_id: str, request: Request, db: Session = Dep
         db,
         user,
         action="message",
-        message=f"Downloaded message attachment '{message.attachment_name}'.",
+        message=(
+            f"{'Downloaded' if download else 'Previewed'} "
+            f"message attachment '{message.attachment_name}'."
+        ),
     )
     db.commit()
 
@@ -4164,6 +4632,7 @@ def activity_feed(
 def terminal_command(
     request: Request,
     command: str = Form(...),
+    page_context: str = Form(""),
     db: Session = Depends(get_db),
 ):
     user = _get_current_user(db, request)
@@ -4172,33 +4641,110 @@ def terminal_command(
 
     cmd, args = _parse_terminal_command(command)
     if cmd == "help":
-        message = (
-            "Commands:\n"
-            "  help\n"
-            "  clear\n"
-            "  pwd\n"
-            "  scope\n"
-            "  groups\n"
-            "  usegroup <group_id|group_name>\n"
-            "  useuser\n"
-            "  list [folder]\n"
-            "  tree [folder] [depth]\n"
-            "  find <pattern> [folder]\n"
-            "  stat <path>\n"
-            "  view <file> [lines]\n"
-            "  hash <file>\n"
-            "  quota [folder]\n"
-            "  encstatus\n"
-            "  encproof <file>\n"
-            "  gfiles [pattern]\n"
-            "  gdownload <file_id>\n"
-            "  move <src> <dst>\n"
-            "  copy <src> <dst>\n"
-            "  rename <src> <dst>\n"
-            "  directory <path>\n"
-            "Paths are relative to the active scope. Use usegroup/useuser to switch."
-        )
-        add_event(db, user, action="terminal", message=message)
+        help_mode = (args[0] if args else "").strip().lower()
+        if len(args) > 1 or (args and help_mode not in {"verbose", "-v", "--verbose"}):
+            raise HTTPException(status_code=400, detail="Usage: help [verbose]")
+
+        if help_mode in {"verbose", "-v", "--verbose"}:
+            message = (
+                "Commands (verbose)\n"
+                "\n"
+                "  help [verbose]\n"
+                "    Show command list. Use 'help verbose' for detailed explanations.\n"
+                "  clear\n"
+                "    Clear terminal output in the UI.\n"
+                "  pwd\n"
+                "    Show active logical root path for current scope.\n"
+                "  scope\n"
+                "    Show whether you are in user scope or group scope.\n"
+                "  groups\n"
+                "    List your group memberships and roles.\n"
+                "  usegroup <group_id|group_name>\n"
+                "    Switch scope to a specific group you belong to.\n"
+                "  useuser\n"
+                "    Switch scope back to your personal vault.\n"
+                "  list [folder]\n"
+                "    List folder entries in active scope (alias: ls).\n"
+                "  tree [folder] [depth]\n"
+                "    Show a tree view up to depth 1..6 (default 2).\n"
+                "  find <pattern> [folder]\n"
+                "    Search names recursively for matching files/folders.\n"
+                "  stat <path>\n"
+                "    Show metadata for file/folder (size, type, modified time).\n"
+                "  view <file> [lines]\n"
+                "    Show text preview (default 40 lines; max 200).\n"
+                "  hash <file>\n"
+                "    Compute SHA-256 hash of ciphertext file bytes at rest.\n"
+                "  quota [folder]\n"
+                "    Summarize folder usage (files, dirs, total bytes).\n"
+                "  encstatus\n"
+                "    Show encryption/key health for user and joined groups.\n"
+                "  encproof file <file>\n"
+                "    Demonstrate at-rest encryption and decrypted preview for one text file.\n"
+                "  encproof dir <directory>\n"
+                "    Run proof checks for all files under a directory in the active scope.\n"
+                "  encproof user\n"
+                "    Run proof checks for all files owned by your account.\n"
+                "  enctimeline [limit]\n"
+                "    Show per-item encryption status and timestamps for messages + filesystem entries.\n"
+                "    limit: max rows to scan from current scope (default 80, max 200).\n"
+                "  encrotate [all|files|messages|groups]\n"
+                "    Rotate encryption materials.\n"
+                "    files: rotate your user DEK and re-encrypt personal files.\n"
+                "    messages: re-encrypt message payloads and attachment ciphertexts.\n"
+                "    groups: rotate group DEKs only where you are owner/admin.\n"
+                "    all: run files + messages + groups.\n"
+                "  gfiles [pattern]\n"
+                "    List group file records in current group scope.\n"
+                "  gdownload <file_id>\n"
+                "    Return direct group download URL for a group file id.\n"
+                "  move <src> <dst>\n"
+                "    Move file/folder path (alias: mv). User scope only.\n"
+                "  copy <src> <dst>\n"
+                "    Copy file/folder path (alias: cp). User scope only.\n"
+                "  rename <src> <dst>\n"
+                "    Rename/move path. User scope only.\n"
+                "  directory <path>\n"
+                "    Create directory (alias: mkdir). User scope only.\n"
+                "\n"
+                "Notes:\n"
+                "  Paths are relative to active scope.\n"
+                "  Use usegroup/useuser to switch scope roots.\n"
+                "  Aliases: ls, mv, cp, mkdir, cat, sha256, du, encryption, cryptostatus, keys, timeline, enctrace, rotate, rekey."
+            )
+        else:
+            message = (
+                "Commands:\n"
+                "  help [verbose]\n"
+                "  clear\n"
+                "  pwd\n"
+                "  scope\n"
+                "  groups\n"
+                "  usegroup <group_id|group_name>\n"
+                "  useuser\n"
+                "  list [folder]\n"
+                "  tree [folder] [depth]\n"
+                "  find <pattern> [folder]\n"
+                "  stat <path>\n"
+                "  view <file> [lines]\n"
+                "  hash <file>\n"
+                "  quota [folder]\n"
+                "  encstatus\n"
+                "  encproof file <file>\n"
+                "  encproof dir <directory>\n"
+                "  encproof user\n"
+                "  enctimeline [limit]\n"
+                "  encrotate [all|files|messages|groups]\n"
+                "  gfiles [pattern]\n"
+                "  gdownload <file_id>\n"
+                "  move <src> <dst>\n"
+                "  copy <src> <dst>\n"
+                "  rename <src> <dst>\n"
+                "  directory <path>\n"
+                "Paths are relative to the active scope. Use usegroup/useuser to switch.\n"
+                "Tip: run 'help verbose' for command-by-command details."
+            )
+        add_event(db, user, action="terminal", message=f"help {'verbose' if help_mode else ''}\n{message}".rstrip())
         return {"ok": True, "message": message}
 
     if cmd == "clear":
@@ -4356,131 +4902,371 @@ def terminal_command(
         return {"ok": True, "message": message, "url": url}
 
     if cmd == "encproof":
-        if len(safe_args) < 1:
-            raise HTTPException(status_code=400, detail="Missing file path")
-        target = safe_args[0]
-        path = _safe_join(root, target)
-        _ensure_no_symlink(path, root)
-        if not path.exists() or not path.is_file():
-            raise HTTPException(status_code=400, detail="File not found")
+        if not safe_args:
+            raise HTTPException(
+                status_code=400,
+                detail="Usage: encproof file <file> | encproof dir <directory> | encproof user",
+            )
 
-        suffix = path.suffix.lower()
-        if suffix not in _TERMINAL_TEXT_EXTS:
-            mime_type, _ = mimetypes.guess_type(path.name)
-            if not (mime_type or "").startswith("text/"):
-                raise HTTPException(status_code=400, detail="encproof supports text files only (.txt/.md/etc)")
+        requested_mode = safe_args[0].strip().lower()
+        mode_args = safe_args[1:]
+        if requested_mode in {"file", "dir", "user"}:
+            mode = requested_mode
+        else:
+            # Backward compatibility: treat "encproof <path>" as file mode.
+            mode = "file"
+            mode_args = safe_args
 
-        meta_lines: list[str] = []
-        meta_lines.append(f"Scope: {scope_label}")
-        meta_lines.append(f"Path: {target}")
-        meta_lines.append(f"Ciphertext size on disk: {path.stat().st_size} bytes")
+        proof_kind = "group" if scope.get("type") == "group" and scope.get("group_id") and mode != "user" else "user"
+        proof_root = root if proof_kind == "group" else _user_root(user).resolve()
+        proof_scope_label = scope_label if proof_kind == "group" else "user"
 
-        decrypt_iter = None
-        if scope.get("type") == "group" and scope.get("group_id"):
+        proof_group_id: uuid.UUID | None = None
+        proof_group_dek: bytes | None = None
+        proof_user_dek: bytes | None = None
+        if proof_kind == "group":
             try:
-                gid = uuid.UUID(scope["group_id"])
+                proof_group_id = uuid.UUID(scope["group_id"] or "")
             except ValueError:
                 raise HTTPException(status_code=400, detail="Invalid group scope")
 
             membership = (
                 db.query(GroupMembership.role)
-                .filter(GroupMembership.group_id == gid, GroupMembership.user_id == user.id)
+                .filter(GroupMembership.group_id == proof_group_id, GroupMembership.user_id == user.id)
                 .first()
             )
             if not membership:
                 raise HTTPException(status_code=403, detail="Not a member of this group")
 
-            group = db.query(Group).filter(Group.id == gid).first()
+            group = db.query(Group).filter(Group.id == proof_group_id).first()
             if not group:
                 raise HTTPException(status_code=404, detail="Group not found")
 
             ensure_group_key(db, group)
-            record = (
-                db.query(GroupFileRecord)
-                .filter(GroupFileRecord.group_id == gid, GroupFileRecord.file_path == str(path))
-                .first()
-            )
-            if not record:
-                raise HTTPException(status_code=400, detail="File is not tracked in group DB metadata")
-            if not record.is_encrypted:
-                raise HTTPException(status_code=400, detail="File is not marked encrypted")
-            if not record.enc_nonce or not record.enc_tag:
-                raise HTTPException(status_code=500, detail="Encrypted metadata missing nonce/tag")
-
-            dek = get_group_dek(db, group)
-            decrypt_iter = decrypt_file_iter(dek, path, record.enc_nonce, record.enc_tag, chunk_size=1024 * 1024)
-            meta_lines.append(f"DB record: group_files id={record.id}")
-            meta_lines.append("Cipher: AES-256-GCM")
-            meta_lines.append(f"Nonce/tag present: yes")
+            proof_group_dek = get_group_dek(db, group)
         else:
-            record = (
-                db.query(FileRecord)
-                .filter(FileRecord.user_id == user.id, FileRecord.file_path == str(path))
-                .first()
-            )
-            if not record:
-                raise HTTPException(status_code=400, detail="File is not tracked in personal DB metadata")
-            if not record.is_encrypted:
-                raise HTTPException(status_code=400, detail="File is not marked encrypted")
-            if not record.enc_nonce or not record.enc_tag:
-                raise HTTPException(status_code=500, detail="Encrypted metadata missing nonce/tag")
+            proof_user_dek = get_user_dek(db, user)
 
-            dek = get_user_dek(db, user)
-            decrypt_iter = decrypt_file_iter(dek, path, record.enc_nonce, record.enc_tag, chunk_size=1024 * 1024)
-            meta_lines.append(f"DB record: files id={record.id}")
+        def _is_text_like_file(path: Path) -> bool:
+            suffix = path.suffix.lower()
+            if suffix in _TERMINAL_TEXT_EXTS:
+                return True
+            mime_type, _ = mimetypes.guess_type(path.name)
+            return (mime_type or "").startswith("text/")
+
+        def _collect_file_proof(
+            path: Path,
+            logical_target: str,
+            *,
+            require_text_preview: bool,
+        ) -> dict[str, object]:
+            resolved_path = path.resolve()
+            _ensure_no_symlink(resolved_path, proof_root)
+            if not resolved_path.exists() or not resolved_path.is_file():
+                raise HTTPException(status_code=400, detail="File not found")
+            if require_text_preview and not _is_text_like_file(resolved_path):
+                raise HTTPException(status_code=400, detail="encproof file supports text files only (.txt/.md/etc)")
+
+            meta_lines: list[str] = []
+            meta_lines.append(f"Scope: {proof_scope_label}")
+            meta_lines.append(f"Path: {logical_target}")
+            meta_lines.append(f"Ciphertext size on disk: {resolved_path.stat().st_size} bytes")
+
+            decrypt_iter = None
+            record_label = ""
+            if proof_kind == "group":
+                if proof_group_id is None or proof_group_dek is None:
+                    raise HTTPException(status_code=500, detail="Group proof context missing")
+                record = (
+                    db.query(GroupFileRecord)
+                    .filter(
+                        GroupFileRecord.group_id == proof_group_id,
+                        GroupFileRecord.file_path == str(resolved_path),
+                    )
+                    .first()
+                )
+                if not record:
+                    raise HTTPException(status_code=400, detail="File is not tracked in group DB metadata")
+                if not record.is_encrypted:
+                    raise HTTPException(status_code=400, detail="File is not marked encrypted")
+                if not record.enc_nonce or not record.enc_tag:
+                    raise HTTPException(status_code=500, detail="Encrypted metadata missing nonce/tag")
+
+                decrypt_iter = decrypt_file_iter(
+                    proof_group_dek,
+                    resolved_path,
+                    record.enc_nonce,
+                    record.enc_tag,
+                    chunk_size=1024 * 1024,
+                )
+                record_label = f"group_files id={record.id}"
+            else:
+                if proof_user_dek is None:
+                    raise HTTPException(status_code=500, detail="User proof context missing")
+                record = (
+                    db.query(FileRecord)
+                    .filter(
+                        FileRecord.user_id == user.id,
+                        FileRecord.file_path == str(resolved_path),
+                    )
+                    .order_by(FileRecord.uploaded_at.desc())
+                    .first()
+                )
+                if not record:
+                    raise HTTPException(status_code=400, detail="File is not tracked in personal DB metadata")
+                if not record.is_encrypted:
+                    raise HTTPException(status_code=400, detail="File is not marked encrypted")
+                if not record.enc_nonce or not record.enc_tag:
+                    raise HTTPException(status_code=500, detail="Encrypted metadata missing nonce/tag")
+
+                decrypt_iter = decrypt_file_iter(
+                    proof_user_dek,
+                    resolved_path,
+                    record.enc_nonce,
+                    record.enc_tag,
+                    chunk_size=1024 * 1024,
+                )
+                record_label = f"files id={record.id}"
+
+            meta_lines.append(f"DB record: {record_label}")
             meta_lines.append("Cipher: AES-256-GCM")
             meta_lines.append("Nonce/tag present: yes")
 
-        # Proof 1: ciphertext preview (scrambled view).
-        with path.open("rb") as fh:
-            head = fh.read(256)
-        head_hex = _hex_bytes(head, limit=64)
-        contains_null = b"\x00" in head
-        naive_text = head.decode("utf-8", errors="replace")
-        naive_lines = naive_text.splitlines()[:6]
-        naive_preview = "\n".join(naive_lines) if naive_lines else "(no visible text)"
+            with resolved_path.open("rb") as fh:
+                head = fh.read(256)
+            head_hex = _hex_bytes(head, limit=64)
+            contains_null = b"\x00" in head
 
-        # Proof 2: decrypted preview (plaintext).
-        decrypted = b""
-        if decrypt_iter is None:
-            raise HTTPException(status_code=500, detail="Decrypt pipeline not available")
-        try:
-            for chunk in decrypt_iter:
-                if not chunk:
-                    continue
-                decrypted += chunk
-                if len(decrypted) >= _TERMINAL_ENCPROOF_MAX_DECRYPT_BYTES:
-                    decrypted = decrypted[:_TERMINAL_ENCPROOF_MAX_DECRYPT_BYTES]
+            naive_preview = ""
+            if require_text_preview:
+                naive_text = head.decode("utf-8", errors="replace")
+                naive_lines = naive_text.splitlines()[:6]
+                naive_preview = "\n".join(naive_lines) if naive_lines else "(no visible text)"
+
+            decrypted = b""
+            if decrypt_iter is None:
+                raise HTTPException(status_code=500, detail="Decrypt pipeline not available")
+            try:
+                for chunk in decrypt_iter:
+                    if not chunk:
+                        continue
+                    decrypted += chunk
+                    if len(decrypted) >= _TERMINAL_ENCPROOF_MAX_DECRYPT_BYTES:
+                        decrypted = decrypted[:_TERMINAL_ENCPROOF_MAX_DECRYPT_BYTES]
+                        break
+            except Exception:
+                raise HTTPException(status_code=400, detail="Decryption failed (invalid tag or key)")
+
+            plain_preview = ""
+            if require_text_preview:
+                plain_text = decrypted.decode("utf-8", errors="replace")
+                plain_lines = plain_text.splitlines()
+                preview_lines = plain_lines[:_TERMINAL_ENCPROOF_PREVIEW_LINES]
+                plain_preview = "\n".join(preview_lines) if preview_lines else "(empty)"
+                if len(plain_lines) > len(preview_lines):
+                    plain_preview = (
+                        f"{plain_preview}\n"
+                        f"... ({len(plain_lines) - len(preview_lines)} more lines in preview window)"
+                    )
+
+            return {
+                "logical_target": logical_target,
+                "meta_lines": meta_lines,
+                "record_label": record_label,
+                "ciphertext_size": resolved_path.stat().st_size,
+                "head_hex": head_hex,
+                "contains_null": contains_null,
+                "naive_preview": naive_preview,
+                "decrypted_bytes": len(decrypted),
+                "decrypted_sha256": hashlib.sha256(decrypted).hexdigest(),
+                "plain_preview": plain_preview,
+            }
+
+        raw_args = " ".join(args).strip()
+        if mode == "file":
+            if len(mode_args) < 1:
+                raise HTTPException(status_code=400, detail="Missing file path")
+            target = mode_args[0]
+            path = _safe_join(proof_root, target)
+            proof = _collect_file_proof(path, target, require_text_preview=True)
+
+            out_lines: list[str] = []
+            out_lines.append("Encryption Proof (encproof)")
+            out_lines.append("")
+            out_lines.extend(proof["meta_lines"])
+            out_lines.append("")
+            out_lines.append("Proof 1: Encrypted At Rest (ciphertext on disk)")
+            out_lines.append(f"  Ciphertext head (hex, 64 bytes): {proof['head_hex']}")
+            out_lines.append(f"  Contains NUL bytes: {'yes' if proof['contains_null'] else 'no'}")
+            out_lines.append("  Naive UTF-8 decode of ciphertext head (first lines):")
+            out_lines.append(str(proof["naive_preview"]))
+            out_lines.append("")
+            out_lines.append("Proof 2: Decryption Output (plaintext preview)")
+            out_lines.append(f"  Decrypted preview bytes shown: {proof['decrypted_bytes']}")
+            out_lines.append(f"  Decrypted preview SHA-256: {proof['decrypted_sha256']}")
+            out_lines.append("  Plaintext preview (first lines):")
+            out_lines.append(str(proof["plain_preview"]))
+
+            message = "\n".join(out_lines)
+            add_event(db, user, action="terminal", message=f"encproof {raw_args}\n{message}".rstrip())
+            return {"ok": True, "message": message}
+
+        targets: list[tuple[str, Path]] = []
+        pre_failures: list[str] = []
+        scan_truncated = False
+
+        if mode == "dir":
+            if len(mode_args) < 1:
+                raise HTTPException(status_code=400, detail="Missing directory path")
+            dir_target = mode_args[0]
+            dir_path = _safe_join(proof_root, dir_target)
+            _ensure_no_symlink(dir_path, proof_root)
+            if not dir_path.exists() or not dir_path.is_dir():
+                raise HTTPException(status_code=400, detail="Directory not found")
+
+            scanned = 0
+            for dirpath, dirnames, filenames in os.walk(dir_path):
+                dir_path_obj = Path(dirpath)
+                clean_dirs: list[str] = []
+                for dirname in sorted(dirnames):
+                    candidate_dir = dir_path_obj / dirname
+                    if candidate_dir.is_symlink():
+                        continue
+                    clean_dirs.append(dirname)
+                dirnames[:] = clean_dirs
+
+                for filename in sorted(filenames):
+                    candidate = dir_path_obj / filename
+                    if candidate.is_symlink():
+                        continue
+                    scanned += 1
+                    if scanned > _TERMINAL_SCAN_LIMIT or len(targets) >= _TERMINAL_ENCPROOF_MAX_FILES:
+                        scan_truncated = True
+                        break
+                    rel = _terminal_rel_path(proof_root, candidate)
+                    targets.append((rel, candidate))
+                if scan_truncated:
                     break
-        except Exception:
-            raise HTTPException(status_code=400, detail="Decryption failed (invalid tag or key)")
+        elif mode == "user":
+            if mode_args:
+                raise HTTPException(status_code=400, detail="Usage: encproof user")
+            rows = (
+                db.query(FileRecord)
+                .filter(FileRecord.user_id == user.id)
+                .order_by(FileRecord.uploaded_at.desc(), FileRecord.file_name.asc())
+                .all()
+            )
+            if not rows:
+                message = "Encryption Proof (encproof)\n\nMode: user\nScope: user\n(no user files)"
+                add_event(db, user, action="terminal", message=f"encproof {raw_args}\n{message}".rstrip())
+                return {"ok": True, "message": message}
 
-        plain_text = decrypted.decode("utf-8", errors="replace")
-        plain_lines = plain_text.splitlines()
-        preview_lines = plain_lines[:_TERMINAL_ENCPROOF_PREVIEW_LINES]
-        plain_preview = "\n".join(preview_lines) if preview_lines else "(empty)"
-        if len(plain_lines) > len(preview_lines):
-            plain_preview = f"{plain_preview}\n... ({len(plain_lines) - len(preview_lines)} more lines in preview window)"
+            seen_paths: set[str] = set()
+            for row in rows:
+                try:
+                    candidate = _resolve_user_file_path(user, row.file_path).resolve()
+                except HTTPException:
+                    pre_failures.append(f"{row.file_name}: invalid file path metadata")
+                    continue
 
-        out_lines: list[str] = []
-        out_lines.append("Encryption Proof (encproof)")
+                key = str(candidate)
+                if key in seen_paths:
+                    continue
+                seen_paths.add(key)
+                rel = _terminal_rel_path(proof_root, candidate)
+                if row.is_trashed:
+                    rel = f"{rel} [trashed]"
+                targets.append((rel, candidate))
+                if len(targets) >= _TERMINAL_ENCPROOF_MAX_FILES:
+                    scan_truncated = True
+                    break
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported encproof mode")
+
+        if not targets:
+            out_lines = [
+                "Encryption Proof (encproof)",
+                "",
+                f"Mode: {mode}",
+                f"Scope: {proof_scope_label}",
+                "(no files found)",
+            ]
+            if pre_failures:
+                out_lines.append("")
+                out_lines.append("Failures")
+                for item in pre_failures[:200]:
+                    out_lines.append(f"  [FAIL] {item}")
+                if len(pre_failures) > 200:
+                    out_lines.append(f"  ... (+{len(pre_failures) - 200} more)")
+            message = "\n".join(out_lines)
+            level = "SUCCESS" if not pre_failures else "WARN"
+            add_event(
+                db,
+                user,
+                action="terminal",
+                message=f"encproof {raw_args}\n{message}".rstrip(),
+                level=level,
+            )
+            return {"ok": not pre_failures, "message": message}
+
+        success_rows: list[dict[str, object]] = []
+        failures: list[str] = pre_failures[:]
+        for logical_target, path in targets:
+            try:
+                proof = _collect_file_proof(path, logical_target, require_text_preview=False)
+                success_rows.append(proof)
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, str) else "proof failed"
+                failures.append(f"{logical_target}: {detail}")
+            except Exception as exc:
+                failures.append(f"{logical_target}: proof failed ({exc.__class__.__name__})")
+
+        out_lines = [
+            "Encryption Proof (encproof)",
+            "",
+            f"Mode: {mode}",
+            f"Scope: {proof_scope_label}",
+            f"Files targeted: {len(targets)}",
+            f"Proof OK: {len(success_rows)}",
+            f"Proof failed: {len(failures)}",
+        ]
+        if scan_truncated:
+            out_lines.append(f"Note: proof target list truncated to {_TERMINAL_ENCPROOF_MAX_FILES} files.")
+
         out_lines.append("")
-        out_lines.extend(meta_lines)
-        out_lines.append("")
-        out_lines.append("Proof 1: Encrypted At Rest (ciphertext on disk)")
-        out_lines.append(f"  Ciphertext head (hex, 64 bytes): {head_hex}")
-        out_lines.append(f"  Contains NUL bytes: {'yes' if contains_null else 'no'}")
-        out_lines.append("  Naive UTF-8 decode of ciphertext head (first lines):")
-        out_lines.append(naive_preview)
-        out_lines.append("")
-        out_lines.append("Proof 2: Decryption Output (plaintext preview)")
-        out_lines.append(f"  Decrypted preview bytes shown: {len(decrypted)}")
-        out_lines.append("  Plaintext preview (first lines):")
-        out_lines.append(plain_preview)
+        out_lines.append("Per-file cryptographic checks")
+        for item in success_rows:
+            out_lines.append(
+                f"  [OK] {item['logical_target']} | "
+                f"{item['record_label']} | ciphertext={item['ciphertext_size']} bytes"
+            )
+            out_lines.append(
+                "       "
+                f"cipher_head_hex={item['head_hex']} | "
+                f"contains_nul={'yes' if item['contains_null'] else 'no'} | "
+                f"decrypt_probe={item['decrypted_bytes']} bytes | "
+                f"probe_sha256={item['decrypted_sha256']}"
+            )
+
+        if failures:
+            out_lines.append("")
+            out_lines.append("Failures")
+            fail_limit = 200
+            for item in failures[:fail_limit]:
+                out_lines.append(f"  [FAIL] {item}")
+            if len(failures) > fail_limit:
+                out_lines.append(f"  ... (+{len(failures) - fail_limit} more)")
 
         message = "\n".join(out_lines)
-        add_event(db, user, action="terminal", message=f"encproof {target}\n{message}")
-        return {"ok": True, "message": message}
+        level = "SUCCESS" if not failures else "WARN"
+        add_event(
+            db,
+            user,
+            action="terminal",
+            message=f"encproof {raw_args}\n{message}".rstrip(),
+            level=level,
+        )
+        return {"ok": not failures, "message": message}
 
     if cmd == "list":
         target = safe_args[0] if safe_args else ""
@@ -4953,6 +5739,443 @@ def terminal_command(
         message = "\n".join(lines)
         add_event(db, user, action="terminal", message=f"encstatus\n{message}")
         return {"ok": True, "message": message}
+
+    if cmd == "enctimeline":
+        if len(args) > 1:
+            raise HTTPException(status_code=400, detail="Usage: enctimeline [limit]")
+
+        requested_limit = safe_args[0] if safe_args else ""
+        item_limit = _parse_int_arg(
+            requested_limit,
+            default=_TERMINAL_TIMELINE_DEFAULT_LIMIT,
+            minimum=10,
+            maximum=_TERMINAL_TIMELINE_MAX_LIMIT,
+            name="limit",
+        )
+
+        page_hint_raw = (page_context or "").strip()
+        page_hint = page_hint_raw[:220] if page_hint_raw else "(not provided)"
+        page_path = ""
+        thread_filter: uuid.UUID | None = None
+        if page_hint_raw:
+            try:
+                parsed = urlsplit(page_hint_raw)
+                page_path = (parsed.path or "").strip()
+                thread_values = parse_qs(parsed.query).get("thread", [])
+                if thread_values:
+                    thread_raw = (thread_values[0] or "").strip()
+                    if thread_raw:
+                        thread_filter = uuid.UUID(thread_raw)
+            except Exception:
+                page_path = page_hint_raw.split("?", 1)[0].strip()
+
+        checked_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        lines = [
+            "Encryption Timeline",
+            f"Account: {user.username}",
+            f"Checked (UTC): {checked_at}",
+            f"Scope: {scope_label}",
+            f"Page context: {page_hint}",
+            "",
+            "Messages",
+        ]
+
+        message_query = (
+            db.query(DirectMessage)
+            .options(joinedload(DirectMessage.sender), joinedload(DirectMessage.recipient))
+            .filter(or_(DirectMessage.sender_id == user.id, DirectMessage.recipient_id == user.id))
+        )
+        if thread_filter is not None:
+            message_query = message_query.filter(DirectMessage.thread_id == thread_filter)
+
+        message_rows = (
+            message_query
+            .order_by(DirectMessage.created_at.desc())
+            .limit(min(_TERMINAL_TIMELINE_MESSAGE_LIMIT, item_limit))
+            .all()
+        )
+        if not message_rows:
+            lines.append("  (no direct messages in scope)")
+        else:
+            lines.append(f"  Rows scanned: {len(message_rows)}")
+            for row in message_rows:
+                direction = "outbound" if row.sender_id == user.id else "inbound"
+                partner = row.recipient.username if row.sender_id == user.id else row.sender.username
+                body_status = "encrypted" if is_message_encrypted(row.body or "") else "plaintext"
+
+                attachment_status = "none"
+                attachment_mtime = "-"
+                if row.attachment_name and row.attachment_path:
+                    scheme = (row.attachment_key_scheme or DM_ATTACHMENT_SCHEME_RECIPIENT).strip().lower()
+                    has_meta = bool(row.attachment_enc_nonce and row.attachment_enc_tag)
+                    path_state = "missing"
+                    try:
+                        attach_path = _safe_message_attachment_path(row.attachment_path)
+                    except HTTPException:
+                        path_state = "invalid-path"
+                    else:
+                        if attach_path.exists() and attach_path.is_file():
+                            path_state = "present"
+                            attachment_mtime = datetime.utcfromtimestamp(attach_path.stat().st_mtime).isoformat(
+                                timespec="seconds"
+                            ) + "Z"
+                    attachment_status = (
+                        f"{'encrypted' if has_meta else 'metadata-missing'}"
+                        f" ({scheme}, {path_state})"
+                    )
+
+                lines.append(
+                    "  "
+                    f"{str(row.id)[:8]} {direction} {partner}: "
+                    f"body={body_status}, attachment={attachment_status}"
+                )
+                lines.append(
+                    "    "
+                    f"created={_format_utc(row.created_at)}, "
+                    f"read={_format_utc(row.read_at) if row.read_at else '-'}, "
+                    f"attachment_mtime={attachment_mtime}"
+                )
+
+        lines.extend(["", "Files and Directories"])
+
+        file_rows_scanned = 0
+        dir_rows_scanned = 0
+        file_encrypted = 0
+        file_plaintext = 0
+        file_unknown = 0
+
+        file_record_map: dict[Path, FileRecord | GroupFileRecord] = {}
+        if scope.get("type") == "group" and scope.get("group_id"):
+            try:
+                gid = uuid.UUID(scope["group_id"])
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid group scope")
+
+            membership = (
+                db.query(GroupMembership.role)
+                .filter(GroupMembership.group_id == gid, GroupMembership.user_id == user.id)
+                .first()
+            )
+            if not membership:
+                raise HTTPException(status_code=403, detail="Not a member of this group")
+
+            group_root = _group_root(gid).resolve()
+            for row in db.query(GroupFileRecord).filter(GroupFileRecord.group_id == gid).all():
+                try:
+                    resolved = Path(row.file_path).resolve()
+                    if not resolved.is_relative_to(group_root):
+                        continue
+                except Exception:
+                    continue
+                file_record_map[resolved] = row
+        else:
+            for row in (
+                db.query(FileRecord)
+                .filter(
+                    FileRecord.user_id == user.id,
+                    FileRecord.is_trashed.is_(False),
+                )
+                .all()
+            ):
+                try:
+                    resolved = _resolve_user_file_path(user, row.file_path)
+                except HTTPException:
+                    continue
+                file_record_map[resolved.resolve()] = row
+
+        filesystem_lines: list[str] = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            current_dir = Path(dirpath)
+            dirnames[:] = sorted([name for name in dirnames if not (current_dir / name).is_symlink()], key=str.lower)
+            file_names = sorted(filenames, key=str.lower)
+
+            if len(filesystem_lines) >= item_limit:
+                break
+
+            if current_dir == root or not page_path.startswith("/ui/messages"):
+                rel_dir = _terminal_rel_path(root, current_dir)
+                rel_label = "/" if rel_dir == "/" else f"{rel_dir}/"
+                try:
+                    modified = datetime.utcfromtimestamp(current_dir.stat().st_mtime).isoformat(timespec="seconds") + "Z"
+                except OSError:
+                    modified = "n/a"
+                filesystem_lines.append(f"  {rel_label} type=directory, state=container, modified={modified}")
+                dir_rows_scanned += 1
+                if len(filesystem_lines) >= item_limit:
+                    break
+
+            for filename in file_names:
+                if len(filesystem_lines) >= item_limit:
+                    break
+                candidate = current_dir / filename
+                if candidate.is_symlink():
+                    continue
+                rel = _terminal_rel_path(root, candidate)
+                modified = "n/a"
+                try:
+                    modified = datetime.utcfromtimestamp(candidate.stat().st_mtime).isoformat(timespec="seconds") + "Z"
+                except OSError:
+                    pass
+
+                record = file_record_map.get(candidate.resolve())
+                if record is None:
+                    state = "untracked"
+                    uploaded = "-"
+                    file_unknown += 1
+                else:
+                    is_encrypted = bool(getattr(record, "is_encrypted", False))
+                    has_meta = bool(getattr(record, "enc_nonce", None) and getattr(record, "enc_tag", None))
+                    if is_encrypted and has_meta:
+                        state = "encrypted"
+                        file_encrypted += 1
+                    elif is_encrypted and not has_meta:
+                        state = "encrypted-metadata-missing"
+                        file_unknown += 1
+                    else:
+                        state = "plaintext"
+                        file_plaintext += 1
+
+                    uploaded_at = getattr(record, "uploaded_at", None)
+                    uploaded = _format_utc(uploaded_at) if uploaded_at else "-"
+
+                filesystem_lines.append(
+                    f"  {rel} type=file, state={state}, uploaded={uploaded}, modified={modified}"
+                )
+                file_rows_scanned += 1
+
+        if filesystem_lines:
+            lines.append(f"  Rows scanned: {len(filesystem_lines)} (files={file_rows_scanned}, dirs={dir_rows_scanned})")
+            lines.append(
+                "  Status summary: "
+                f"encrypted={file_encrypted}, plaintext={file_plaintext}, unknown={file_unknown}"
+            )
+            lines.extend(filesystem_lines[:item_limit])
+            if len(filesystem_lines) >= item_limit:
+                lines.append("  ... (output truncated by limit)")
+        else:
+            lines.append("  (no filesystem entries)")
+
+        message = "\n".join(lines)
+        add_event(db, user, action="terminal", message=f"enctimeline {requested_limit or ''}\n{message}".rstrip())
+        return {"ok": True, "message": message}
+
+    if cmd == "encrotate":
+        if len(args) > 1:
+            raise HTTPException(status_code=400, detail="Usage: encrotate [all|files|messages|groups]")
+
+        raw_target = (args[0] if args else "all").strip().lower()
+        target = raw_target or "all"
+        if target not in _TERMINAL_ROTATE_TARGETS:
+            raise HTTPException(status_code=400, detail="Target must be one of: all, files, messages, groups")
+
+        rotate_files = target in {"all", "files"}
+        rotate_messages = target in {"all", "messages"}
+        rotate_groups = target in {"all", "groups"}
+        started_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+        user_summary: dict[str, int] | None = None
+        message_summary: dict[str, int] | None = None
+        group_summaries: list[dict[str, int | str]] = []
+        group_failures: list[str] = []
+        failed_sections: list[str] = []
+
+        if rotate_files:
+            try:
+                user_summary = _rotate_user_key_material(db, user)
+            except Exception as exc:
+                logger.warning("User encryption rotation failed for %s", user.id, exc_info=True)
+                failed_sections.append(f"files/user-key rotation failed ({exc.__class__.__name__})")
+
+        if rotate_messages:
+            include_recipient_attachments = not (rotate_files and user_summary is not None)
+            try:
+                message_summary = _rotate_message_ciphertexts(
+                    db,
+                    user,
+                    include_recipient_attachments=include_recipient_attachments,
+                )
+            except Exception as exc:
+                logger.warning("Message encryption rotation failed for %s", user.id, exc_info=True)
+                failed_sections.append(f"message rotation failed ({exc.__class__.__name__})")
+
+        group_memberships: list[tuple[Group, str]] = []
+        eligible_groups: list[tuple[Group, str]] = []
+        if rotate_groups:
+            membership_rows = (
+                db.query(Group, GroupMembership.role)
+                .join(GroupMembership, GroupMembership.group_id == Group.id)
+                .filter(GroupMembership.user_id == user.id)
+                .order_by(Group.name.asc())
+                .all()
+            )
+            for group, role in membership_rows:
+                normalized_role = (role or "").strip().lower() or "member"
+                group_memberships.append((group, normalized_role))
+                if normalized_role in {"owner", "admin"}:
+                    eligible_groups.append((group, normalized_role))
+
+            for group, role in eligible_groups:
+                try:
+                    summary = _rotate_group_key_material(db, group)
+                    summary["membership_role"] = role
+                    group_summaries.append(summary)
+                except Exception as exc:
+                    logger.warning("Group encryption rotation failed for group %s", group.id, exc_info=True)
+                    group_failures.append(f"{group.name} ({role}) - {exc.__class__.__name__}")
+
+        completed_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        lines = [
+            "Encryption Rotation",
+            f"Account: {user.username}",
+            f"Target: {target}",
+            f"Started (UTC): {started_at}",
+            f"Completed (UTC): {completed_at}",
+            "",
+        ]
+
+        if user_summary is not None:
+            lines.extend(
+                [
+                    "Personal Key Rotation",
+                    f"  User key version: v{user_summary['key_version_from']} -> v{user_summary['key_version_to']}",
+                    (
+                        f"  Personal files rotated: {user_summary['files_rotated']}/{user_summary['files_total']}"
+                        f" (plaintext skipped: {user_summary['files_plain_skipped']})"
+                    ),
+                    (
+                        "  Recipient-key message attachments rotated: "
+                        f"{user_summary['recipient_attachments_rotated']}/{user_summary['recipient_attachments_total']}"
+                    ),
+                    f"  Profile avatar rotated: {'yes' if user_summary['avatar_rotated'] else 'no'}",
+                ]
+            )
+            if user_summary["files_missing_meta"] or user_summary["files_missing_path"] or user_summary["files_invalid_path"]:
+                lines.append(
+                    "  WARN personal file rows skipped: "
+                    f"missing-meta={user_summary['files_missing_meta']}, "
+                    f"missing-path={user_summary['files_missing_path']}, "
+                    f"invalid-path={user_summary['files_invalid_path']}"
+                )
+            if (
+                user_summary["recipient_attachments_missing_meta"]
+                or user_summary["recipient_attachments_missing_path"]
+                or user_summary["recipient_attachments_invalid_path"]
+                or user_summary["recipient_attachments_non_recipient_scheme"]
+            ):
+                lines.append(
+                    "  WARN recipient attachment rows skipped: "
+                    f"missing-meta={user_summary['recipient_attachments_missing_meta']}, "
+                    f"missing-path={user_summary['recipient_attachments_missing_path']}, "
+                    f"invalid-path={user_summary['recipient_attachments_invalid_path']}, "
+                    f"other-scheme={user_summary['recipient_attachments_non_recipient_scheme']}"
+                )
+            if user_summary["avatar_missing_meta"] or user_summary["avatar_missing_path"] or user_summary["avatar_invalid_path"]:
+                lines.append(
+                    "  WARN avatar skipped: "
+                    f"missing-meta={user_summary['avatar_missing_meta']}, "
+                    f"missing-path={user_summary['avatar_missing_path']}, "
+                    f"invalid-path={user_summary['avatar_invalid_path']}"
+                )
+            lines.append("")
+        elif rotate_files:
+            lines.extend(["Personal Key Rotation", "  ERROR: personal key rotation failed.", ""])
+
+        if message_summary is not None:
+            lines.extend(
+                [
+                    "Message Rotation",
+                    (
+                        "  Message bodies rotated: "
+                        f"{message_summary['messages_rotated']}/{message_summary['messages_total']}"
+                        f" (plaintext upgraded: {message_summary['messages_upgraded_plaintext']})"
+                    ),
+                    (
+                        "  Attachments rotated: "
+                        f"system={message_summary['attachments_system_rotated']}, "
+                        f"recipient={message_summary['attachments_recipient_rotated']}, "
+                        f"recipient-skipped={message_summary['attachments_recipient_skipped']}"
+                    ),
+                ]
+            )
+            if message_summary["messages_unavailable"] > 0:
+                lines.append(f"  WARN undecryptable message bodies skipped: {message_summary['messages_unavailable']}")
+            if (
+                message_summary["attachments_missing_meta"]
+                or message_summary["attachments_missing_path"]
+                or message_summary["attachments_invalid_path"]
+                or message_summary["attachments_unknown_scheme"]
+            ):
+                lines.append(
+                    "  WARN attachment rows skipped: "
+                    f"missing-meta={message_summary['attachments_missing_meta']}, "
+                    f"missing-path={message_summary['attachments_missing_path']}, "
+                    f"invalid-path={message_summary['attachments_invalid_path']}, "
+                    f"unknown-scheme={message_summary['attachments_unknown_scheme']}"
+                )
+            lines.append("")
+        elif rotate_messages:
+            lines.extend(["Message Rotation", "  ERROR: message rotation failed.", ""])
+
+        if rotate_groups:
+            lines.append("Group Key Rotation")
+            lines.append(
+                f"  Eligible groups (owner/admin): {len(eligible_groups)}/{len(group_memberships)}"
+            )
+            if group_summaries:
+                max_rows = 12
+                for summary in group_summaries[:max_rows]:
+                    lines.append(
+                        "  "
+                        f"{summary['group_name']} ({summary['membership_role']}): "
+                        f"v{summary['key_version_from']} -> v{summary['key_version_to']}, "
+                        f"files {summary['files_rotated']}/{summary['files_total']}"
+                    )
+                    if summary["files_missing_meta"] or summary["files_missing_path"] or summary["files_invalid_path"]:
+                        lines.append(
+                            "    WARN "
+                            f"missing-meta={summary['files_missing_meta']}, "
+                            f"missing-path={summary['files_missing_path']}, "
+                            f"invalid-path={summary['files_invalid_path']}"
+                        )
+                if len(group_summaries) > max_rows:
+                    lines.append(f"  ... (+{len(group_summaries) - max_rows} more groups)")
+            if group_failures:
+                lines.append("  ERROR groups failed:")
+                for item in group_failures[:12]:
+                    lines.append(f"    {item}")
+                if len(group_failures) > 12:
+                    lines.append(f"    ... (+{len(group_failures) - 12} more)")
+            lines.append("")
+
+        if failed_sections:
+            lines.append("Status: PARTIAL")
+            for item in failed_sections:
+                lines.append(f"  ERROR: {item}")
+        elif group_failures:
+            lines.append("Status: PARTIAL")
+            lines.append(f"  ERROR: {len(group_failures)} group rotation(s) failed.")
+        else:
+            lines.append("Status: OK")
+
+        message = "\n".join(lines)
+        level = "SUCCESS" if not failed_sections and not group_failures else "WARN"
+        add_event(db, user, action="terminal", message=f"encrotate {target}\n{message}", level=level)
+        add_audit_log(
+            db,
+            user=user,
+            event_type="encryption.rotate",
+            details=(
+                f"Terminal encrotate target={target}, "
+                f"user_ok={'yes' if user_summary is not None else 'no'}, "
+                f"messages_ok={'yes' if message_summary is not None else 'no'}, "
+                f"groups_ok={len(group_summaries)}, "
+                f"group_failures={len(group_failures)}, "
+                f"section_failures={len(failed_sections)}."
+            ),
+            request=request,
+        )
+        db.commit()
+        return {"ok": not failed_sections and not group_failures, "message": message}
 
     if cmd == "directory":
         if len(safe_args) < 1:
