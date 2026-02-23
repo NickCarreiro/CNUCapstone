@@ -92,6 +92,12 @@
                   <span class="messages-bubble-sender">{{ item.sender_username }} to {{ item.recipient_username }}</span>
                   <span>{{ item.created_at_utc }}</span>
                 </div>
+                <div class="messages-bubble-keys">
+                  <span class="messages-key-chip">{{ item.body_key_label }}</span>
+                  {% if item.attachment_key_label %}
+                    <span class="messages-key-chip">{{ item.attachment_key_label }}</span>
+                  {% endif %}
+                </div>
                 {% if item.body %}
                   <div class="messages-bubble-body">{{ item.body }}</div>
                 {% endif %}

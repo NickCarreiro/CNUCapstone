@@ -114,6 +114,7 @@
       <div class="file-row-main-text">
         <div class="file-row-name">{{ file_row.display_name }}</div>
         <div class="file-row-path">/{{ rel_path }}</div>
+        <div class="file-row-enc-key" title="Encryption key">{{ file_row.enc_key_label }}</div>
       </div>
     </div>
     <div class="file-row-size">{{ file_row.record.file_size }}</div>
@@ -159,7 +160,7 @@
   {% endif %}
 {% endmacro %}
 
-{% macro render_vault_tree(node, prefix="") %}
+{% macro render_vault_tree(node, prefix="", dir_key_label="") %}
   {% for name, children in node.items()|sort if name != "__files__" %}
     {% set path = name if prefix == "" else prefix ~ "/" ~ name %}
     {% set files_here = children.get("__files__") if children.get("__files__") else [] %}
@@ -168,13 +169,16 @@
     <details class="tree-node" data-has-children="{{ 1 if has_children else 0 }}">
       <summary class="tree-summary" data-folder="{{ path }}">
         <span class="tree-label">{{ name }}</span>
+        {% if dir_key_label %}
+          <span class="tree-key-chip" title="Directory encryption key context">{{ dir_key_label }}</span>
+        {% endif %}
         {% if file_count %}
           <span class="tree-count">{{ file_count }} file{{ "s" if file_count != 1 }}</span>
         {% endif %}
       </summary>
       {% if has_children %}
       <div class="tree-children">
-        {{ render_vault_tree(children, path) }}
+        {{ render_vault_tree(children, path, dir_key_label) }}
         {% if files_here %}
         <div class="tree-files tree-files-details">
           <div class="file-explorer-head tree-file-head">
@@ -402,7 +406,12 @@
         </div>
 
         <div class="tree" id="vaultTree">
-          <div class="tree-root tree-root-drop" data-folder="" title="Drop here to target the group root">/</div>
+          <div class="tree-root tree-root-drop" data-folder="" title="Drop here to target the group root">
+            /
+            {% if group_dir_key_label %}
+              <span class="tree-key-chip tree-root-key-chip" title="Directory encryption key context">{{ group_dir_key_label }}</span>
+            {% endif %}
+          </div>
           {% set root_files = vault_tree.get("__files__") if vault_tree.get("__files__") else [] %}
           {% if root_files %}
           <div class="tree-files tree-root-files tree-files-details">
@@ -418,7 +427,7 @@
             {% endfor %}
           </div>
           {% endif %}
-          {{ render_vault_tree(vault_tree) }}
+          {{ render_vault_tree(vault_tree, dir_key_label=group_dir_key_label) }}
         </div>
       </div>
     </div>

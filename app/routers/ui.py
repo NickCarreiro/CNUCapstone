@@ -133,6 +133,8 @@ _TERMINAL_TEXT_EXTS = {
     ".xml",
     ".rst",
 }
+_DM_BODY_KEY_LABEL = "dm-body:fernet-v1"
+_DM_ATTACHMENT_SYSTEM_KEY_LABEL = "dm-attachment:system-key:v1"
 
 MESSAGE_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024
 PROFILE_AVATAR_MAX_BYTES = 4 * 1024 * 1024
@@ -898,10 +900,10 @@ def _get_user_file(db: Session, user: User, file_id: str) -> FileRecord:
 
 
 def _issue_file_token(session_id: str, file_id: uuid.UUID) -> str:
-    if not session_id:
-        return str(file_id)
-    token = uuid.uuid4().hex
-    _FILE_TOKEN_CACHE.setdefault(session_id, {})[token] = str(file_id)
+    # Use stable identifiers so links survive process reloads/restarts.
+    token = str(file_id)
+    if session_id:
+        _FILE_TOKEN_CACHE.setdefault(session_id, {})[token] = token
     return token
 
 
@@ -1168,6 +1170,14 @@ def _rotate_blob_in_place(
     return new_nonce, new_tag, plain_size
 
 
+def _verify_rotated_ciphertext(dek: bytes, path: Path, nonce_b64: str, tag_b64: str) -> int:
+    total_plain = 0
+    for chunk in decrypt_file_iter(dek, path, nonce_b64, tag_b64):
+        if chunk:
+            total_plain += len(chunk)
+    return total_plain
+
+
 def _rotate_user_key_material(db: Session, user: User) -> dict[str, int]:
     key_row = ensure_user_key(db, user)
     old_key_version = int(key_row.key_version or 1)
@@ -1192,12 +1202,18 @@ def _rotate_user_key_material(db: Session, user: User) -> dict[str, int]:
         "recipient_attachments_missing_path": 0,
         "recipient_attachments_invalid_path": 0,
         "recipient_attachments_non_recipient_scheme": 0,
+        "verification_checks_total": 0,
+        "verification_checks_passed": 0,
+        "verification_bytes_checked": 0,
         "key_version_from": old_key_version,
         "key_version_to": old_key_version + 1,
     }
 
     swapped_paths: list[tuple[Path, Path]] = []
     temp_paths: list[Path] = []
+    rotated_user_targets: list[tuple[Path, str, str]] = []
+    rotated_recipient_attachment_targets: list[tuple[Path, str, str]] = []
+    rotated_avatar_targets: list[tuple[Path, str, str]] = []
     committed = False
 
     try:
@@ -1235,6 +1251,7 @@ def _rotate_user_key_material(db: Session, user: User) -> dict[str, int]:
             row.enc_nonce = nonce_b64
             row.enc_tag = tag_b64
             row.file_size = plain_size
+            rotated_user_targets.append((path, nonce_b64, tag_b64))
             summary["files_rotated"] += 1
 
         if user.profile_image_path:
@@ -1260,6 +1277,7 @@ def _rotate_user_key_material(db: Session, user: User) -> dict[str, int]:
                         )
                         user.profile_image_nonce = nonce_b64
                         user.profile_image_tag = tag_b64
+                        rotated_avatar_targets.append((avatar_path, nonce_b64, tag_b64))
                         summary["avatar_rotated"] = 1
 
         dm_rows = (
@@ -1306,9 +1324,21 @@ def _rotate_user_key_material(db: Session, user: User) -> dict[str, int]:
             row.attachment_enc_tag = tag_b64
             row.attachment_size = plain_size
             row.attachment_key_scheme = DM_ATTACHMENT_SCHEME_RECIPIENT
+            rotated_recipient_attachment_targets.append((attachment_path, nonce_b64, tag_b64))
             summary["recipient_attachments_rotated"] += 1
 
-        wrap_nonce, wrapped_dek = wrap_key(master_key_bytes(), new_dek, aad=str(user.id).encode())
+        verification_targets = rotated_user_targets + rotated_recipient_attachment_targets + rotated_avatar_targets
+        summary["verification_checks_total"] = len(verification_targets)
+        for path, nonce_b64, tag_b64 in verification_targets:
+            verified_size = _verify_rotated_ciphertext(new_dek, path, nonce_b64, tag_b64)
+            summary["verification_checks_passed"] += 1
+            summary["verification_bytes_checked"] += verified_size
+
+        master = master_key_bytes()
+        wrap_nonce, wrapped_dek = wrap_key(master, new_dek, aad=str(user.id).encode())
+        unwrap_probe = unwrap_key(master, wrap_nonce, wrapped_dek, aad=str(user.id).encode())
+        if unwrap_probe != new_dek:
+            raise RuntimeError("User key wrap verification failed after rotation")
         key_row.wrap_nonce = wrap_nonce
         key_row.wrapped_dek = wrapped_dek
         key_row.key_version = old_key_version + 1
@@ -1464,12 +1494,16 @@ def _rotate_group_key_material(db: Session, group: Group) -> dict[str, int | str
         "files_missing_meta": 0,
         "files_missing_path": 0,
         "files_invalid_path": 0,
+        "verification_checks_total": 0,
+        "verification_checks_passed": 0,
+        "verification_bytes_checked": 0,
         "key_version_from": old_key_version,
         "key_version_to": old_key_version + 1,
     }
 
     swapped_paths: list[tuple[Path, Path]] = []
     temp_paths: list[Path] = []
+    rotated_group_targets: list[tuple[Path, str, str]] = []
     committed = False
 
     try:
@@ -1509,9 +1543,20 @@ def _rotate_group_key_material(db: Session, group: Group) -> dict[str, int | str
             row.enc_nonce = nonce_b64
             row.enc_tag = tag_b64
             row.file_size = plain_size
+            rotated_group_targets.append((path, nonce_b64, tag_b64))
             summary["files_rotated"] += 1
 
-        wrap_nonce, wrapped_dek = wrap_key(master_key_bytes(), new_dek, aad=f"group:{group.id}".encode())
+        summary["verification_checks_total"] = len(rotated_group_targets)
+        for path, nonce_b64, tag_b64 in rotated_group_targets:
+            verified_size = _verify_rotated_ciphertext(new_dek, path, nonce_b64, tag_b64)
+            summary["verification_checks_passed"] += 1
+            summary["verification_bytes_checked"] += verified_size
+
+        master = master_key_bytes()
+        wrap_nonce, wrapped_dek = wrap_key(master, new_dek, aad=f"group:{group.id}".encode())
+        unwrap_probe = unwrap_key(master, wrap_nonce, wrapped_dek, aad=f"group:{group.id}".encode())
+        if unwrap_probe != new_dek:
+            raise RuntimeError("Group key wrap verification failed after rotation")
         group_key.wrap_nonce = wrap_nonce
         group_key.wrapped_dek = wrapped_dek
         group_key.key_version = old_key_version + 1
@@ -1829,6 +1874,8 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
     if session_id:
         _FILE_TOKEN_CACHE[session_id] = {}
     root = _user_root(user).resolve()
+    user_key_row = db.query(UserKey).filter(UserKey.user_id == user.id).first()
+    user_key_version = int(user_key_row.key_version or 1) if user_key_row else None
     file_rows = []
     for idx, record in enumerate(files, start=1):
         try:
@@ -1837,12 +1884,19 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
         except ValueError:
             rel_path = record.file_path
         token = _issue_file_token(session_id, record.id)
+        if record.is_encrypted and record.enc_nonce and record.enc_tag:
+            enc_key_label = f"user-dek:v{user_key_version}" if user_key_version else "user-dek"
+        elif record.is_encrypted:
+            enc_key_label = "user-dek (metadata incomplete)"
+        else:
+            enc_key_label = "plaintext"
         file_rows.append(
             {
                 "record": record,
                 "rel_path": rel_path,
                 "token": token,
                 "display_name": record.file_name,
+                "enc_key_label": enc_key_label,
             }
         )
 
@@ -2081,6 +2135,15 @@ def messages_home(
         .limit(300)
         .all()
     )
+    participant_ids: set[uuid.UUID] = set()
+    for row in messages:
+        participant_ids.add(row.sender_id)
+        participant_ids.add(row.recipient_id)
+    user_key_versions: dict[uuid.UUID, int] = {}
+    if participant_ids:
+        user_key_rows = db.query(UserKey).filter(UserKey.user_id.in_(participant_ids)).all()
+        for key_row in user_key_rows:
+            user_key_versions[key_row.user_id] = int(key_row.key_version or 1)
 
     thread_buckets: dict[uuid.UUID, list[DirectMessage]] = {}
     thread_summaries: dict[uuid.UUID, dict] = {}
@@ -2155,6 +2218,21 @@ def messages_home(
     thread_messages = []
     for row in active_thread_messages:
         outbound = row.sender_id == user.id
+        body_key_label = _DM_BODY_KEY_LABEL
+        attachment_key_label = ""
+        if row.attachment_name and row.attachment_path:
+            scheme = (row.attachment_key_scheme or "").strip().lower()
+            if scheme in {"", DM_ATTACHMENT_SCHEME_RECIPIENT}:
+                recipient_key_version = user_key_versions.get(row.recipient_id)
+                attachment_key_label = (
+                    f"dm-attachment:recipient-user-dek:v{recipient_key_version}"
+                    if recipient_key_version
+                    else "dm-attachment:recipient-user-dek"
+                )
+            elif scheme == DM_ATTACHMENT_SCHEME_SYSTEM:
+                attachment_key_label = _DM_ATTACHMENT_SYSTEM_KEY_LABEL
+            else:
+                attachment_key_label = f"dm-attachment:{scheme}"
         thread_messages.append(
             {
                 "id": str(row.id),
@@ -2184,6 +2262,8 @@ def messages_home(
                 "attachment_download_url": f"/ui/messages/{row.id}/attachment?download=1"
                 if row.attachment_name and row.attachment_path
                 else None,
+                "body_key_label": body_key_label,
+                "attachment_key_label": attachment_key_label,
             }
         )
 
@@ -6047,6 +6127,11 @@ def terminal_command(
                         f"{user_summary['recipient_attachments_rotated']}/{user_summary['recipient_attachments_total']}"
                     ),
                     f"  Profile avatar rotated: {'yes' if user_summary['avatar_rotated'] else 'no'}",
+                    (
+                        "  Verification probes: "
+                        f"{user_summary['verification_checks_passed']}/{user_summary['verification_checks_total']}"
+                        f" (bytes checked: {user_summary['verification_bytes_checked']})"
+                    ),
                 ]
             )
             if user_summary["files_missing_meta"] or user_summary["files_missing_path"] or user_summary["files_invalid_path"]:
@@ -6128,7 +6213,8 @@ def terminal_command(
                         "  "
                         f"{summary['group_name']} ({summary['membership_role']}): "
                         f"v{summary['key_version_from']} -> v{summary['key_version_to']}, "
-                        f"files {summary['files_rotated']}/{summary['files_total']}"
+                        f"files {summary['files_rotated']}/{summary['files_total']}, "
+                        f"verify {summary['verification_checks_passed']}/{summary['verification_checks_total']}"
                     )
                     if summary["files_missing_meta"] or summary["files_missing_path"] or summary["files_invalid_path"]:
                         lines.append(

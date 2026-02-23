@@ -831,7 +831,9 @@ def group_detail(
 
     group, membership = _must_group_role(db, user, group_id, ROLE_VIEWER)
     _group_root(group)
-    ensure_group_key(db, group)
+    group_key_row = ensure_group_key(db, group)
+    group_key_version = int(group_key_row.key_version or 1)
+    group_key_label = f"group-dek:v{group_key_version}"
 
     normalized_role = _normalize_role(membership.role)
     can_upload = _role_at_least(normalized_role, ROLE_MEMBER)
@@ -893,6 +895,7 @@ def group_detail(
                 "id": str(record.id),
                 "display_name": record.file_name,
                 "can_edit": _can_edit_group_file(user, membership, record),
+                "enc_key_label": group_key_label if record.is_encrypted else "plaintext",
             }
         )
 
@@ -933,6 +936,7 @@ def group_detail(
             "can_manage_members": can_manage_members,
             "can_upload": can_upload,
             "member_role_options": MANAGE_MEMBER_ROLES,
+            "group_dir_key_label": group_key_label,
             "file_q": normalized_file_q,
             "file_sort": normalized_file_sort,
             "notice": notice or request.query_params.get("notice"),

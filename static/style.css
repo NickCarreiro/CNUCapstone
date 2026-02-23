@@ -893,6 +893,24 @@ html[data-theme="dark"] body .stat-chip {
   white-space: nowrap;
 }
 
+.file-row-enc-key {
+  margin-top: 0.16rem;
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 0.06rem 0.42rem;
+  border-radius: 999px;
+  border: 1px dashed color-mix(in srgb, var(--edge) 75%, transparent);
+  background: color-mix(in srgb, var(--card-strong) 78%, transparent);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.67rem;
+  color: var(--ink-muted);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .file-row-size,
 .file-row-uploaded {
   font-family: "IBM Plex Mono", ui-monospace, monospace;
@@ -1306,6 +1324,24 @@ body.page-group-detail .explorer-card-full .tree-panel {
   border: 1px solid var(--edge-soft);
   border-radius: 999px;
   padding: 0.07rem 0.46rem;
+}
+
+.tree-key-chip {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--ink-muted);
+  border: 1px dashed color-mix(in srgb, var(--edge) 78%, transparent);
+  border-radius: 999px;
+  padding: 0.05rem 0.4rem;
+  max-width: 48%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-root-key-chip {
+  margin-left: 0.3rem;
 }
 
 .tree-children {
@@ -1817,6 +1853,22 @@ body.page-group-detail .explorer-card-full .tree-panel {
   overflow-wrap: anywhere;
 }
 
+.messages-bubble-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.34rem;
+}
+
+.messages-key-chip {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.66rem;
+  color: var(--ink-muted);
+  border: 1px solid color-mix(in srgb, var(--edge) 68%, transparent);
+  border-radius: 999px;
+  padding: 0.08rem 0.45rem;
+  background: color-mix(in srgb, var(--card-strong) 72%, transparent);
+}
+
 .dm-preview-frame-wrap {
   display: grid;
   gap: 0.58rem;
@@ -1860,9 +1912,9 @@ body.page-group-detail .explorer-card-full .tree-panel {
   right: 14px;
   bottom: 14px;
   box-sizing: border-box;
-  width: min(860px, calc(100vw - 28px));
-  height: min(450px, calc(100vh - 28px));
-  height: min(450px, calc(100dvh - 28px));
+  width: calc(100vw - 28px);
+  height: calc(100vh - 28px);
+  height: calc(100dvh - 28px);
   min-width: 360px;
   min-height: 220px;
   max-width: calc(100vw - 24px);

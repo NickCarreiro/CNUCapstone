@@ -921,7 +921,7 @@
         const DESKTOP_MIN_WIDTH = 360;
         const DESKTOP_MIN_HEIGHT = 220;
         const TERMINAL_BODY_MIN_HEIGHT = 64;
-        const TERMINAL_LAYOUT_VERSION = "2";
+        const TERMINAL_LAYOUT_VERSION = "3";
         const TERMINAL_ENC_TIMELINE_KEY = "pfv-terminal-enc-timeline";
 
         if (localStorage.getItem("pfv-terminal-layout-version") !== TERMINAL_LAYOUT_VERSION) {
@@ -990,10 +990,10 @@
           let width = pxToNumber(term.style.width);
           let height = pxToNumber(term.style.height);
           if (width === null || width <= 0) {
-            width = rect.width > 0 ? rect.width : Math.min(860, availableWidth);
+            width = rect.width > 0 ? rect.width : availableWidth;
           }
           if (height === null || height <= 0) {
-            height = rect.height > 0 ? rect.height : Math.min(420, availableHeight);
+            height = rect.height > 0 ? rect.height : availableHeight;
           }
 
           width = Math.min(Math.max(width, minWidth), availableWidth);

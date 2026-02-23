@@ -1,8 +1,13 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="PFV_")
+    model_config = SettingsConfigDict(env_file=str(_PROJECT_ROOT / ".env"), env_prefix="PFV_")
 
     app_name: str = "FileFort"
     environment: str = "dev"

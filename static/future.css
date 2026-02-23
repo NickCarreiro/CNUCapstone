@@ -1180,6 +1180,12 @@ body[data-ui="future"] .tree-count {
   background: color-mix(in srgb, var(--card-strong) 42%, transparent);
 }
 
+body[data-ui="future"] .tree-key-chip {
+  border-radius: var(--ff-radius-xs);
+  border-color: color-mix(in srgb, var(--edge) 72%, transparent);
+  background: color-mix(in srgb, var(--card) 54%, transparent);
+}
+
 @media (max-width: 980px) {
   body[data-ui="future"] .explorer-pane-tree {
     border-right: none;
@@ -1599,6 +1605,12 @@ body[data-ui="future"] .file-row {
 
 body[data-ui="future"] .file-row:hover {
   background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+body[data-ui="future"] .file-row-enc-key {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--edge) 66%, transparent);
+  background: color-mix(in srgb, var(--card) 48%, transparent);
 }
 
 body[data-ui="future"] .modal {
@@ -2233,6 +2245,29 @@ body[data-ui="future"] .messages-bubble-sender {
 body[data-ui="future"] .messages-bubble-body {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+body[data-ui="future"] .messages-bubble-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.34rem;
+}
+
+body[data-ui="future"] .messages-key-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--edge) 62%, transparent);
+  background: color-mix(in srgb, var(--card) 56%, transparent);
+  color: var(--ink-muted);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.64rem;
+  letter-spacing: 0.02em;
+  padding: 0.08rem 0.44rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 body[data-ui="future"] .messages-bubble-attachment {

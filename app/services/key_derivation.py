@@ -11,8 +11,18 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from app.config import settings
 
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _resolve_path(path: str) -> Path:
+    p = Path(path).expanduser()
+    if p.is_absolute():
+        return p
+    return (_PROJECT_ROOT / p).resolve()
+
+
 def _read_file(path: str) -> bytes:
-    p = Path(path)
+    p = _resolve_path(path)
     return p.read_bytes()
 
 
