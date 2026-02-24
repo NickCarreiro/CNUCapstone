@@ -699,6 +699,31 @@ def _conversation_attachment_key_label(version: int | None) -> str:
     )
 
 
+def _decrypt_direct_message_body_with_conversation_key(
+    row: DirectMessage,
+    conversation_key: ConversationKey | None,
+) -> str:
+    body_value = row.body or ""
+    needs_conversation_key = (
+        is_dm_conversation_encrypted(body_value)
+        or (row.body_key_scheme or "").strip().lower() == DM_BODY_SCHEME_CONVERSATION
+    )
+    if not needs_conversation_key:
+        return decrypt_message(body_value)
+
+    if conversation_key is None:
+        # If metadata claims conversation-key but body is plaintext/legacy, keep backward compatibility.
+        if not is_dm_conversation_encrypted(body_value):
+            return decrypt_message(body_value)
+        return "[message unavailable]"
+
+    try:
+        conversation_dek = get_conversation_dek(conversation_key)
+    except Exception:
+        return "[message unavailable]"
+    return decrypt_dm_body(body_value, conversation_dek)
+
+
 def _ensure_conversation_key_for_message(db: Session, row: DirectMessage) -> tuple[ConversationKey, bool]:
     thread_id = row.thread_id or row.id
     created_thread_id = row.thread_id is None
@@ -5603,6 +5628,20 @@ def admin_reports_page(
         query = query.filter(DirectMessageReport.status == status_filter)
 
     reports = query.limit(limit).all()
+    report_thread_ids: set[uuid.UUID] = set()
+    for report in reports:
+        msg = report.message
+        if not msg:
+            continue
+        body_value = msg.body or ""
+        if is_dm_conversation_encrypted(body_value) or (msg.body_key_scheme or "").strip().lower() == DM_BODY_SCHEME_CONVERSATION:
+            report_thread_ids.add(msg.thread_id or msg.id)
+
+    report_conversation_keys: dict[uuid.UUID, ConversationKey] = {}
+    if report_thread_ids:
+        for key_row in db.query(ConversationKey).filter(ConversationKey.thread_id.in_(report_thread_ids)).all():
+            report_conversation_keys[key_row.thread_id] = key_row
+
     rows = []
     for report in reports:
         reporter_name = report.reporter.username if report.reporter else "(unknown)"
@@ -5610,7 +5649,12 @@ def admin_reports_page(
 
         preview = ""
         if report.message:
-            preview = decrypt_message(report.message.body).replace("\n", " ").strip()
+            msg = report.message
+            thread_uuid = msg.thread_id or msg.id
+            preview = _decrypt_direct_message_body_with_conversation_key(
+                msg,
+                report_conversation_keys.get(thread_uuid),
+            ).replace("\n", " ").strip()
         if not preview and report.message and report.message.attachment_name:
             preview = "(attachment)"
         if len(preview) > 120:
@@ -5686,7 +5730,15 @@ def admin_report_detail_page(report_id: str, request: Request, db: Session = Dep
         return _admin_reports_redirect("Report not found.", error=True)
 
     msg = report.message
-    message_body = decrypt_message(msg.body) if msg else ""
+    message_conversation_key = None
+    if msg:
+        thread_uuid = msg.thread_id or msg.id
+        message_conversation_key = (
+            db.query(ConversationKey)
+            .filter(ConversationKey.thread_id == thread_uuid)
+            .first()
+        )
+    message_body = _decrypt_direct_message_body_with_conversation_key(msg, message_conversation_key) if msg else ""
     report_details = decrypt_message(report.details) if report.details else ""
     admin_notes = decrypt_message(report.admin_notes) if report.admin_notes else ""
 
