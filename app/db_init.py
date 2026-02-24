@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from pathlib import Path
 
 from sqlalchemy import inspect, or_, text
@@ -8,13 +9,24 @@ from sqlalchemy import inspect, or_, text
 from app.config import settings
 from app.db import Base, SessionLocal, engine
 from app.models import core as _core  # noqa: F401  (register models)
-from app.models.core import DirectMessage, DirectMessageReport
+from app.models.core import ConversationKey, DirectMessage, DirectMessageReport, Group, GroupKey, User, UserKey
+from app.services.crypto import reencrypt_file_to_path
+from app.services.conversation_keystore import ensure_conversation_key, get_conversation_dek
+from app.services.group_keystore import ensure_group_key
 from app.services.message_crypto import (
+    DM_ATTACHMENT_SCHEME_CONVERSATION,
     DM_ATTACHMENT_SCHEME_RECIPIENT,
     DM_ATTACHMENT_SCHEME_SYSTEM,
+    DM_BODY_SCHEME_CONVERSATION,
+    DM_BODY_SCHEME_FERNET,
+    decrypt_message,
+    encrypt_dm_body,
     encrypt_message,
     encrypt_message_attachment_to_path,
+    is_dm_conversation_encrypted,
 )
+from app.services.key_derivation import message_attachment_key_bytes
+from app.services.keystore import ensure_user_key, get_user_dek
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +100,8 @@ def ensure_schema() -> str:
             stmts.append("ALTER TABLE users ADD COLUMN profile_image_tag VARCHAR(64)")
         if not has_column("users", "profile_image_mime_type"):
             stmts.append("ALTER TABLE users ADD COLUMN profile_image_mime_type VARCHAR(255)")
+        if not has_column("users", "timezone"):
+            stmts.append("ALTER TABLE users ADD COLUMN timezone VARCHAR(64)")
         if not has_column("users", "ui_view_mode"):
             stmts.append("ALTER TABLE users ADD COLUMN ui_view_mode VARCHAR(16) NOT NULL DEFAULT 'base'")
         if not has_column("users", "is_admin"):
@@ -122,6 +136,10 @@ def ensure_schema() -> str:
     if "direct_messages" in table_names:
         if not has_column("direct_messages", "thread_id"):
             stmts.append("ALTER TABLE direct_messages ADD COLUMN thread_id UUID")
+        if not has_column("direct_messages", "body_key_scheme"):
+            stmts.append("ALTER TABLE direct_messages ADD COLUMN body_key_scheme VARCHAR(32)")
+        if not has_column("direct_messages", "body_key_version"):
+            stmts.append("ALTER TABLE direct_messages ADD COLUMN body_key_version INTEGER")
         if not has_column("direct_messages", "attachment_name"):
             stmts.append("ALTER TABLE direct_messages ADD COLUMN attachment_name VARCHAR(255)")
         if not has_column("direct_messages", "attachment_path"):
@@ -134,6 +152,8 @@ def ensure_schema() -> str:
             stmts.append("ALTER TABLE direct_messages ADD COLUMN attachment_enc_tag VARCHAR(64)")
         if not has_column("direct_messages", "attachment_key_scheme"):
             stmts.append("ALTER TABLE direct_messages ADD COLUMN attachment_key_scheme VARCHAR(32)")
+        if not has_column("direct_messages", "attachment_key_version"):
+            stmts.append("ALTER TABLE direct_messages ADD COLUMN attachment_key_version INTEGER")
         if not has_column("direct_messages", "attachment_mime_type"):
             stmts.append("ALTER TABLE direct_messages ADD COLUMN attachment_mime_type VARCHAR(255)")
 
@@ -161,6 +181,28 @@ def ensure_schema() -> str:
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_direct_messages_thread_id ON direct_messages (thread_id)"))
             # Keep legacy rows queryable in threads without destructive rewrites.
             conn.execute(text("UPDATE direct_messages SET thread_id = id WHERE thread_id IS NULL"))
+            conn.execute(
+                text(
+                    """
+                    UPDATE direct_messages
+                    SET body_key_scheme = :scheme
+                    WHERE (body LIKE 'dmenc:v2:%' OR body LIKE 'dmencv2:%')
+                      AND body_key_scheme IS NULL
+                    """
+                ),
+                {"scheme": DM_BODY_SCHEME_CONVERSATION},
+            )
+            conn.execute(
+                text(
+                    """
+                    UPDATE direct_messages
+                    SET body_key_scheme = :scheme
+                    WHERE body LIKE 'enc:v1:%'
+                      AND body_key_scheme IS NULL
+                    """
+                ),
+                {"scheme": DM_BODY_SCHEME_FERNET},
+            )
             conn.execute(
                 text(
                     """
@@ -236,6 +278,89 @@ def ensure_schema() -> str:
                 )
             )
             conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_support_tickets_ticket_number ON support_tickets (ticket_number)"))
+
+        if "user_keys" in table_names:
+            deleted = conn.execute(
+                text(
+                    """
+                    WITH duplicate_rows AS (
+                        SELECT id
+                        FROM (
+                            SELECT
+                                id,
+                                row_number() OVER (
+                                    PARTITION BY user_id
+                                    ORDER BY created_at DESC NULLS LAST, id DESC
+                                ) AS rn
+                            FROM user_keys
+                        ) ranked
+                        WHERE ranked.rn > 1
+                    )
+                    DELETE FROM user_keys uk
+                    USING duplicate_rows d
+                    WHERE uk.id = d.id
+                    """
+                )
+            )
+            if deleted.rowcount and deleted.rowcount > 0:
+                schema_changed = True
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_user_keys_user_id ON user_keys (user_id)"))
+
+        if "group_keys" in table_names:
+            deleted = conn.execute(
+                text(
+                    """
+                    WITH duplicate_rows AS (
+                        SELECT id
+                        FROM (
+                            SELECT
+                                id,
+                                row_number() OVER (
+                                    PARTITION BY group_id
+                                    ORDER BY created_at DESC NULLS LAST, id DESC
+                                ) AS rn
+                            FROM group_keys
+                        ) ranked
+                        WHERE ranked.rn > 1
+                    )
+                    DELETE FROM group_keys gk
+                    USING duplicate_rows d
+                    WHERE gk.id = d.id
+                    """
+                )
+            )
+            if deleted.rowcount and deleted.rowcount > 0:
+                schema_changed = True
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_group_keys_group_id ON group_keys (group_id)"))
+
+        if "conversation_keys" in table_names:
+            deleted = conn.execute(
+                text(
+                    """
+                    WITH duplicate_rows AS (
+                        SELECT id
+                        FROM (
+                            SELECT
+                                id,
+                                row_number() OVER (
+                                    PARTITION BY thread_id
+                                    ORDER BY created_at DESC NULLS LAST, id DESC
+                                ) AS rn
+                            FROM conversation_keys
+                        ) ranked
+                        WHERE ranked.rn > 1
+                    )
+                    DELETE FROM conversation_keys ck
+                    USING duplicate_rows d
+                    WHERE ck.id = d.id
+                    """
+                )
+            )
+            if deleted.rowcount and deleted.rowcount > 0:
+                schema_changed = True
+            conn.execute(
+                text("CREATE UNIQUE INDEX IF NOT EXISTS uq_conversation_keys_thread_id ON conversation_keys (thread_id)")
+            )
 
         # Ensure at least one system administrator exists for admin UI bootstrap.
         if "users" in table_names:
@@ -328,7 +453,11 @@ def _migrate_message_payload_encryption() -> bool:
     try:
         unencrypted_messages = (
             db.query(DirectMessage)
-            .filter(~DirectMessage.body.like("enc:v1:%"))
+            .filter(
+                ~DirectMessage.body.like("enc:v1:%"),
+                ~DirectMessage.body.like("dmenc:v2:%"),
+                ~DirectMessage.body.like("dmencv2:%"),
+            )
             .all()
         )
         for row in unencrypted_messages:
@@ -421,10 +550,216 @@ def _migrate_message_payload_encryption() -> bool:
         db.close()
 
 
+def _migrate_direct_message_conversation_encryption() -> dict[str, int]:
+    db = SessionLocal()
+    stats = {
+        "threads_keys_created": 0,
+        "thread_pair_conflicts": 0,
+        "bodies_migrated": 0,
+        "attachments_migrated": 0,
+        "attachments_missing_meta": 0,
+        "attachments_missing_path": 0,
+        "attachments_unreadable": 0,
+        "body_unavailable": 0,
+    }
+    changed = False
+    try:
+        rows = db.query(DirectMessage).order_by(DirectMessage.created_at.asc()).all()
+        system_key = message_attachment_key_bytes()
+        recipient_cache: dict[uuid.UUID, User] = {}
+        for row in rows:
+            thread_id = row.thread_id or row.id
+            if row.thread_id is None:
+                row.thread_id = thread_id
+                changed = True
+
+            try:
+                conversation_key, key_created = ensure_conversation_key(
+                    db,
+                    thread_id=thread_id,
+                    user_a_id=row.sender_id,
+                    user_b_id=row.recipient_id,
+                )
+            except ValueError:
+                stats["thread_pair_conflicts"] += 1
+                continue
+            if key_created:
+                stats["threads_keys_created"] += 1
+                changed = True
+            conversation_dek = get_conversation_dek(conversation_key)
+            conversation_key_version = int(conversation_key.key_version or 1)
+
+            body_value = row.body or ""
+            if not is_dm_conversation_encrypted(body_value):
+                plain = decrypt_message(body_value)
+                if plain == "[message unavailable]":
+                    stats["body_unavailable"] += 1
+                else:
+                    row.body = encrypt_dm_body(plain, conversation_dek)
+                    stats["bodies_migrated"] += 1
+                    changed = True
+            if is_dm_conversation_encrypted(row.body or "") and (
+                row.body_key_scheme != DM_BODY_SCHEME_CONVERSATION
+                or row.body_key_version != conversation_key_version
+            ):
+                row.body_key_scheme = DM_BODY_SCHEME_CONVERSATION
+                row.body_key_version = conversation_key_version
+                changed = True
+
+            if not row.attachment_path:
+                continue
+            if not row.attachment_enc_nonce or not row.attachment_enc_tag:
+                stats["attachments_missing_meta"] += 1
+                continue
+
+            path = _safe_message_attachment_path(row.attachment_path)
+            if not path or not path.exists() or not path.is_file():
+                stats["attachments_missing_path"] += 1
+                continue
+
+            scheme = (row.attachment_key_scheme or "").strip().lower()
+            if scheme == DM_ATTACHMENT_SCHEME_CONVERSATION:
+                source_dek = conversation_dek
+            elif scheme in {"", DM_ATTACHMENT_SCHEME_RECIPIENT}:
+                recipient = recipient_cache.get(row.recipient_id)
+                if recipient is None:
+                    recipient = db.query(User).filter(User.id == row.recipient_id).first()
+                    if recipient:
+                        recipient_cache[row.recipient_id] = recipient
+                if not recipient:
+                    stats["attachments_unreadable"] += 1
+                    continue
+                source_dek = get_user_dek(db, recipient)
+            elif scheme == DM_ATTACHMENT_SCHEME_SYSTEM:
+                source_dek = system_key
+            else:
+                stats["attachments_unreadable"] += 1
+                continue
+
+            tmp_path = path.with_name(f"{path.name}.conv.tmp")
+            try:
+                nonce_b64, tag_b64, plain_size = reencrypt_file_to_path(
+                    old_dek=source_dek,
+                    new_dek=conversation_dek,
+                    src_path=path,
+                    src_nonce_b64=row.attachment_enc_nonce,
+                    src_tag_b64=row.attachment_enc_tag,
+                    dst_path=tmp_path,
+                )
+                tmp_path.replace(path)
+            except Exception:
+                stats["attachments_unreadable"] += 1
+                try:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                except OSError:
+                    pass
+                continue
+
+            row.attachment_enc_nonce = nonce_b64
+            row.attachment_enc_tag = tag_b64
+            row.attachment_size = plain_size
+            row.attachment_key_scheme = DM_ATTACHMENT_SCHEME_CONVERSATION
+            row.attachment_key_version = conversation_key_version
+            stats["attachments_migrated"] += 1
+            changed = True
+
+        if changed:
+            db.commit()
+            logger.info(
+                "Conversation-key migration applied: keys_created=%s bodies=%s attachments=%s conflicts=%s",
+                stats["threads_keys_created"],
+                stats["bodies_migrated"],
+                stats["attachments_migrated"],
+                stats["thread_pair_conflicts"],
+            )
+        return stats
+    except Exception:
+        db.rollback()
+        logger.warning("Conversation-key migration failed; continuing startup.", exc_info=True)
+        return stats
+    finally:
+        db.close()
+
+
+def _backfill_missing_user_keys() -> int:
+    db = SessionLocal()
+    created = 0
+    try:
+        missing_users = (
+            db.query(User)
+            .outerjoin(UserKey, UserKey.user_id == User.id)
+            .filter(UserKey.id.is_(None))
+            .all()
+        )
+        for user in missing_users:
+            try:
+                ensure_user_key(db, user)
+                created += 1
+            except Exception:
+                db.rollback()
+                logger.warning("Failed to provision user key for %s", user.username, exc_info=True)
+
+        if created:
+            logger.info("Provisioned missing user key records: %s", created)
+        return created
+    except Exception:
+        db.rollback()
+        logger.warning("User key backfill failed; continuing startup.", exc_info=True)
+        return created
+    finally:
+        db.close()
+
+
+def _backfill_missing_group_keys() -> int:
+    db = SessionLocal()
+    created = 0
+    try:
+        missing_groups = (
+            db.query(Group)
+            .outerjoin(GroupKey, GroupKey.group_id == Group.id)
+            .filter(GroupKey.id.is_(None))
+            .all()
+        )
+        for group in missing_groups:
+            try:
+                ensure_group_key(db, group)
+                created += 1
+            except Exception:
+                db.rollback()
+                logger.warning("Failed to provision group key for %s", group.id, exc_info=True)
+
+        if created:
+            logger.info("Provisioned missing group key records: %s", created)
+        return created
+    except Exception:
+        db.rollback()
+        logger.warning("Group key backfill failed; continuing startup.", exc_info=True)
+        return created
+    finally:
+        db.close()
+
+
 def init_db() -> str:
     Base.metadata.create_all(engine)
     schema_status = ensure_schema()
+    user_keys_backfilled = _backfill_missing_user_keys()
+    group_keys_backfilled = _backfill_missing_group_keys()
     migrated = _migrate_message_payload_encryption()
+    conversation_stats = _migrate_direct_message_conversation_encryption()
+    key_parts = []
+    if user_keys_backfilled:
+        key_parts.append(f"user keys backfilled={user_keys_backfilled}")
+    if group_keys_backfilled:
+        key_parts.append(f"group keys backfilled={group_keys_backfilled}")
+    key_status = f"; {'; '.join(key_parts)}" if key_parts else ""
+    conversation_status = (
+        "; conversation migration "
+        f"keys_created={conversation_stats['threads_keys_created']}, "
+        f"bodies={conversation_stats['bodies_migrated']}, "
+        f"attachments={conversation_stats['attachments_migrated']}, "
+        f"conflicts={conversation_stats['thread_pair_conflicts']}"
+    )
     if migrated:
-        return f"{schema_status}; message encryption migrated"
-    return schema_status
+        return f"{schema_status}; message encryption migrated{key_status}{conversation_status}"
+    return f"{schema_status}{key_status}{conversation_status}"

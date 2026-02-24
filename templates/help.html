@@ -109,7 +109,7 @@
   <div class="card-header">
     <h2>My tickets</h2>
     <div class="card-tools">
-      <span class="muted">Times are shown in your local timezone.</span>
+      <span class="muted">Times are shown in your active timezone.</span>
       <button
         type="button"
         class="ghost filter-toggle"
@@ -267,16 +267,32 @@
       });
     });
 
-    const formatter = new Intl.DateTimeFormat(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-      timeZoneName: "short",
-    });
+    const timezone = (window.__pfvTimezone || "").trim();
+    let formatter;
+    try {
+      formatter = new Intl.DateTimeFormat(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+        timeZone: timezone || undefined,
+        timeZoneName: "short",
+      });
+    } catch {
+      formatter = new Intl.DateTimeFormat(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+        timeZoneName: "short",
+      });
+    }
 
     document.querySelectorAll(".js-local-time").forEach((el) => {
       const iso = (el.getAttribute("data-utc") || "").trim();

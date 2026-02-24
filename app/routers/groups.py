@@ -19,6 +19,7 @@ from app.db import get_db
 from app.models.core import (
     DirectMessage,
     DirectMessageReport,
+    ConversationKey,
     Group,
     GroupFileRecord,
     GroupInvite,
@@ -31,7 +32,17 @@ from app.services.audit import add_audit_log
 from app.services.crypto import decrypt_file_iter, encrypt_file_to_path
 from app.services.group_keystore import ensure_group_key, get_group_dek
 from app.services.keystore import get_user_dek
-from app.services.message_crypto import encrypt_message
+from app.services.conversation_keystore import ensure_conversation_key, get_conversation_dek
+from app.services.timezones import DEFAULT_TIMEZONE, TIMEZONE_COOKIE, format_datetime_for_timezone, normalize_timezone
+from app.services.message_crypto import (
+    DM_ATTACHMENT_SCHEME_CONVERSATION,
+    DM_ATTACHMENT_SCHEME_RECIPIENT,
+    DM_ATTACHMENT_SCHEME_SYSTEM,
+    DM_BODY_SCHEME_CONVERSATION,
+    decrypt_message_attachment_iter,
+    encrypt_dm_body,
+    encrypt_message,
+)
 
 router = APIRouter(prefix="/ui/groups", tags=["groups"])
 templates = Jinja2Templates(directory="templates")
@@ -59,6 +70,20 @@ DM_REPORT_REASONS: dict[str, str] = {
     "sexual": "Sexual content",
     "other": "Other",
 }
+
+
+def _resolve_effective_timezone(request: Request, user: User | None = None) -> str:
+    if user:
+        user_tz = normalize_timezone(getattr(user, "timezone", None))
+        if user_tz:
+            return user_tz
+    cookie_tz = normalize_timezone(request.cookies.get(TIMEZONE_COOKIE))
+    if cookie_tz:
+        return cookie_tz
+    header_tz = normalize_timezone(request.headers.get("x-timezone"))
+    if header_tz:
+        return header_tz
+    return DEFAULT_TIMEZONE
 
 
 def _get_current_user(db: Session, request: Request) -> User | None:
@@ -284,6 +309,7 @@ def groups_home(
     user = _get_current_user(db, request)
     if not user:
         return RedirectResponse(url="/ui/login", status_code=303)
+    display_timezone = _resolve_effective_timezone(request, user)
 
     memberships = (
         db.query(GroupMembership)
@@ -301,13 +327,30 @@ def groups_home(
         .all()
     )
 
+    membership_rows = [
+        {
+            "membership": membership,
+            "joined_at_display": format_datetime_for_timezone(membership.joined_at, display_timezone),
+        }
+        for membership in memberships
+    ]
+    owner_count = sum(1 for membership in memberships if _normalize_role(membership.role) == ROLE_OWNER)
+    invite_rows = [
+        {
+            "invite": invite,
+            "created_at_display": format_datetime_for_timezone(invite.created_at, display_timezone),
+        }
+        for invite in pending_invites
+    ]
+
     return templates.TemplateResponse(
         "groups.html",
         {
             "request": request,
             "user": user,
-            "memberships": memberships,
-            "pending_invites": pending_invites,
+            "memberships": membership_rows,
+            "pending_invites": invite_rows,
+            "owner_count": owner_count,
             "notice": notice,
             "error": error,
         },
@@ -624,13 +667,25 @@ def send_message(
         recipient_id=recipient.id,
         requested_thread=thread_id,
     )
+    try:
+        conversation_key, conversation_key_created = ensure_conversation_key(
+            db,
+            thread_id=resolved_thread_id,
+            user_a_id=user.id,
+            user_b_id=recipient.id,
+        )
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Thread key metadata conflict detected; use a new thread")
+    conversation_dek = get_conversation_dek(conversation_key)
 
     dm = DirectMessage(
         id=uuid.uuid4(),
         thread_id=resolved_thread_id,
         sender_id=user.id,
         recipient_id=recipient.id,
-        body=encrypt_message(body),
+        body=encrypt_dm_body(body, conversation_dek),
+        body_key_scheme=DM_BODY_SCHEME_CONVERSATION,
+        body_key_version=int(conversation_key.key_version or 1),
     )
 
     if has_attachment and attachment:
@@ -638,12 +693,11 @@ def send_message(
         if not safe_name:
             raise HTTPException(status_code=400, detail="Invalid attachment name")
 
-        recipient_dek = get_user_dek(db, recipient)
         attach_dir = _message_attachment_root() / str(recipient.id) / str(dm.id)
         attach_dir.mkdir(parents=True, exist_ok=True)
         dest = attach_dir / safe_name
 
-        nonce_b64, tag_b64, plain_size = encrypt_file_to_path(recipient_dek, attachment.file, dest)
+        nonce_b64, tag_b64, plain_size = encrypt_file_to_path(conversation_dek, attachment.file, dest)
         if plain_size > MESSAGE_ATTACHMENT_MAX_BYTES:
             try:
                 dest.unlink()
@@ -657,6 +711,8 @@ def send_message(
         dm.attachment_size = plain_size
         dm.attachment_enc_nonce = nonce_b64
         dm.attachment_enc_tag = tag_b64
+        dm.attachment_key_scheme = DM_ATTACHMENT_SCHEME_CONVERSATION
+        dm.attachment_key_version = int(conversation_key.key_version or 1)
         dm.attachment_mime_type = mime_type
 
     db.add(dm)
@@ -670,6 +726,17 @@ def send_message(
         ),
         level="SUCCESS",
     )
+    if conversation_key_created:
+        add_audit_log(
+            db,
+            user=user,
+            event_type="encryption.conversation_key_created",
+            details=(
+                f"Created conversation key thread={resolved_thread_id}, peer={recipient.username}, "
+                f"version={conversation_key.key_version} (groups router)."
+            ),
+            request=request,
+        )
     db.commit()
 
     return RedirectResponse(url=f"/ui/groups?thread={resolved_thread_id}", status_code=303)
@@ -795,10 +862,6 @@ def open_message_attachment(message_id: str, request: Request, db: Session = Dep
             headers=headers,
         )
 
-    recipient = db.query(User).filter(User.id == message.recipient_id).first()
-    if not recipient:
-        raise HTTPException(status_code=404, detail="Recipient not found")
-
     add_event(
         db,
         user,
@@ -807,9 +870,36 @@ def open_message_attachment(message_id: str, request: Request, db: Session = Dep
     )
     db.commit()
 
-    dek = get_user_dek(db, recipient)
+    scheme = (message.attachment_key_scheme or "").strip().lower()
+    if scheme == DM_ATTACHMENT_SCHEME_CONVERSATION:
+        thread_id = message.thread_id or message.id
+        key_row = db.query(ConversationKey).filter(ConversationKey.thread_id == thread_id).first()
+        if not key_row:
+            try:
+                key_row, _ = ensure_conversation_key(
+                    db,
+                    thread_id=thread_id,
+                    user_a_id=message.sender_id,
+                    user_b_id=message.recipient_id,
+                )
+            except ValueError:
+                raise HTTPException(status_code=409, detail="Conversation key metadata mismatch")
+            db.commit()
+        dek = get_conversation_dek(key_row)
+        stream = decrypt_file_iter(dek, path, message.attachment_enc_nonce, message.attachment_enc_tag)
+    elif scheme in {"", DM_ATTACHMENT_SCHEME_RECIPIENT}:
+        recipient = db.query(User).filter(User.id == message.recipient_id).first()
+        if not recipient:
+            raise HTTPException(status_code=404, detail="Recipient not found")
+        dek = get_user_dek(db, recipient)
+        stream = decrypt_file_iter(dek, path, message.attachment_enc_nonce, message.attachment_enc_tag)
+    elif scheme == DM_ATTACHMENT_SCHEME_SYSTEM:
+        stream = decrypt_message_attachment_iter(path, message.attachment_enc_nonce, message.attachment_enc_tag)
+    else:
+        raise HTTPException(status_code=500, detail="Unknown attachment encryption scheme")
+
     return StreamingResponse(
-        decrypt_file_iter(dek, path, message.attachment_enc_nonce, message.attachment_enc_tag),
+        stream,
         media_type=message.attachment_mime_type or "application/octet-stream",
         headers=headers,
     )
@@ -828,12 +918,15 @@ def group_detail(
     user = _get_current_user(db, request)
     if not user:
         return RedirectResponse(url="/ui/login", status_code=303)
+    display_timezone = _resolve_effective_timezone(request, user)
 
     group, membership = _must_group_role(db, user, group_id, ROLE_VIEWER)
     _group_root(group)
     group_key_row = ensure_group_key(db, group)
     group_key_version = int(group_key_row.key_version or 1)
     group_key_label = f"group-dek:v{group_key_version}"
+    group_key_record_id = str(group_key_row.id)
+    group_key_created_utc = format_datetime_for_timezone(group_key_row.created_at, display_timezone)
 
     normalized_role = _normalize_role(membership.role)
     can_upload = _role_at_least(normalized_role, ROLE_MEMBER)
@@ -847,8 +940,15 @@ def group_detail(
         .order_by(GroupMembership.joined_at.asc())
         .all()
     )
+    member_rows = [
+        {
+            "membership": row,
+            "joined_at_display": format_datetime_for_timezone(row.joined_at, display_timezone),
+        }
+        for row in members
+    ]
 
-    pending_invites = []
+    pending_invites: list[GroupInvite] = []
     if can_invite:
         pending_invites = (
             db.query(GroupInvite)
@@ -857,6 +957,13 @@ def group_detail(
             .order_by(GroupInvite.created_at.desc())
             .all()
         )
+    invite_rows = [
+        {
+            "invite": row,
+            "created_at_display": format_datetime_for_timezone(row.created_at, display_timezone),
+        }
+        for row in pending_invites
+    ]
 
     normalized_file_q = (file_q or "").strip()
     normalized_file_sort = (file_sort or "newest").strip().lower()
@@ -896,6 +1003,7 @@ def group_detail(
                 "display_name": record.file_name,
                 "can_edit": _can_edit_group_file(user, membership, record),
                 "enc_key_label": group_key_label if record.is_encrypted else "plaintext",
+                "uploaded_at_display": format_datetime_for_timezone(record.uploaded_at, display_timezone),
             }
         )
 
@@ -924,8 +1032,8 @@ def group_detail(
             "request": request,
             "user": user,
             "group": group,
-            "members": members,
-            "pending_invites": pending_invites,
+            "members": member_rows,
+            "pending_invites": invite_rows,
             "files": file_rows,
             "folders": folder_rows,
             "folder_tree": folder_tree,
@@ -937,6 +1045,8 @@ def group_detail(
             "can_upload": can_upload,
             "member_role_options": MANAGE_MEMBER_ROLES,
             "group_dir_key_label": group_key_label,
+            "group_key_record_id": group_key_record_id,
+            "group_key_created_utc": group_key_created_utc,
             "file_q": normalized_file_q,
             "file_sort": normalized_file_sort,
             "notice": notice or request.query_params.get("notice"),

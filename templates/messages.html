@@ -75,6 +75,13 @@
             Pick a thread or create a new one
             {% endif %}
           </p>
+          {% if active_thread_id %}
+          <div class="messages-thread-key-meta">
+            <span class="messages-key-chip">{{ active_conversation_key_label }}</span>
+            <span class="muted">Record {{ active_conversation_key_record_id }}</span>
+            <span class="muted">Created {{ active_conversation_key_created_utc }}</span>
+          </div>
+          {% endif %}
         </div>
         <button type="button" class="ghost" id="dmNewThread" aria-expanded="false" aria-controls="dmNewConversationPanel">New conversation</button>
       </div>

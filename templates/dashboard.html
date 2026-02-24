@@ -116,7 +116,7 @@
       </div>
     </div>
     <div class="file-row-size">{{ file_row.record.file_size }}</div>
-    <div class="file-row-uploaded">{{ file_row.record.uploaded_at }}</div>
+    <div class="file-row-uploaded">{{ file_row.uploaded_at_display }}</div>
     <div class="file-row-actions">
       <button
         type="button"
@@ -224,6 +224,9 @@
         <div class="stat-label">Top-level branches</div>
       </div>
     </div>
+    <p class="muted">
+      User key <code>{{ user_key_label }}</code> · record <code>{{ user_key_record_id }}</code> · created {{ user_key_created_utc }}
+    </p>
     <div class="actions">
       <a class="pill" href="/ui/mfa">Manage MFA</a>
     </div>

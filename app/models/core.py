@@ -33,6 +33,7 @@ class User(Base):
     profile_image_nonce: Mapped[str | None] = mapped_column(String(64), nullable=True)
     profile_image_tag: Mapped[str | None] = mapped_column(String(64), nullable=True)
     profile_image_mime_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    timezone: Mapped[str | None] = mapped_column(String(64), nullable=True)
     ui_view_mode: Mapped[str] = mapped_column(String(16), default="base")
     password_hash: Mapped[str] = mapped_column(String(255))
     totp_secret_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -197,12 +198,15 @@ class DirectMessage(Base):
     sender_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
     recipient_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
     body: Mapped[str] = mapped_column(Text)
+    body_key_scheme: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    body_key_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     attachment_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     attachment_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     attachment_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
     attachment_enc_nonce: Mapped[str | None] = mapped_column(String(64), nullable=True)
     attachment_enc_tag: Mapped[str | None] = mapped_column(String(64), nullable=True)
     attachment_key_scheme: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    attachment_key_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     attachment_mime_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -269,6 +273,20 @@ class GroupKey(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     group: Mapped["Group"] = relationship(back_populates="key")
+
+
+class ConversationKey(Base):
+    __tablename__ = "conversation_keys"
+    __table_args__ = (UniqueConstraint("thread_id", name="uq_conversation_key_thread"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    thread_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    user_low_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
+    user_high_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
+    wrap_nonce: Mapped[str] = mapped_column(String(64))
+    wrapped_dek: Mapped[str] = mapped_column(Text)
+    key_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class GroupFileRecord(Base):

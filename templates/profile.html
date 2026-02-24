@@ -244,6 +244,30 @@
           <code>not configured</code>
           {% endif %}
         </div>
+        <label class="profile-mfa-field-full">
+          <span>Timezone (IANA)</span>
+          <input
+            type="text"
+            name="timezone"
+            id="profileTimezoneInput"
+            list="profileTimezoneList"
+            value="{{ user.timezone or '' }}"
+            placeholder="Auto-detect from browser (leave blank)"
+          />
+          <datalist id="profileTimezoneList">
+            {% for tz in timezone_options %}
+            <option value="{{ tz }}"></option>
+            {% endfor %}
+          </datalist>
+        </label>
+        <div class="profile-mfa-field-full mfa-channel-status">
+          Display timezone: <code id="profileTimezoneDisplay">{{ effective_timezone }}</code>
+          {% if user.timezone %}
+          <span class="muted">(manual override)</span>
+          {% else %}
+          <span class="muted">(auto-detected from browser cookie)</span>
+          {% endif %}
+        </div>
       </div>
       <p class="muted">If you changed your email, save this form first, then send verification.</p>
     </div>
@@ -534,6 +558,17 @@
         if (accentColorA) accentColorA.value = current.a;
         if (accentColorB) accentColorB.value = current.b;
       }
+    }
+  })();
+
+  (function () {
+    const input = document.getElementById("profileTimezoneInput");
+    const display = document.getElementById("profileTimezoneDisplay");
+    if (!input || !display) return;
+
+    const detected = (window.__pfvDetectedTimezone || window.__pfvTimezone || "").trim();
+    if (!input.value.trim() && detected) {
+      display.textContent = detected;
     }
   })();
 </script>

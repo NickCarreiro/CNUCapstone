@@ -118,7 +118,7 @@
       </div>
     </div>
     <div class="file-row-size">{{ file_row.record.file_size }}</div>
-    <div class="file-row-uploaded">{{ file_row.record.uploaded_at }}</div>
+    <div class="file-row-uploaded">{{ file_row.uploaded_at_display }}</div>
     <div class="file-row-actions">
       <button
         type="button"
@@ -248,6 +248,9 @@
         <div class="stat-label">Your role</div>
       </div>
     </div>
+    <p class="muted">
+      Group key <code>{{ group_dir_key_label }}</code> · record <code>{{ group_key_record_id }}</code> · created {{ group_key_created_utc }}
+    </p>
     <div class="actions">
       <a class="pill ghost-link" href="/ui/groups">Back to Collaborate</a>
     </div>
@@ -319,7 +322,8 @@
           </tr>
         </thead>
         <tbody>
-          {% for member in members %}
+          {% for row in members %}
+          {% set member = row.membership %}
           <tr>
             <td data-label="Username">{{ member.user.username }}</td>
             <td data-label="Email">
@@ -330,7 +334,7 @@
               {% endif %}
             </td>
             <td data-label="Role">{{ member.role }}</td>
-            <td data-label="Joined">{{ member.joined_at }}</td>
+            <td data-label="Joined">{{ row.joined_at_display }}</td>
             <td data-label="Manage">
               {% if can_manage_members and member.user.id != user.id and member.role != "owner" %}
                 <div class="member-manage">
@@ -476,11 +480,12 @@
           </tr>
         </thead>
         <tbody>
-          {% for invite in pending_invites %}
+          {% for row in pending_invites %}
+          {% set invite = row.invite %}
           <tr>
             <td data-label="Invitee">{{ invite.invitee.username }}</td>
             <td data-label="Inviter">{{ invite.inviter.username }}</td>
-            <td data-label="Created">{{ invite.created_at }}</td>
+            <td data-label="Created">{{ row.created_at_display }}</td>
           </tr>
           {% endfor %}
         </tbody>

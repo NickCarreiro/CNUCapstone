@@ -3,7 +3,6 @@
 {% block content %}
 {% set membership_count = memberships|length %}
 {% set invite_count = pending_invites|length %}
-{% set owner_count = memberships|selectattr("role", "equalto", "owner")|list|length %}
 <section class="card hero-card groups-hero">
   <div class="eyebrow">Groups</div>
   <h1>Group workspaces and invitations</h1>
@@ -65,11 +64,12 @@
           </tr>
         </thead>
         <tbody>
-          {% for membership in memberships %}
+          {% for row in memberships %}
+          {% set membership = row.membership %}
           <tr>
             <td data-label="Group">{{ membership.group.name }}</td>
             <td data-label="Role">{{ membership.role }}</td>
-            <td data-label="Joined">{{ membership.joined_at }}</td>
+            <td data-label="Joined">{{ row.joined_at_display }}</td>
             <td data-label="Open"><a class="pill" href="/ui/groups/{{ membership.group.id }}">Open</a></td>
           </tr>
           {% endfor %}
@@ -98,11 +98,12 @@
           </tr>
         </thead>
         <tbody>
-          {% for invite in pending_invites %}
+          {% for row in pending_invites %}
+          {% set invite = row.invite %}
           <tr>
             <td data-label="Group">{{ invite.group.name }}</td>
             <td data-label="Invited by">{{ invite.inviter.username }}</td>
-            <td data-label="Created">{{ invite.created_at }}</td>
+            <td data-label="Created">{{ row.created_at_display }}</td>
             <td data-label="Accept">
               <form method="post" action="/ui/groups/invites/{{ invite.id }}/accept" class="inline-form">
                 <button type="submit">Accept</button>

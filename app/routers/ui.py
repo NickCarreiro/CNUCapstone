@@ -3,12 +3,14 @@ import re
 import secrets
 import shlex
 import shutil
+import io
 import uuid
 import hashlib
 import hmac
 import smtplib
 import ssl
 import base64
+import contextvars
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
@@ -39,6 +41,7 @@ from app.models.core import (
     GroupInvite,
     GroupKey,
     GroupMembership,
+    ConversationKey,
     Session as SessionModel,
     SupportTicket,
     User,
@@ -56,18 +59,31 @@ from app.services.crypto import (
 from app.services.key_derivation import master_key_bytes, message_attachment_key_bytes, using_passphrase
 from app.services.group_keystore import ensure_group_key, get_group_dek
 from app.services.keystore import ensure_user_key, get_user_dek
+from app.services.conversation_keystore import conversation_aad, ensure_conversation_key, get_conversation_dek
 from app.services.activity import add_event
 from app.services.audit import add_audit_log
 from app.services.security import decrypt_totp_secret, encrypt_totp_secret, hash_password, verify_password
 from app.services.sessions import create_session
 from app.services.message_crypto import (
+    DM_ATTACHMENT_SCHEME_CONVERSATION,
     DM_ATTACHMENT_SCHEME_RECIPIENT,
     DM_ATTACHMENT_SCHEME_SYSTEM,
+    DM_BODY_SCHEME_CONVERSATION,
+    DM_BODY_SCHEME_FERNET,
     decrypt_message,
-    decrypt_message_attachment_iter,
+    decrypt_dm_body,
+    encrypt_dm_body,
     encrypt_message,
-    encrypt_message_attachment_to_path,
+    is_dm_conversation_encrypted,
     is_message_encrypted,
+)
+from app.services.timezones import (
+    DEFAULT_TIMEZONE,
+    TIMEZONE_COOKIE,
+    format_datetime_for_timezone,
+    format_datetime_iso_utc,
+    normalize_timezone,
+    timezone_options,
 )
 import pyotp
 
@@ -80,6 +96,7 @@ _PENDING_LOGIN_CACHE: dict[str, dict[str, object]] = {}
 _PENDING_LOGIN_TTL_SECONDS = 10 * 60
 _PENDING_PASSWORD_RESET_CACHE: dict[str, dict[str, object]] = {}
 _PENDING_PASSWORD_RESET_TTL_SECONDS = 15 * 60
+_ACTIVE_TIMEZONE: contextvars.ContextVar[str] = contextvars.ContextVar("pfv_active_timezone", default=DEFAULT_TIMEZONE)
 
 _TERMINAL_COMMANDS = [
     "help",
@@ -139,6 +156,9 @@ _TERMINAL_TEXT_EXTS = {
 }
 _DM_BODY_KEY_LABEL = "dm-body:fernet-v1"
 _DM_ATTACHMENT_SYSTEM_KEY_LABEL = "dm-attachment:system-key:v1"
+_DM_BODY_CONVERSATION_KEY_LABEL = "dm-conversation"
+_DM_ATTACHMENT_CONVERSATION_KEY_LABEL = "dm-attachment:conversation"
+_DM_BODY_HEAL_REENCRYPT_LEN = 8 * 1024
 
 MESSAGE_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024
 PROFILE_AVATAR_MAX_BYTES = 4 * 1024 * 1024
@@ -162,6 +182,7 @@ PROFILE_IMAGE_MIME_ALLOW = {
     "image/webp",
     "image/gif",
 }
+PROFILE_TIMEZONE_OPTIONS = timezone_options()
 
 DM_REPORT_REASONS: dict[str, str] = {
     "spam": "Spam / unsolicited advertising",
@@ -515,7 +536,28 @@ def _get_session(db: Session, session_id: str | None) -> SessionModel | None:
     )
 
 
+def _resolve_effective_timezone(request: Request, user: User | None = None) -> str:
+    if user:
+        user_tz = normalize_timezone(getattr(user, "timezone", None))
+        if user_tz:
+            return user_tz
+    cookie_tz = normalize_timezone(request.cookies.get(TIMEZONE_COOKIE))
+    if cookie_tz:
+        return cookie_tz
+    header_tz = normalize_timezone(request.headers.get("x-timezone"))
+    if header_tz:
+        return header_tz
+    return DEFAULT_TIMEZONE
+
+
+def _set_active_timezone(request: Request, user: User | None = None) -> str:
+    tz_name = _resolve_effective_timezone(request, user)
+    _ACTIVE_TIMEZONE.set(tz_name)
+    return tz_name
+
+
 def _get_current_user(db: Session, request: Request) -> User | None:
+    _set_active_timezone(request)
     session_id = request.cookies.get("pfv_session")
     session = _get_session(db, session_id)
     if not session:
@@ -525,6 +567,8 @@ def _get_current_user(db: Session, request: Request) -> User | None:
         session.is_active = False
         db.commit()
         return None
+    if user:
+        _set_active_timezone(request, user)
     return user
 
 
@@ -558,16 +602,27 @@ def _safe_message_attachment_path(path_str: str) -> Path:
     return candidate
 
 
-def _ensure_message_attachment_encrypted(row: DirectMessage, path: Path) -> bool:
+def _ensure_message_attachment_encrypted(db: Session, row: DirectMessage, path: Path) -> bool:
     """Best-effort upgrade for legacy plaintext DM attachments."""
     has_nonce_tag = bool(row.attachment_enc_nonce and row.attachment_enc_tag)
     changed = False
 
     if not has_nonce_tag:
+        thread_id = row.thread_id or row.id
+        try:
+            conversation_key, _ = ensure_conversation_key(
+                db,
+                thread_id=thread_id,
+                user_a_id=row.sender_id,
+                user_b_id=row.recipient_id,
+            )
+        except ValueError:
+            raise HTTPException(status_code=409, detail="Conversation key metadata mismatch")
+        conversation_dek = get_conversation_dek(conversation_key)
         tmp = path.with_name(f"{path.name}.dmenc.tmp")
         try:
             with path.open("rb") as src:
-                nonce_b64, tag_b64, plain_size = encrypt_message_attachment_to_path(src, tmp)
+                nonce_b64, tag_b64, plain_size = encrypt_file_to_path(conversation_dek, src, tmp)
             tmp.replace(path)
         except Exception:
             try:
@@ -581,7 +636,8 @@ def _ensure_message_attachment_encrypted(row: DirectMessage, path: Path) -> bool
         row.attachment_enc_nonce = nonce_b64
         row.attachment_enc_tag = tag_b64
         row.attachment_size = plain_size
-        row.attachment_key_scheme = DM_ATTACHMENT_SCHEME_SYSTEM
+        row.attachment_key_scheme = DM_ATTACHMENT_SCHEME_CONVERSATION
+        row.attachment_key_version = int(conversation_key.key_version or 1)
         changed = True
 
     if row.attachment_enc_nonce and row.attachment_enc_tag and not row.attachment_key_scheme:
@@ -631,16 +687,38 @@ def _resolve_thread_id(
     return latest_thread or uuid.uuid4()
 
 
+def _conversation_body_key_label(version: int | None) -> str:
+    return f"{_DM_BODY_CONVERSATION_KEY_LABEL}:v{version}" if version else _DM_BODY_CONVERSATION_KEY_LABEL
+
+
+def _conversation_attachment_key_label(version: int | None) -> str:
+    return (
+        f"{_DM_ATTACHMENT_CONVERSATION_KEY_LABEL}:v{version}"
+        if version
+        else _DM_ATTACHMENT_CONVERSATION_KEY_LABEL
+    )
+
+
+def _ensure_conversation_key_for_message(db: Session, row: DirectMessage) -> tuple[ConversationKey, bool]:
+    thread_id = row.thread_id or row.id
+    created_thread_id = row.thread_id is None
+    if created_thread_id:
+        row.thread_id = thread_id
+    key_row, created = ensure_conversation_key(
+        db,
+        thread_id=thread_id,
+        user_a_id=row.sender_id,
+        user_b_id=row.recipient_id,
+    )
+    return key_row, (created or created_thread_id)
+
+
 def _format_utc(value: datetime | None) -> str:
-    if not value:
-        return "-"
-    return value.strftime("%Y-%m-%d %H:%M:%S UTC")
+    return format_datetime_for_timezone(value, _ACTIVE_TIMEZONE.get())
 
 
 def _format_utc_iso(value: datetime | None) -> str:
-    if not value:
-        return ""
-    return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return format_datetime_iso_utc(value)
 
 
 def _terminal_scope_key(request: Request) -> str:
@@ -700,6 +778,10 @@ def _safe_profile_asset_path(path_str: str) -> Path:
     if not candidate.is_relative_to(root):
         raise HTTPException(status_code=400, detail="Invalid profile asset path")
     return candidate
+
+
+def _profile_timezone_rows() -> list[str]:
+    return PROFILE_TIMEZONE_OPTIONS
 
 
 def _normalize_email(value: str) -> str:
@@ -1110,8 +1192,26 @@ def _directory_lock_message(user: User | None) -> str:
 
 
 def _admin_redirect(message: str, *, error: bool = False) -> RedirectResponse:
+    return _admin_redirect_with_target(message, error=error, target="security")
+
+
+def _normalize_admin_redirect_target(value: str | None) -> str:
+    target = (value or "").strip().lower()
+    if target in {"security", "users"}:
+        return "security"
+    return "security"
+
+
+def _admin_redirect_with_target(
+    message: str,
+    *,
+    error: bool = False,
+    target: str = "users",
+) -> RedirectResponse:
     key = "error" if error else "notice"
-    return RedirectResponse(url=f"/ui/admin/users?{key}={quote_plus(message)}", status_code=303)
+    _normalize_admin_redirect_target(target)
+    base = "/ui/admin/security"
+    return RedirectResponse(url=f"{base}?{key}={quote_plus(message)}", status_code=303)
 
 
 def _admin_reports_redirect(
@@ -1451,6 +1551,81 @@ def _verify_rotated_ciphertext(dek: bytes, path: Path, nonce_b64: str, tag_b64: 
     return total_plain
 
 
+def _key_material_fingerprint(dek: bytes) -> str:
+    return hashlib.sha256(dek).hexdigest()
+
+
+def _collect_key_uniqueness_summary(db: Session) -> dict[str, int | bool]:
+    master = master_key_bytes()
+    user_fingerprints: set[str] = set()
+    group_fingerprints: set[str] = set()
+    conversation_fingerprints: set[str] = set()
+    all_fingerprints: set[str] = set()
+    unwrap_errors = 0
+
+    user_rows = db.query(UserKey.user_id, UserKey.wrap_nonce, UserKey.wrapped_dek).all()
+    for user_id, wrap_nonce, wrapped_dek in user_rows:
+        try:
+            dek = unwrap_key(master, wrap_nonce, wrapped_dek, aad=str(user_id).encode())
+        except Exception:
+            unwrap_errors += 1
+            continue
+        fp = _key_material_fingerprint(dek)
+        user_fingerprints.add(fp)
+        all_fingerprints.add(fp)
+
+    group_rows = db.query(GroupKey.group_id, GroupKey.wrap_nonce, GroupKey.wrapped_dek).all()
+    for group_id, wrap_nonce, wrapped_dek in group_rows:
+        try:
+            dek = unwrap_key(master, wrap_nonce, wrapped_dek, aad=f"group:{group_id}".encode())
+        except Exception:
+            unwrap_errors += 1
+            continue
+        fp = _key_material_fingerprint(dek)
+        group_fingerprints.add(fp)
+        all_fingerprints.add(fp)
+
+    conversation_rows = (
+        db.query(
+            ConversationKey.thread_id,
+            ConversationKey.user_low_id,
+            ConversationKey.user_high_id,
+            ConversationKey.wrap_nonce,
+            ConversationKey.wrapped_dek,
+        )
+        .all()
+    )
+    for thread_id, user_low_id, user_high_id, wrap_nonce, wrapped_dek in conversation_rows:
+        try:
+            dek = unwrap_key(
+                master,
+                wrap_nonce,
+                wrapped_dek,
+                aad=conversation_aad(thread_id, user_low_id, user_high_id),
+            )
+        except Exception:
+            unwrap_errors += 1
+            continue
+        fp = _key_material_fingerprint(dek)
+        conversation_fingerprints.add(fp)
+        all_fingerprints.add(fp)
+
+    total_records = len(user_rows) + len(group_rows) + len(conversation_rows)
+    unique_records = len(all_fingerprints)
+    duplicate_records = max(0, total_records - unique_records)
+
+    return {
+        "key_material_total_records": total_records,
+        "key_material_unique_records": unique_records,
+        "key_material_duplicate_records": duplicate_records,
+        "key_material_errors": unwrap_errors,
+        "key_material_not_all_same": bool(total_records <= 1 or unique_records > 1),
+        "user_key_material_unique": len(user_fingerprints),
+        "group_key_material_unique": len(group_fingerprints),
+        "conversation_key_material_unique": len(conversation_fingerprints),
+    }
+
+
 def _rotate_user_key_material(db: Session, user: User) -> dict[str, int]:
     key_row = ensure_user_key(db, user)
     old_key_version = int(key_row.key_version or 1)
@@ -1616,6 +1791,19 @@ def _rotate_user_key_material(db: Session, user: User) -> dict[str, int]:
         key_row.wrapped_dek = wrapped_dek
         key_row.key_version = old_key_version + 1
         key_row.created_at = datetime.utcnow()
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                event_type="encryption.user_key_rotated",
+                details=(
+                    f"Rotated user key id={key_row.id} user={user.id} "
+                    f"version={old_key_version}->{key_row.key_version}, "
+                    f"files_rotated={summary['files_rotated']}, "
+                    f"recipient_attachments_rotated={summary['recipient_attachments_rotated']}, "
+                    f"avatar_rotated={summary['avatar_rotated']}."
+                ),
+            )
+        )
 
         db.commit()
         committed = True
@@ -1641,7 +1829,9 @@ def _rotate_message_ciphertexts(
         "messages_rotated": 0,
         "messages_upgraded_plaintext": 0,
         "messages_unavailable": 0,
+        "conversation_keys_touched": 0,
         "attachments_total": 0,
+        "attachments_conversation_rotated": 0,
         "attachments_system_rotated": 0,
         "attachments_recipient_rotated": 0,
         "attachments_recipient_skipped": 0,
@@ -1665,20 +1855,57 @@ def _rotate_message_ciphertexts(
 
         system_attachment_key = message_attachment_key_bytes()
         recipient_dek = get_user_dek(db, user) if include_recipient_attachments else b""
+        conversation_dek_by_thread: dict[uuid.UUID, bytes] = {}
+        touched_thread_ids: set[uuid.UUID] = set()
 
         for row in dm_rows:
+            thread_id = row.thread_id or row.id
+            if row.thread_id is None:
+                row.thread_id = thread_id
+            conversation_key, _ = ensure_conversation_key(
+                db,
+                thread_id=thread_id,
+                user_a_id=row.sender_id,
+                user_b_id=row.recipient_id,
+            )
+            conversation_version = int(conversation_key.key_version or 1)
+            conversation_dek = conversation_dek_by_thread.get(thread_id)
+            if conversation_dek is None:
+                conversation_dek = get_conversation_dek(conversation_key)
+                conversation_dek_by_thread[thread_id] = conversation_dek
+            touched_thread_ids.add(thread_id)
+
             body = row.body or ""
             if body:
-                if is_message_encrypted(body):
+                if is_dm_conversation_encrypted(body):
+                    plain = decrypt_dm_body(body, conversation_dek)
+                    if plain == "[message unavailable]":
+                        summary["messages_unavailable"] += 1
+                    else:
+                        row.body = encrypt_dm_body(plain, conversation_dek)
+                        row.body_key_scheme = DM_BODY_SCHEME_CONVERSATION
+                        row.body_key_version = conversation_version
+                        summary["messages_rotated"] += 1
+                elif is_message_encrypted(body):
                     plain = decrypt_message(body)
                     if plain == "[message unavailable]":
                         summary["messages_unavailable"] += 1
                     else:
-                        row.body = encrypt_message(plain)
-                        summary["messages_rotated"] += 1
+                        row.body = encrypt_dm_body(plain, conversation_dek)
+                        row.body_key_scheme = DM_BODY_SCHEME_CONVERSATION
+                        row.body_key_version = conversation_version
+                        summary["messages_upgraded_plaintext"] += 1
                 else:
-                    row.body = encrypt_message(body)
+                    row.body = encrypt_dm_body(body, conversation_dek)
+                    row.body_key_scheme = DM_BODY_SCHEME_CONVERSATION
+                    row.body_key_version = conversation_version
                     summary["messages_upgraded_plaintext"] += 1
+            elif (
+                row.body_key_scheme != DM_BODY_SCHEME_CONVERSATION
+                or row.body_key_version != conversation_version
+            ):
+                row.body_key_scheme = DM_BODY_SCHEME_CONVERSATION
+                row.body_key_version = conversation_version
 
             if not row.attachment_path:
                 continue
@@ -1716,14 +1943,15 @@ def _rotate_message_ciphertexts(
                 row.attachment_enc_nonce = nonce_b64
                 row.attachment_enc_tag = tag_b64
                 row.attachment_size = plain_size
-                row.attachment_key_scheme = DM_ATTACHMENT_SCHEME_RECIPIENT
+                row.attachment_key_scheme = DM_ATTACHMENT_SCHEME_CONVERSATION
+                row.attachment_key_version = conversation_version
                 summary["attachments_recipient_rotated"] += 1
                 continue
 
             if scheme == DM_ATTACHMENT_SCHEME_SYSTEM:
                 nonce_b64, tag_b64, plain_size = _rotate_blob_in_place(
                     old_dek=system_attachment_key,
-                    new_dek=system_attachment_key,
+                    new_dek=conversation_dek,
                     path=attachment_path,
                     nonce_b64=row.attachment_enc_nonce,
                     tag_b64=row.attachment_enc_tag,
@@ -1733,12 +1961,32 @@ def _rotate_message_ciphertexts(
                 row.attachment_enc_nonce = nonce_b64
                 row.attachment_enc_tag = tag_b64
                 row.attachment_size = plain_size
-                row.attachment_key_scheme = DM_ATTACHMENT_SCHEME_SYSTEM
+                row.attachment_key_scheme = DM_ATTACHMENT_SCHEME_CONVERSATION
+                row.attachment_key_version = conversation_version
                 summary["attachments_system_rotated"] += 1
+                continue
+
+            if scheme == DM_ATTACHMENT_SCHEME_CONVERSATION:
+                nonce_b64, tag_b64, plain_size = _rotate_blob_in_place(
+                    old_dek=conversation_dek,
+                    new_dek=conversation_dek,
+                    path=attachment_path,
+                    nonce_b64=row.attachment_enc_nonce,
+                    tag_b64=row.attachment_enc_tag,
+                    swapped_paths=swapped_paths,
+                    temp_paths=temp_paths,
+                )
+                row.attachment_enc_nonce = nonce_b64
+                row.attachment_enc_tag = tag_b64
+                row.attachment_size = plain_size
+                row.attachment_key_scheme = DM_ATTACHMENT_SCHEME_CONVERSATION
+                row.attachment_key_version = conversation_version
+                summary["attachments_conversation_rotated"] += 1
                 continue
 
             summary["attachments_unknown_scheme"] += 1
 
+        summary["conversation_keys_touched"] = len(touched_thread_ids)
         db.commit()
         committed = True
         return summary
@@ -1834,6 +2082,231 @@ def _rotate_group_key_material(db: Session, group: Group) -> dict[str, int | str
         group_key.wrapped_dek = wrapped_dek
         group_key.key_version = old_key_version + 1
         group_key.created_at = datetime.utcnow()
+        db.add(
+            AuditLog(
+                user_id=None,
+                event_type="encryption.group_key_rotated",
+                details=(
+                    f"Rotated group key id={group_key.id} group={group.id} "
+                    f"version={old_key_version}->{group_key.key_version}, "
+                    f"files_rotated={summary['files_rotated']}."
+                ),
+            )
+        )
+
+        db.commit()
+        committed = True
+        return summary
+    except Exception:
+        db.rollback()
+        _restore_rotation_swaps(swapped_paths)
+        raise
+    finally:
+        _cleanup_rotation_paths(temp_paths)
+        if committed:
+            _cleanup_rotation_paths([backup_path for _, backup_path in swapped_paths])
+
+
+def _rotate_conversation_key_material(db: Session, *, thread_id: uuid.UUID) -> dict[str, int | str]:
+    key_row = db.query(ConversationKey).filter(ConversationKey.thread_id == thread_id).first()
+    if key_row is None:
+        seed = (
+            db.query(DirectMessage)
+            .filter(
+                or_(
+                    DirectMessage.thread_id == thread_id,
+                    and_(DirectMessage.thread_id.is_(None), DirectMessage.id == thread_id),
+                )
+            )
+            .order_by(DirectMessage.created_at.asc(), DirectMessage.id.asc())
+            .first()
+        )
+        if seed is None:
+            raise ValueError("Conversation thread was not found")
+        key_row, _ = ensure_conversation_key(
+            db,
+            thread_id=thread_id,
+            user_a_id=seed.sender_id,
+            user_b_id=seed.recipient_id,
+        )
+
+    old_key_version = int(key_row.key_version or 1)
+    old_dek = get_conversation_dek(key_row)
+    new_dek = generate_key_32()
+    new_key_version = old_key_version + 1
+
+    summary: dict[str, int | str] = {
+        "thread_id": str(thread_id),
+        "messages_total": 0,
+        "messages_rotated": 0,
+        "messages_upgraded_plaintext": 0,
+        "messages_unavailable": 0,
+        "attachments_total": 0,
+        "attachments_rotated": 0,
+        "attachments_from_conversation": 0,
+        "attachments_from_system": 0,
+        "attachments_from_recipient": 0,
+        "attachments_missing_meta": 0,
+        "attachments_missing_path": 0,
+        "attachments_invalid_path": 0,
+        "attachments_unknown_scheme": 0,
+        "attachments_missing_recipient_key": 0,
+        "verification_checks_total": 0,
+        "verification_checks_passed": 0,
+        "verification_bytes_checked": 0,
+        "key_version_from": old_key_version,
+        "key_version_to": new_key_version,
+    }
+
+    swapped_paths: list[tuple[Path, Path]] = []
+    temp_paths: list[Path] = []
+    rotated_attachment_targets: list[tuple[Path, str, str]] = []
+    recipient_dek_cache: dict[uuid.UUID, bytes] = {}
+    recipient_user_cache: dict[uuid.UUID, User | None] = {}
+    system_attachment_key = message_attachment_key_bytes()
+    committed = False
+
+    try:
+        expected_pair = {key_row.user_low_id, key_row.user_high_id}
+        dm_rows = (
+            db.query(DirectMessage)
+            .filter(
+                or_(
+                    DirectMessage.thread_id == thread_id,
+                    and_(DirectMessage.thread_id.is_(None), DirectMessage.id == thread_id),
+                )
+            )
+            .order_by(DirectMessage.created_at.asc(), DirectMessage.id.asc())
+            .all()
+        )
+        summary["messages_total"] = len(dm_rows)
+
+        for row in dm_rows:
+            if row.thread_id is None:
+                row.thread_id = thread_id
+            if {row.sender_id, row.recipient_id} != expected_pair:
+                raise RuntimeError("Conversation participants mismatch for thread rotation")
+
+            body_value = row.body or ""
+            if body_value:
+                if is_dm_conversation_encrypted(body_value):
+                    plain = decrypt_dm_body(body_value, old_dek)
+                    if plain == "[message unavailable]":
+                        summary["messages_unavailable"] += 1
+                        raise RuntimeError("Conversation body decrypt failed during key rotation")
+                    row.body = encrypt_dm_body(plain, new_dek)
+                    row.body_key_scheme = DM_BODY_SCHEME_CONVERSATION
+                    row.body_key_version = new_key_version
+                    summary["messages_rotated"] += 1
+                elif is_message_encrypted(body_value):
+                    plain = decrypt_message(body_value)
+                    if plain == "[message unavailable]":
+                        summary["messages_unavailable"] += 1
+                        raise RuntimeError("Legacy encrypted body decrypt failed during key rotation")
+                    row.body = encrypt_dm_body(plain, new_dek)
+                    row.body_key_scheme = DM_BODY_SCHEME_CONVERSATION
+                    row.body_key_version = new_key_version
+                    summary["messages_upgraded_plaintext"] += 1
+                else:
+                    row.body = encrypt_dm_body(body_value, new_dek)
+                    row.body_key_scheme = DM_BODY_SCHEME_CONVERSATION
+                    row.body_key_version = new_key_version
+                    summary["messages_upgraded_plaintext"] += 1
+            elif (
+                row.body_key_scheme != DM_BODY_SCHEME_CONVERSATION
+                or row.body_key_version != new_key_version
+            ):
+                row.body_key_scheme = DM_BODY_SCHEME_CONVERSATION
+                row.body_key_version = new_key_version
+
+            if not row.attachment_path:
+                continue
+
+            summary["attachments_total"] += 1
+            if not row.attachment_enc_nonce or not row.attachment_enc_tag:
+                summary["attachments_missing_meta"] += 1
+                continue
+
+            try:
+                attachment_path = _safe_message_attachment_path(row.attachment_path)
+            except HTTPException:
+                summary["attachments_invalid_path"] += 1
+                continue
+            if not attachment_path.exists() or not attachment_path.is_file():
+                summary["attachments_missing_path"] += 1
+                continue
+
+            scheme = (row.attachment_key_scheme or "").strip().lower()
+            old_attachment_dek: bytes
+            if scheme in {"", DM_ATTACHMENT_SCHEME_RECIPIENT}:
+                recipient_user = recipient_user_cache.get(row.recipient_id)
+                if row.recipient_id not in recipient_user_cache:
+                    recipient_user = db.query(User).filter(User.id == row.recipient_id).first()
+                    recipient_user_cache[row.recipient_id] = recipient_user
+                if recipient_user is None:
+                    summary["attachments_missing_recipient_key"] += 1
+                    continue
+                old_attachment_dek = recipient_dek_cache.get(row.recipient_id) or b""
+                if not old_attachment_dek:
+                    old_attachment_dek = get_user_dek(db, recipient_user)
+                    recipient_dek_cache[row.recipient_id] = old_attachment_dek
+                summary["attachments_from_recipient"] += 1
+            elif scheme == DM_ATTACHMENT_SCHEME_SYSTEM:
+                old_attachment_dek = system_attachment_key
+                summary["attachments_from_system"] += 1
+            elif scheme == DM_ATTACHMENT_SCHEME_CONVERSATION:
+                old_attachment_dek = old_dek
+                summary["attachments_from_conversation"] += 1
+            else:
+                summary["attachments_unknown_scheme"] += 1
+                continue
+
+            nonce_b64, tag_b64, plain_size = _rotate_blob_in_place(
+                old_dek=old_attachment_dek,
+                new_dek=new_dek,
+                path=attachment_path,
+                nonce_b64=row.attachment_enc_nonce,
+                tag_b64=row.attachment_enc_tag,
+                swapped_paths=swapped_paths,
+                temp_paths=temp_paths,
+            )
+            row.attachment_enc_nonce = nonce_b64
+            row.attachment_enc_tag = tag_b64
+            row.attachment_size = plain_size
+            row.attachment_key_scheme = DM_ATTACHMENT_SCHEME_CONVERSATION
+            row.attachment_key_version = new_key_version
+            rotated_attachment_targets.append((attachment_path, nonce_b64, tag_b64))
+            summary["attachments_rotated"] += 1
+
+        summary["verification_checks_total"] = len(rotated_attachment_targets)
+        for path, nonce_b64, tag_b64 in rotated_attachment_targets:
+            verified_size = _verify_rotated_ciphertext(new_dek, path, nonce_b64, tag_b64)
+            summary["verification_checks_passed"] += 1
+            summary["verification_bytes_checked"] += verified_size
+
+        master = master_key_bytes()
+        aad = conversation_aad(thread_id, key_row.user_low_id, key_row.user_high_id)
+        wrap_nonce, wrapped_dek = wrap_key(master, new_dek, aad=aad)
+        unwrap_probe = unwrap_key(master, wrap_nonce, wrapped_dek, aad=aad)
+        if unwrap_probe != new_dek:
+            raise RuntimeError("Conversation key wrap verification failed after rotation")
+        key_row.wrap_nonce = wrap_nonce
+        key_row.wrapped_dek = wrapped_dek
+        key_row.key_version = new_key_version
+        key_row.created_at = datetime.utcnow()
+        db.add(
+            AuditLog(
+                user_id=None,
+                event_type="encryption.conversation_key_rotated",
+                details=(
+                    f"Rotated conversation key id={key_row.id} thread={thread_id} "
+                    f"version={old_key_version}->{new_key_version}, "
+                    f"messages_rotated={summary['messages_rotated']}, "
+                    f"messages_upgraded={summary['messages_upgraded_plaintext']}, "
+                    f"attachments_rotated={summary['attachments_rotated']}."
+                ),
+            )
+        )
 
         db.commit()
         committed = True
@@ -2732,8 +3205,11 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
     if session_id:
         _FILE_TOKEN_CACHE[session_id] = {}
     root = _user_root(user).resolve()
-    user_key_row = db.query(UserKey).filter(UserKey.user_id == user.id).first()
-    user_key_version = int(user_key_row.key_version or 1) if user_key_row else None
+    user_key_row = ensure_user_key(db, user)
+    user_key_version = int(user_key_row.key_version or 1)
+    user_key_label = f"user-dek:v{user_key_version}"
+    user_key_record_id = str(user_key_row.id)
+    user_key_created_utc = _format_utc(user_key_row.created_at)
     file_rows = []
     for idx, record in enumerate(files, start=1):
         try:
@@ -2755,6 +3231,7 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
                 "token": token,
                 "display_name": record.file_name,
                 "enc_key_label": enc_key_label,
+                "uploaded_at_display": _format_utc(record.uploaded_at),
             }
         )
 
@@ -2789,6 +3266,9 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
             "folders": folder_rows,
             "folder_tree": folder_tree,
             "vault_tree": vault_tree,
+            "user_key_label": user_key_label,
+            "user_key_record_id": user_key_record_id,
+            "user_key_created_utc": user_key_created_utc,
             "error": None,
         },
     )
@@ -3012,32 +3492,105 @@ def messages_home(
         .all()
     )
     participant_ids: set[uuid.UUID] = set()
+    thread_ids: set[uuid.UUID] = set()
     for row in messages:
         participant_ids.add(row.sender_id)
         participant_ids.add(row.recipient_id)
+        thread_ids.add(row.thread_id or row.id)
     user_key_versions: dict[uuid.UUID, int] = {}
     if participant_ids:
         user_key_rows = db.query(UserKey).filter(UserKey.user_id.in_(participant_ids)).all()
         for key_row in user_key_rows:
             user_key_versions[key_row.user_id] = int(key_row.key_version or 1)
+    conversation_keys_by_thread: dict[uuid.UUID, ConversationKey] = {}
+    if thread_ids:
+        for key_row in db.query(ConversationKey).filter(ConversationKey.thread_id.in_(thread_ids)).all():
+            conversation_keys_by_thread[key_row.thread_id] = key_row
+    conversation_dek_by_thread: dict[uuid.UUID, bytes] = {}
 
     thread_buckets: dict[uuid.UUID, list[DirectMessage]] = {}
     thread_summaries: dict[uuid.UUID, dict] = {}
     message_rows_changed = False
     for row in messages:
-        if not is_message_encrypted(row.body):
-            row.body = encrypt_message(row.body or "")
+        thread_uuid = row.thread_id or row.id
+        if row.thread_id is None:
+            row.thread_id = thread_uuid
             message_rows_changed = True
 
-        thread_uuid = row.thread_id or row.id
+        conversation_key = conversation_keys_by_thread.get(thread_uuid)
+        conversation_key_version: int | None = None
+        conversation_dek: bytes | None = None
+        if conversation_key is None:
+            try:
+                conversation_key, key_created = ensure_conversation_key(
+                    db,
+                    thread_id=thread_uuid,
+                    user_a_id=row.sender_id,
+                    user_b_id=row.recipient_id,
+                )
+            except ValueError:
+                logger.warning("Direct-message thread %s has mismatched participants; skipping conversation-key attach", thread_uuid)
+                conversation_key = None
+            else:
+                conversation_keys_by_thread[thread_uuid] = conversation_key
+                if key_created:
+                    message_rows_changed = True
+        if conversation_key is not None:
+            conversation_key_version = int(conversation_key.key_version or 1)
+            conversation_dek = conversation_dek_by_thread.get(thread_uuid)
+            if conversation_dek is None:
+                conversation_dek = get_conversation_dek(conversation_key)
+                conversation_dek_by_thread[thread_uuid] = conversation_dek
+
+        body_value = row.body or ""
+        if (
+            conversation_key is not None
+            and conversation_dek is not None
+            and is_dm_conversation_encrypted(body_value)
+            and len(body_value) > _DM_BODY_HEAL_REENCRYPT_LEN
+        ):
+            healed_plaintext = decrypt_dm_body(body_value, conversation_dek)
+            if healed_plaintext != "[message unavailable]":
+                healed_cipher = encrypt_dm_body(healed_plaintext, conversation_dek)
+                if healed_cipher != body_value:
+                    row.body = healed_cipher
+                    row.body_key_scheme = DM_BODY_SCHEME_CONVERSATION
+                    row.body_key_version = conversation_key_version
+                    body_value = row.body or ""
+                    message_rows_changed = True
+
+        if conversation_key is not None and conversation_dek is not None and not is_dm_conversation_encrypted(body_value):
+            plaintext = decrypt_message(body_value)
+            if plaintext != "[message unavailable]":
+                row.body = encrypt_dm_body(plaintext, conversation_dek)
+                row.body_key_scheme = DM_BODY_SCHEME_CONVERSATION
+                row.body_key_version = conversation_key_version
+                message_rows_changed = True
+        elif (
+            conversation_key is not None
+            and conversation_dek is not None
+            and (row.body_key_scheme != DM_BODY_SCHEME_CONVERSATION or row.body_key_version != conversation_key_version)
+        ):
+            row.body_key_scheme = DM_BODY_SCHEME_CONVERSATION
+            row.body_key_version = conversation_key_version
+            message_rows_changed = True
+        elif conversation_key is None and not is_message_encrypted(row.body or ""):
+            row.body = encrypt_message(row.body or "")
+            row.body_key_scheme = DM_BODY_SCHEME_FERNET
+            row.body_key_version = 1
+            message_rows_changed = True
+
         thread_buckets.setdefault(thread_uuid, []).append(row)
 
         partner = row.recipient if row.sender_id == user.id else row.sender
-        preview = decrypt_message(row.body).replace("\n", " ").strip()
-        if len(preview) > 82:
-            preview = f"{preview[:79]}..."
-
         if thread_uuid not in thread_summaries:
+            preview = (
+                decrypt_dm_body(row.body or "", conversation_dek)
+                if conversation_dek is not None
+                else decrypt_message(row.body or "")
+            ).replace("\n", " ").strip()
+            if len(preview) > 82:
+                preview = f"{preview[:79]}..."
             partner_email = ""
             if partner.email and partner.email_visible and partner.email_verified:
                 partner_email = partner.email
@@ -3080,6 +3633,17 @@ def messages_home(
             key=lambda row: row.created_at or datetime.min,
         )
         active_thread_summary = thread_summaries.get(active_thread_uuid)
+    active_conversation_key_label = "-"
+    active_conversation_key_record_id = "-"
+    active_conversation_key_created_utc = "-"
+    if active_thread_uuid:
+        active_conversation_key = conversation_keys_by_thread.get(active_thread_uuid)
+        if active_conversation_key:
+            active_conversation_key_label = _conversation_body_key_label(
+                int(active_conversation_key.key_version or 1)
+            )
+            active_conversation_key_record_id = str(active_conversation_key.id)
+            active_conversation_key_created_utc = _format_utc(active_conversation_key.created_at)
 
     read_updates = 0
     for row in active_thread_messages:
@@ -3094,11 +3658,35 @@ def messages_home(
     thread_messages = []
     for row in active_thread_messages:
         outbound = row.sender_id == user.id
+        thread_uuid = row.thread_id or row.id
+        conversation_key = conversation_keys_by_thread.get(thread_uuid)
+        conversation_dek = conversation_dek_by_thread.get(thread_uuid)
+        if conversation_dek is None and conversation_key is not None:
+            conversation_dek = get_conversation_dek(conversation_key)
+            conversation_dek_by_thread[thread_uuid] = conversation_dek
+
         body_key_label = _DM_BODY_KEY_LABEL
+        if row.body_key_scheme == DM_BODY_SCHEME_CONVERSATION or is_dm_conversation_encrypted(row.body or ""):
+            if conversation_key is not None:
+                body_key_label = _conversation_body_key_label(
+                    int(row.body_key_version or conversation_key.key_version or 1)
+                )
+            else:
+                body_key_label = f"{_DM_BODY_CONVERSATION_KEY_LABEL}:missing-key"
         attachment_key_label = ""
         if row.attachment_name and row.attachment_path:
             scheme = (row.attachment_key_scheme or "").strip().lower()
-            if scheme in {"", DM_ATTACHMENT_SCHEME_RECIPIENT}:
+            if scheme == DM_ATTACHMENT_SCHEME_CONVERSATION:
+                attachment_version = int(
+                    row.attachment_key_version
+                    or (conversation_key.key_version if conversation_key else 0)
+                    or 0
+                )
+                if attachment_version > 0:
+                    attachment_key_label = _conversation_attachment_key_label(attachment_version)
+                else:
+                    attachment_key_label = f"{_DM_ATTACHMENT_CONVERSATION_KEY_LABEL}:missing-key"
+            elif scheme in {"", DM_ATTACHMENT_SCHEME_RECIPIENT}:
                 recipient_key_version = user_key_versions.get(row.recipient_id)
                 attachment_key_label = (
                     f"dm-attachment:recipient-user-dek:v{recipient_key_version}"
@@ -3115,7 +3703,11 @@ def messages_home(
                 "thread_id": str(row.thread_id or row.id),
                 "sender_username": row.sender.username,
                 "recipient_username": row.recipient.username,
-                "body": decrypt_message(row.body),
+                "body": (
+                    decrypt_dm_body(row.body or "", conversation_dek)
+                    if conversation_dek is not None
+                    else ("[message unavailable]" if is_dm_conversation_encrypted(row.body or "") else decrypt_message(row.body))
+                ),
                 "created_at": row.created_at,
                 "created_at_utc": _format_utc(row.created_at),
                 "direction": "Sent" if outbound else "Received",
@@ -3152,6 +3744,9 @@ def messages_home(
             "thread_messages": thread_messages,
             "active_thread_id": str(active_thread_uuid) if active_thread_uuid else "",
             "active_partner_username": active_thread_summary["partner_username"] if active_thread_summary else "",
+            "active_conversation_key_label": active_conversation_key_label,
+            "active_conversation_key_record_id": active_conversation_key_record_id,
+            "active_conversation_key_created_utc": active_conversation_key_created_utc,
             "unread_thread_total": sum(item["unread_count"] for item in threads),
             "notice": notice or request.query_params.get("notice"),
             "error": error or request.query_params.get("error"),
@@ -3225,13 +3820,29 @@ def send_message(
         recipient_id=recipient.id,
         requested_thread=thread_id,
     )
+    try:
+        conversation_key, conversation_key_created = ensure_conversation_key(
+            db,
+            thread_id=resolved_thread_id,
+            user_a_id=user.id,
+            user_b_id=recipient.id,
+        )
+    except ValueError:
+        return _messages_redirect(
+            "Thread key metadata conflict detected; start a new conversation thread.",
+            error=True,
+            thread=str(resolved_thread_id),
+        )
+    conversation_dek = get_conversation_dek(conversation_key)
 
     dm = DirectMessage(
         id=uuid.uuid4(),
         thread_id=resolved_thread_id,
         sender_id=user.id,
         recipient_id=recipient.id,
-        body=encrypt_message(body),
+        body=encrypt_dm_body(body, conversation_dek),
+        body_key_scheme=DM_BODY_SCHEME_CONVERSATION,
+        body_key_version=int(conversation_key.key_version or 1),
     )
 
     if has_attachment and attachment:
@@ -3244,7 +3855,7 @@ def send_message(
         storage_name = f"{uuid.uuid4().hex}.dmenc"
         dest = attach_dir / storage_name
 
-        nonce_b64, tag_b64, plain_size = encrypt_message_attachment_to_path(attachment.file, dest)
+        nonce_b64, tag_b64, plain_size = encrypt_file_to_path(conversation_dek, attachment.file, dest)
         if plain_size > MESSAGE_ATTACHMENT_MAX_BYTES:
             try:
                 dest.unlink()
@@ -3258,7 +3869,8 @@ def send_message(
         dm.attachment_size = plain_size
         dm.attachment_enc_nonce = nonce_b64
         dm.attachment_enc_tag = tag_b64
-        dm.attachment_key_scheme = DM_ATTACHMENT_SCHEME_SYSTEM
+        dm.attachment_key_scheme = DM_ATTACHMENT_SCHEME_CONVERSATION
+        dm.attachment_key_version = int(conversation_key.key_version or 1)
         dm.attachment_mime_type = mime_type
 
     db.add(dm)
@@ -3272,6 +3884,27 @@ def send_message(
         ),
         level="SUCCESS",
     )
+    if conversation_key_created:
+        add_event(
+            db,
+            user,
+            action="crypto",
+            message=(
+                f"Provisioned shared conversation key for thread '{resolved_thread_id}' "
+                f"with '{recipient.username}' (v{conversation_key.key_version})."
+            ),
+            level="INFO",
+        )
+        add_audit_log(
+            db,
+            user=user,
+            event_type="encryption.conversation_key_created",
+            details=(
+                f"Created conversation key thread={resolved_thread_id}, peer={recipient.username}, "
+                f"version={conversation_key.key_version}."
+            ),
+            request=request,
+        )
     db.commit()
 
     return RedirectResponse(url=f"/ui/messages?thread={resolved_thread_id}", status_code=303)
@@ -3386,7 +4019,7 @@ def open_message_attachment(
     if not path.exists():
         raise HTTPException(status_code=404, detail="Attachment missing on disk")
 
-    _ensure_message_attachment_encrypted(message, path)
+    _ensure_message_attachment_encrypted(db, message, path)
 
     disposition = "attachment" if download else "inline"
     headers = {
@@ -3397,6 +4030,146 @@ def open_message_attachment(
 
     if not message.attachment_enc_nonce or not message.attachment_enc_tag:
         raise HTTPException(status_code=409, detail="Attachment encryption metadata missing")
+
+    scheme = (message.attachment_key_scheme or "").strip().lower()
+    thread_id = message.thread_id or message.id
+    conversation_key: ConversationKey | None = None
+    conversation_dek: bytes | None = None
+    recipient_dek: bytes | None = None
+    system_dek: bytes | None = None
+
+    def _conversation_material() -> tuple[ConversationKey, bytes]:
+        nonlocal conversation_key, conversation_dek
+        if conversation_key is not None and conversation_dek is not None:
+            return conversation_key, conversation_dek
+        key_row = db.query(ConversationKey).filter(ConversationKey.thread_id == thread_id).first()
+        if not key_row:
+            try:
+                key_row, _ = ensure_conversation_key(
+                    db,
+                    thread_id=thread_id,
+                    user_a_id=message.sender_id,
+                    user_b_id=message.recipient_id,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail="Conversation key metadata mismatch") from exc
+        conversation_key = key_row
+        conversation_dek = get_conversation_dek(key_row)
+        return conversation_key, conversation_dek
+
+    def _recipient_material() -> bytes:
+        nonlocal recipient_dek
+        if recipient_dek is not None:
+            return recipient_dek
+        recipient = db.query(User).filter(User.id == message.recipient_id).first()
+        if not recipient:
+            raise HTTPException(status_code=404, detail="Recipient not found")
+        recipient_dek = get_user_dek(db, recipient)
+        return recipient_dek
+
+    def _system_material() -> bytes:
+        nonlocal system_dek
+        if system_dek is None:
+            system_dek = message_attachment_key_bytes()
+        return system_dek
+
+    def _decrypt_attachment_bytes(dek: bytes) -> bytes:
+        chunks: list[bytes] = []
+        for chunk in decrypt_file_iter(
+            dek,
+            path,
+            message.attachment_enc_nonce or "",
+            message.attachment_enc_tag or "",
+        ):
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    if scheme == DM_ATTACHMENT_SCHEME_CONVERSATION:
+        candidate_labels = ("conversation", "recipient", "system")
+    elif scheme in {"", DM_ATTACHMENT_SCHEME_RECIPIENT}:
+        candidate_labels = ("recipient", "conversation", "system")
+    elif scheme == DM_ATTACHMENT_SCHEME_SYSTEM:
+        candidate_labels = ("system", "conversation", "recipient")
+    else:
+        raise HTTPException(status_code=500, detail="Unknown attachment encryption scheme")
+
+    plaintext_bytes: bytes | None = None
+    used_label = ""
+    for label in candidate_labels:
+        try:
+            if label == "conversation":
+                _, dek = _conversation_material()
+            elif label == "recipient":
+                dek = _recipient_material()
+            else:
+                dek = _system_material()
+            plaintext_bytes = _decrypt_attachment_bytes(dek)
+            used_label = label
+            break
+        except HTTPException:
+            if label == "conversation":
+                continue
+            raise
+        except Exception:
+            continue
+
+    if plaintext_bytes is None:
+        detail = (
+            "Attachment decryption failed. "
+            "Stored attachment metadata does not match the ciphertext on disk."
+        )
+        if download:
+            raise HTTPException(status_code=409, detail=detail)
+        return Response(
+            content=(
+                "<html><body style='font-family: sans-serif; padding: 1rem;'>"
+                "<h3>Attachment unavailable</h3>"
+                f"<p>{detail}</p>"
+                "</body></html>"
+            ),
+            media_type="text/html",
+            status_code=409,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    changed = False
+    if used_label != "conversation":
+        try:
+            key_row, conv_dek = _conversation_material()
+        except HTTPException:
+            key_row = None
+            conv_dek = None
+        if key_row is not None and conv_dek is not None:
+            tmp = path.with_name(f"{path.name}.convheal.tmp")
+            try:
+                with io.BytesIO(plaintext_bytes) as src:
+                    nonce_b64, tag_b64, plain_size = encrypt_file_to_path(conv_dek, src, tmp)
+                tmp.replace(path)
+            except Exception:
+                try:
+                    if tmp.exists():
+                        tmp.unlink()
+                except OSError:
+                    pass
+            else:
+                message.attachment_enc_nonce = nonce_b64
+                message.attachment_enc_tag = tag_b64
+                message.attachment_size = plain_size
+                message.attachment_key_scheme = DM_ATTACHMENT_SCHEME_CONVERSATION
+                message.attachment_key_version = int(key_row.key_version or 1)
+                changed = True
+        elif used_label == "recipient" and scheme != DM_ATTACHMENT_SCHEME_RECIPIENT:
+            message.attachment_key_scheme = DM_ATTACHMENT_SCHEME_RECIPIENT
+            message.attachment_key_version = None
+            changed = True
+        elif used_label == "system" and scheme != DM_ATTACHMENT_SCHEME_SYSTEM:
+            message.attachment_key_scheme = DM_ATTACHMENT_SCHEME_SYSTEM
+            message.attachment_key_version = None
+            changed = True
+    elif scheme != DM_ATTACHMENT_SCHEME_CONVERSATION and conversation_key is not None:
+        message.attachment_key_scheme = DM_ATTACHMENT_SCHEME_CONVERSATION
+        message.attachment_key_version = int(conversation_key.key_version or 1)
+        changed = True
 
     add_event(
         db,
@@ -3409,20 +4182,8 @@ def open_message_attachment(
     )
     db.commit()
 
-    scheme = (message.attachment_key_scheme or "").strip().lower()
-    if scheme in {"", DM_ATTACHMENT_SCHEME_RECIPIENT}:
-        recipient = db.query(User).filter(User.id == message.recipient_id).first()
-        if not recipient:
-            raise HTTPException(status_code=404, detail="Recipient not found")
-        dek = get_user_dek(db, recipient)
-        stream = decrypt_file_iter(dek, path, message.attachment_enc_nonce, message.attachment_enc_tag)
-    elif scheme == DM_ATTACHMENT_SCHEME_SYSTEM:
-        stream = decrypt_message_attachment_iter(path, message.attachment_enc_nonce, message.attachment_enc_tag)
-    else:
-        raise HTTPException(status_code=500, detail="Unknown attachment encryption scheme")
-
-    return StreamingResponse(
-        stream,
+    return Response(
+        content=plaintext_bytes,
         media_type=message.attachment_mime_type or "application/octet-stream",
         headers=headers,
     )
@@ -3435,68 +4196,11 @@ def admin_users_page(request: Request, db: Session = Depends(get_db)):
         return RedirectResponse(url="/ui/login", status_code=303)
     if not admin_user.is_admin:
         return RedirectResponse(url="/ui", status_code=303)
-
-    now = datetime.utcnow()
-    users = db.query(User).order_by(User.created_at.asc(), User.username.asc()).all()
-    active_sessions_by_user = {
-        user_id: int(count)
-        for user_id, count in (
-            db.query(SessionModel.user_id, func.count(SessionModel.id))
-            .filter(
-                SessionModel.is_active.is_(True),
-                SessionModel.expires_at > now,
-            )
-            .group_by(SessionModel.user_id)
-            .all()
-        )
-    }
-    files_by_user = {
-        user_id: int(count)
-        for user_id, count in (
-            db.query(FileRecord.user_id, func.count(FileRecord.id))
-            .group_by(FileRecord.user_id)
-            .all()
-        )
-    }
-    groups_by_user = {
-        user_id: int(count)
-        for user_id, count in (
-            db.query(GroupMembership.user_id, func.count(GroupMembership.id))
-            .group_by(GroupMembership.user_id)
-            .all()
-        )
-    }
-    admin_count = sum(1 for u in users if u.is_admin)
-    superadmin_count = sum(1 for u in users if getattr(u, "is_superadmin", False))
-
-    rows = [
-        {
-            "user": target,
-            "active_sessions": active_sessions_by_user.get(target.id, 0),
-            "file_count": files_by_user.get(target.id, 0),
-            "group_count": groups_by_user.get(target.id, 0),
-            "mfa_summary": _mfa_summary_for_user(target),
-        }
-        for target in users
-    ]
-
-    return templates.TemplateResponse(
-        "admin_users.html",
-        {
-            "request": request,
-            "user": admin_user,
-            "rows": rows,
-            "admin_count": admin_count,
-            "superadmin_count": superadmin_count,
-            "mfa_enabled_count": sum(
-                1 for u in users if (u.totp_enabled or u.email_mfa_enabled or u.sms_mfa_enabled)
-            ),
-            "active_session_total": sum(item["active_sessions"] for item in rows),
-            "can_self_promote_superadmin": bool(admin_user.is_admin and not admin_user.is_superadmin and superadmin_count == 0),
-            "notice": request.query_params.get("notice"),
-            "error": request.query_params.get("error"),
-        },
-    )
+    q = request.url.query
+    target = "/ui/admin/security"
+    if q:
+        target = f"{target}?{q}"
+    return RedirectResponse(url=target, status_code=303)
 
 
 @router.get("/admin/security")
@@ -3521,9 +4225,15 @@ def admin_security_page(
         query = query.filter(or_(User.username.ilike(like), User.email.ilike(like)))
     users = query.order_by(User.username.asc()).limit(limit).all()
     user_ids = [row.id for row in users]
+    system_admin_count = db.query(func.count(User.id)).filter(User.is_admin.is_(True)).scalar() or 0
+    system_superadmin_count = db.query(func.count(User.id)).filter(User.is_superadmin.is_(True)).scalar() or 0
 
     active_sessions_by_user: dict[uuid.UUID, int] = {}
+    files_by_user: dict[uuid.UUID, int] = {}
     roles_map: dict[uuid.UUID, list[str]] = {}
+    user_key_meta: dict[uuid.UUID, tuple[uuid.UUID, int, datetime | None]] = {}
+    auto_backfilled_user_keys = 0
+    auto_backfilled_group_keys = 0
     if user_ids:
         now = datetime.utcnow()
         active_sessions_by_user = {
@@ -3539,6 +4249,15 @@ def admin_security_page(
                 .all()
             )
         }
+        files_by_user = {
+            owner_id: int(count)
+            for owner_id, count in (
+                db.query(FileRecord.user_id, func.count(FileRecord.id))
+                .filter(FileRecord.user_id.in_(user_ids))
+                .group_by(FileRecord.user_id)
+                .all()
+            )
+        }
         membership_rows = (
             db.query(GroupMembership.user_id, Group.name, GroupMembership.role)
             .join(Group, Group.id == GroupMembership.group_id)
@@ -3549,10 +4268,48 @@ def admin_security_page(
         for user_id, group_name, role in membership_rows:
             roles_map.setdefault(user_id, []).append(f"{group_name} ({(role or 'member').lower()})")
 
+        missing_user_key_rows = (
+            db.query(User)
+            .outerjoin(UserKey, UserKey.user_id == User.id)
+            .filter(User.id.in_(user_ids), UserKey.id.is_(None))
+            .all()
+        )
+        for missing_target in missing_user_key_rows:
+            try:
+                ensure_user_key(db, missing_target)
+                auto_backfilled_user_keys += 1
+            except Exception:
+                db.rollback()
+                logger.warning("Failed to auto-backfill user key for %s", missing_target.id, exc_info=True)
+
+        key_rows = (
+            db.query(UserKey.user_id, UserKey.id, UserKey.key_version, UserKey.created_at)
+            .filter(UserKey.user_id.in_(user_ids))
+            .all()
+        )
+        for user_id, key_id, key_version, created_at in key_rows:
+            user_key_meta[user_id] = (key_id, int(key_version or 1), created_at)
+
+    missing_group_key_rows = (
+        db.query(Group)
+        .outerjoin(GroupKey, GroupKey.group_id == Group.id)
+        .filter(GroupKey.id.is_(None))
+        .all()
+    )
+    for missing_group in missing_group_key_rows:
+        try:
+            ensure_group_key(db, missing_group)
+            auto_backfilled_group_keys += 1
+        except Exception:
+            db.rollback()
+            logger.warning("Failed to auto-backfill group key for %s", missing_group.id, exc_info=True)
+
     rows: list[dict[str, object]] = []
     compromised_count = 0
     directory_locked_count = 0
     email_configured_count = 0
+    user_key_record_count = 0
+    mfa_enabled_count = 0
     for target in users:
         email_value = (target.email or "").strip()
         if email_value:
@@ -3566,19 +4323,224 @@ def admin_security_page(
         if directory_locked:
             directory_locked_count += 1
 
+        has_mfa = bool(target.totp_enabled or target.email_mfa_enabled or target.sms_mfa_enabled)
+        if has_mfa:
+            mfa_enabled_count += 1
+
         group_roles = roles_map.get(target.id, [])
+        key_id, key_version, key_created_at = user_key_meta.get(target.id, (None, 0, None))
+        has_user_key = key_version > 0
+        if has_user_key:
+            user_key_record_count += 1
+        role_label = "Superadmin" if target.is_superadmin else ("Administrator" if target.is_admin else "Standard")
+        admin_toggle_locked = bool(target.is_superadmin or (target.is_admin and system_admin_count <= 1))
         rows.append(
             {
                 "user": target,
                 "active_sessions": active_sessions_by_user.get(target.id, 0),
+                "file_count": files_by_user.get(target.id, 0),
+                "mfa_summary": _mfa_summary_for_user(target),
+                "role_label": role_label,
+                "admin_toggle_locked": admin_toggle_locked,
                 "group_roles": group_roles,
                 "group_roles_count": len(group_roles),
                 "group_roles_preview": ", ".join(group_roles[:4]) if group_roles else "(none)",
                 "email_value": email_value,
                 "directory_locked": directory_locked,
                 "compromised": compromised,
+                "user_key_present": has_user_key,
+                "user_key_record_id": str(key_id) if key_id else "-",
+                "user_key_version": key_version if has_user_key else None,
+                "user_key_label": f"user-dek:v{key_version}" if has_user_key else "missing",
+                "user_key_created_utc": _format_utc(key_created_at),
+                "created_utc": _format_utc(target.created_at),
+                "last_login_utc": _format_utc(target.last_login),
             }
         )
+
+    group_inventory_limit = 500
+    total_group_count = db.query(func.count(Group.id)).scalar() or 0
+    group_rows_raw = (
+        db.query(
+            Group.id,
+            Group.name,
+            Group.owner_id,
+            GroupKey.id,
+            GroupKey.key_version,
+            GroupKey.created_at,
+        )
+        .outerjoin(GroupKey, GroupKey.group_id == Group.id)
+        .order_by(Group.name.asc())
+        .limit(group_inventory_limit)
+        .all()
+    )
+    group_ids_for_counts = [group_id for group_id, *_ in group_rows_raw]
+    group_owner_ids = {owner_id for _, _, owner_id, _, _, _ in group_rows_raw if owner_id}
+    owner_name_map: dict[uuid.UUID, str] = {}
+    if group_owner_ids:
+        owner_name_map = {
+            owner_id: username
+            for owner_id, username in (
+                db.query(User.id, User.username)
+                .filter(User.id.in_(group_owner_ids))
+                .all()
+            )
+        }
+    group_member_counts: dict[uuid.UUID, int] = {}
+    group_file_counts: dict[uuid.UUID, int] = {}
+    if group_ids_for_counts:
+        group_member_counts = {
+            group_id: int(count)
+            for group_id, count in (
+                db.query(GroupMembership.group_id, func.count(GroupMembership.id))
+                .filter(GroupMembership.group_id.in_(group_ids_for_counts))
+                .group_by(GroupMembership.group_id)
+                .all()
+            )
+        }
+        group_file_counts = {
+            group_id: int(count)
+            for group_id, count in (
+                db.query(GroupFileRecord.group_id, func.count(GroupFileRecord.id))
+                .filter(GroupFileRecord.group_id.in_(group_ids_for_counts))
+                .group_by(GroupFileRecord.group_id)
+                .all()
+            )
+        }
+    group_key_rows: list[dict[str, object]] = []
+    for group_id, group_name, owner_id, key_id, key_version, key_created_at in group_rows_raw:
+        has_key = key_id is not None and key_version is not None
+        version = int(key_version or 0)
+        group_key_rows.append(
+            {
+                "group_id": str(group_id),
+                "group_name": group_name,
+                "owner_username": owner_name_map.get(owner_id, "-"),
+                "member_count": group_member_counts.get(group_id, 0),
+                "file_count": group_file_counts.get(group_id, 0),
+                "key_present": has_key,
+                "key_record_id": str(key_id) if key_id else "-",
+                "key_label": f"group-dek:v{version}" if has_key else "missing",
+                "key_created_utc": _format_utc(key_created_at),
+            }
+        )
+    group_key_record_total = db.query(func.count(GroupKey.id)).scalar() or 0
+
+    conversation_inventory_limit = 500
+    conversation_total = db.query(func.count(ConversationKey.id)).scalar() or 0
+    conversation_rows_raw = (
+        db.query(
+            ConversationKey.id,
+            ConversationKey.thread_id,
+            ConversationKey.user_low_id,
+            ConversationKey.user_high_id,
+            ConversationKey.key_version,
+            ConversationKey.created_at,
+        )
+        .order_by(ConversationKey.created_at.desc(), ConversationKey.thread_id.asc())
+        .limit(conversation_inventory_limit)
+        .all()
+    )
+    participant_ids: set[uuid.UUID] = set()
+    thread_ids_for_counts: list[uuid.UUID] = []
+    for _, thread_id, user_low_id, user_high_id, _, _ in conversation_rows_raw:
+        participant_ids.add(user_low_id)
+        participant_ids.add(user_high_id)
+        thread_ids_for_counts.append(thread_id)
+    participant_name_map: dict[uuid.UUID, str] = {}
+    if participant_ids:
+        participant_name_map = {
+            pid: uname
+            for pid, uname in (
+                db.query(User.id, User.username)
+                .filter(User.id.in_(participant_ids))
+                .all()
+            )
+        }
+    thread_message_counts: dict[uuid.UUID, int] = {}
+    if thread_ids_for_counts:
+        thread_message_counts = {
+            thread_id: int(count)
+            for thread_id, count in (
+                db.query(DirectMessage.thread_id, func.count(DirectMessage.id))
+                .filter(DirectMessage.thread_id.in_(thread_ids_for_counts))
+                .group_by(DirectMessage.thread_id)
+                .all()
+            )
+        }
+    conversation_key_rows: list[dict[str, object]] = []
+    for key_id, thread_id, user_low_id, user_high_id, key_version, key_created_at in conversation_rows_raw:
+        low_name = participant_name_map.get(user_low_id, str(user_low_id)[:8])
+        high_name = participant_name_map.get(user_high_id, str(user_high_id)[:8])
+        conversation_key_rows.append(
+            {
+                "thread_id": str(thread_id),
+                "participants": f"{low_name} <-> {high_name}",
+                "message_count": thread_message_counts.get(thread_id, 0),
+                "key_record_id": str(key_id),
+                "key_label": _conversation_body_key_label(int(key_version or 1)),
+                "key_created_utc": _format_utc(key_created_at),
+            }
+        )
+    dm_thread_total = (
+        db.query(func.count(func.distinct(DirectMessage.thread_id)))
+        .filter(DirectMessage.thread_id.is_not(None))
+        .scalar()
+        or 0
+    )
+    dm_threads_with_key = (
+        db.query(func.count(func.distinct(DirectMessage.thread_id)))
+        .join(ConversationKey, ConversationKey.thread_id == DirectMessage.thread_id)
+        .scalar()
+        or 0
+    )
+    dm_threads_missing_key = max(0, dm_thread_total - dm_threads_with_key)
+    user_key_duplicate_users = (
+        db.query(func.count())
+        .select_from(
+            db.query(UserKey.user_id)
+            .group_by(UserKey.user_id)
+            .having(func.count(UserKey.id) > 1)
+            .subquery()
+        )
+        .scalar()
+        or 0
+    )
+    group_key_duplicate_groups = (
+        db.query(func.count())
+        .select_from(
+            db.query(GroupKey.group_id)
+            .group_by(GroupKey.group_id)
+            .having(func.count(GroupKey.id) > 1)
+            .subquery()
+        )
+        .scalar()
+        or 0
+    )
+    conversation_key_duplicate_threads = (
+        db.query(func.count())
+        .select_from(
+            db.query(ConversationKey.thread_id)
+            .group_by(ConversationKey.thread_id)
+            .having(func.count(ConversationKey.id) > 1)
+            .subquery()
+        )
+        .scalar()
+        or 0
+    )
+    key_duplicate_total = user_key_duplicate_users + group_key_duplicate_groups + conversation_key_duplicate_threads
+    key_material_summary = _collect_key_uniqueness_summary(db)
+
+    key_repair_parts: list[str] = []
+    if auto_backfilled_user_keys:
+        key_repair_parts.append(f"user keys repaired: {auto_backfilled_user_keys}")
+    if auto_backfilled_group_keys:
+        key_repair_parts.append(f"group keys repaired: {auto_backfilled_group_keys}")
+    key_repair_notice = ", ".join(key_repair_parts)
+
+    notice_message = request.query_params.get("notice")
+    if key_repair_notice:
+        notice_message = f"{notice_message} | {key_repair_notice}" if notice_message else key_repair_notice
 
     return templates.TemplateResponse(
         "admin_security.html",
@@ -3586,6 +4548,12 @@ def admin_security_page(
             "request": request,
             "user": admin_user,
             "rows": rows,
+            "group_key_rows": group_key_rows,
+            "group_inventory_limit": group_inventory_limit,
+            "group_inventory_truncated": total_group_count > len(group_key_rows),
+            "conversation_key_rows": conversation_key_rows,
+            "conversation_inventory_limit": conversation_inventory_limit,
+            "conversation_inventory_truncated": conversation_total > len(conversation_key_rows),
             "filters": {
                 "q": text_filter,
                 "limit": limit,
@@ -3596,11 +4564,28 @@ def admin_security_page(
             ],
             "summary": {
                 "displayed_users": len(rows),
+                "admins": system_admin_count,
+                "superadmins": system_superadmin_count,
+                "mfa_enabled": mfa_enabled_count,
                 "compromised": compromised_count,
                 "directory_locked": directory_locked_count,
                 "email_configured": email_configured_count,
+                "user_key_records": user_key_record_count,
+                "group_key_records": group_key_record_total,
+                "group_total": total_group_count,
+                "conversation_key_records": conversation_total,
+                "conversation_threads": dm_thread_total,
+                "conversation_threads_missing_key": dm_threads_missing_key,
+                "key_duplicate_total": key_duplicate_total,
+                "user_key_duplicate_users": user_key_duplicate_users,
+                "group_key_duplicate_groups": group_key_duplicate_groups,
+                "conversation_key_duplicate_threads": conversation_key_duplicate_threads,
+                **key_material_summary,
             },
-            "notice": request.query_params.get("notice"),
+            "can_self_promote_superadmin": bool(
+                admin_user.is_admin and not admin_user.is_superadmin and system_superadmin_count == 0
+            ),
+            "notice": notice_message,
             "error": request.query_params.get("error"),
             "title": "Admin Security",
         },
@@ -3787,6 +4772,228 @@ def admin_security_playbook(
     return _admin_security_redirect(f"Applied playbook '{playbook_label}' to '{target.username}'.")
 
 
+@router.post("/admin/security/{user_id}/rotate-user-key")
+def admin_security_rotate_user_key(
+    user_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    try:
+        target_id = uuid.UUID(user_id)
+    except ValueError:
+        return _admin_security_redirect("Invalid user identifier.", error=True)
+
+    target = db.query(User).filter(User.id == target_id).first()
+    if not target:
+        return _admin_security_redirect("User not found.", error=True)
+
+    try:
+        summary = _rotate_user_key_material(db, target)
+    except Exception as exc:
+        logger.warning("Admin user key rotation failed for %s", target.id, exc_info=True)
+        return _admin_security_redirect(
+            f"Failed to rotate user key for '{target.username}' ({exc.__class__.__name__}).",
+            error=True,
+        )
+
+    add_event(
+        db,
+        admin_user,
+        action="admin_security",
+        message=(
+            f"Rotated user key for '{target.username}' "
+            f"v{summary['key_version_from']}->v{summary['key_version_to']} "
+            f"(files={summary['files_rotated']}, recipient_attachments={summary['recipient_attachments_rotated']})."
+        ),
+        level="WARN",
+    )
+    add_audit_log(
+        db,
+        user=admin_user,
+        event_type="admin.user_key_rotated",
+        details=(
+            f"Rotated user key for '{target.username}' (user_id={target.id}) "
+            f"v{summary['key_version_from']}->v{summary['key_version_to']}, "
+            f"files={summary['files_rotated']}/{summary['files_total']}, "
+            f"recipient_attachments={summary['recipient_attachments_rotated']}/{summary['recipient_attachments_total']}."
+        ),
+        request=request,
+    )
+    add_audit_log(
+        db,
+        user=target,
+        event_type="account.user_key_rotated_by_admin",
+        details=(
+            f"Admin '{admin_user.username}' rotated your user key "
+            f"v{summary['key_version_from']}->v{summary['key_version_to']}."
+        ),
+        request=request,
+    )
+    db.commit()
+    return _admin_security_redirect(
+        f"Rotated user key for '{target.username}' (v{summary['key_version_from']}->v{summary['key_version_to']})."
+    )
+
+
+@router.post("/admin/security/group/{group_id}/rotate-key")
+def admin_security_rotate_group_key(
+    group_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    try:
+        group_uuid = uuid.UUID(group_id)
+    except ValueError:
+        return _admin_security_redirect("Invalid group identifier.", error=True)
+
+    group = db.query(Group).filter(Group.id == group_uuid).first()
+    if not group:
+        return _admin_security_redirect("Group not found.", error=True)
+
+    try:
+        summary = _rotate_group_key_material(db, group)
+    except Exception as exc:
+        logger.warning("Admin group key rotation failed for %s", group.id, exc_info=True)
+        return _admin_security_redirect(
+            f"Failed to rotate group key for '{group.name}' ({exc.__class__.__name__}).",
+            error=True,
+        )
+
+    owner = db.query(User).filter(User.id == group.owner_id).first() if group.owner_id else None
+    add_event(
+        db,
+        admin_user,
+        action="admin_security",
+        message=(
+            f"Rotated group key for '{group.name}' "
+            f"v{summary['key_version_from']}->v{summary['key_version_to']} "
+            f"(files={summary['files_rotated']})."
+        ),
+        level="WARN",
+    )
+    add_audit_log(
+        db,
+        user=admin_user,
+        event_type="admin.group_key_rotated",
+        details=(
+            f"Rotated group key for '{group.name}' (group_id={group.id}) "
+            f"v{summary['key_version_from']}->v{summary['key_version_to']}, "
+            f"files={summary['files_rotated']}/{summary['files_total']}."
+        ),
+        request=request,
+    )
+    if owner:
+        add_audit_log(
+            db,
+            user=owner,
+            event_type="account.group_key_rotated_by_admin",
+            details=(
+                f"Admin '{admin_user.username}' rotated key for group '{group.name}' "
+                f"v{summary['key_version_from']}->v{summary['key_version_to']}."
+            ),
+            request=request,
+        )
+    db.commit()
+    return _admin_security_redirect(
+        f"Rotated group key for '{group.name}' (v{summary['key_version_from']}->v{summary['key_version_to']})."
+    )
+
+
+@router.post("/admin/security/conversation/{thread_id}/rotate-key")
+def admin_security_rotate_conversation_key(
+    thread_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    admin_user = _get_current_user(db, request)
+    if not admin_user:
+        return RedirectResponse(url="/ui/login", status_code=303)
+    if not admin_user.is_admin:
+        return RedirectResponse(url="/ui", status_code=303)
+
+    try:
+        thread_uuid = uuid.UUID(thread_id)
+    except ValueError:
+        return _admin_security_redirect("Invalid conversation thread identifier.", error=True)
+
+    try:
+        summary = _rotate_conversation_key_material(db, thread_id=thread_uuid)
+    except ValueError as exc:
+        return _admin_security_redirect(str(exc), error=True)
+    except Exception as exc:
+        logger.warning("Admin conversation key rotation failed for %s", thread_uuid, exc_info=True)
+        return _admin_security_redirect(
+            f"Failed to rotate conversation key for thread '{thread_uuid}' ({exc.__class__.__name__}).",
+            error=True,
+        )
+
+    key_row = db.query(ConversationKey).filter(ConversationKey.thread_id == thread_uuid).first()
+    participant_names = "unknown"
+    participant_users: list[User] = []
+    if key_row:
+        users = (
+            db.query(User)
+            .filter(User.id.in_([key_row.user_low_id, key_row.user_high_id]))
+            .order_by(User.username.asc())
+            .all()
+        )
+        participant_users = users
+        if users:
+            participant_names = " <-> ".join(u.username for u in users)
+
+    add_event(
+        db,
+        admin_user,
+        action="admin_security",
+        message=(
+            f"Rotated conversation key for thread {thread_uuid} "
+            f"v{summary['key_version_from']}->v{summary['key_version_to']} "
+            f"(messages={summary['messages_rotated'] + summary['messages_upgraded_plaintext']}, "
+            f"attachments={summary['attachments_rotated']})."
+        ),
+        level="WARN",
+    )
+    add_audit_log(
+        db,
+        user=admin_user,
+        event_type="admin.conversation_key_rotated",
+        details=(
+            f"Rotated conversation key for thread={thread_uuid} participants={participant_names} "
+            f"v{summary['key_version_from']}->v{summary['key_version_to']}, "
+            f"messages={summary['messages_rotated'] + summary['messages_upgraded_plaintext']}/{summary['messages_total']}, "
+            f"attachments={summary['attachments_rotated']}/{summary['attachments_total']}."
+        ),
+        request=request,
+    )
+    for participant in participant_users:
+        add_audit_log(
+            db,
+            user=participant,
+            event_type="account.conversation_key_rotated_by_admin",
+            details=(
+                f"Admin '{admin_user.username}' rotated conversation key for thread {thread_uuid} "
+                f"v{summary['key_version_from']}->v{summary['key_version_to']}."
+            ),
+            request=request,
+        )
+    db.commit()
+    return _admin_security_redirect(
+        f"Rotated conversation key for thread '{thread_uuid}' (v{summary['key_version_from']}->v{summary['key_version_to']})."
+    )
+
+
 @router.get("/audit")
 def audit_log_page(
     request: Request,
@@ -3825,7 +5032,14 @@ def audit_log_page(
         or row.event_type.startswith("signout")
     )
 
-    rows = [{"log": row, "username": user.username} for row in logs]
+    rows = [
+        {
+            "log": row,
+            "username": user.username,
+            "event_timestamp_display": _format_utc(row.event_timestamp),
+        }
+        for row in logs
+    ]
     return templates.TemplateResponse(
         "audit_log.html",
         {
@@ -3913,6 +5127,7 @@ def admin_audit_log_page(
             {
                 "log": log_row,
                 "username": username_value or "(system)",
+                "event_timestamp_display": _format_utc(log_row.event_timestamp),
             }
         )
 
@@ -4412,6 +5627,7 @@ def admin_reports_page(
                 "reporter_username": reporter_name,
                 "reported_username": reported_name,
                 "message_preview": preview or "-",
+                "created_at_display": _format_utc(report.created_at),
             }
         )
 
@@ -4486,6 +5702,8 @@ def admin_report_detail_page(report_id: str, request: Request, db: Session = Dep
             "report_details": report_details,
             "admin_notes": admin_notes,
             "allowed_statuses": allowed_statuses,
+            "report_created_at_display": _format_utc(report.created_at),
+            "message_created_at_display": _format_utc(msg.created_at) if msg else "-",
             "notice": request.query_params.get("notice"),
             "error": request.query_params.get("error"),
             "title": "Report detail",
@@ -4677,21 +5895,27 @@ def admin_report_action(
 
 
 @router.post("/admin/users/{user_id}/revoke-sessions")
-def admin_revoke_sessions(user_id: str, request: Request, db: Session = Depends(get_db)):
+def admin_revoke_sessions(
+    user_id: str,
+    request: Request,
+    redirect_to: str = Form("security"),
+    db: Session = Depends(get_db),
+):
     admin_user = _get_current_user(db, request)
     if not admin_user:
         return RedirectResponse(url="/ui/login", status_code=303)
     if not admin_user.is_admin:
         return RedirectResponse(url="/ui", status_code=303)
+    redirect_target = _normalize_admin_redirect_target(redirect_to)
 
     try:
         target_id = uuid.UUID(user_id)
     except ValueError:
-        return _admin_redirect("Invalid user identifier.", error=True)
+        return _admin_redirect_with_target("Invalid user identifier.", error=True, target=redirect_target)
 
     target = db.query(User).filter(User.id == target_id).first()
     if not target:
-        return _admin_redirect("User not found.", error=True)
+        return _admin_redirect_with_target("User not found.", error=True, target=redirect_target)
 
     revoked = (
         db.query(SessionModel)
@@ -4720,25 +5944,34 @@ def admin_revoke_sessions(user_id: str, request: Request, db: Session = Depends(
         request=request,
     )
     db.commit()
-    return _admin_redirect(f"Revoked {revoked} active session(s) for '{target.username}'.")
+    return _admin_redirect_with_target(
+        f"Revoked {revoked} active session(s) for '{target.username}'.",
+        target=redirect_target,
+    )
 
 
 @router.post("/admin/users/{user_id}/reset-totp")
-def admin_reset_totp(user_id: str, request: Request, db: Session = Depends(get_db)):
+def admin_reset_totp(
+    user_id: str,
+    request: Request,
+    redirect_to: str = Form("security"),
+    db: Session = Depends(get_db),
+):
     admin_user = _get_current_user(db, request)
     if not admin_user:
         return RedirectResponse(url="/ui/login", status_code=303)
     if not admin_user.is_admin:
         return RedirectResponse(url="/ui", status_code=303)
+    redirect_target = _normalize_admin_redirect_target(redirect_to)
 
     try:
         target_id = uuid.UUID(user_id)
     except ValueError:
-        return _admin_redirect("Invalid user identifier.", error=True)
+        return _admin_redirect_with_target("Invalid user identifier.", error=True, target=redirect_target)
 
     target = db.query(User).filter(User.id == target_id).first()
     if not target:
-        return _admin_redirect("User not found.", error=True)
+        return _admin_redirect_with_target("User not found.", error=True, target=redirect_target)
 
     target.totp_enabled = False
     target.totp_secret_enc = None
@@ -4768,7 +6001,10 @@ def admin_reset_totp(user_id: str, request: Request, db: Session = Depends(get_d
         request=request,
     )
     db.commit()
-    return _admin_redirect(f"All MFA methods reset for '{target.username}'.")
+    return _admin_redirect_with_target(
+        f"All MFA methods reset for '{target.username}'.",
+        target=redirect_target,
+    )
 
 
 @router.post("/admin/users/{user_id}/reset-password")
@@ -4777,6 +6013,7 @@ def admin_reset_password(
     request: Request,
     password: str = Form(...),
     confirm_password: str = Form(...),
+    redirect_to: str = Form("security"),
     db: Session = Depends(get_db),
 ):
     admin_user = _get_current_user(db, request)
@@ -4784,21 +6021,26 @@ def admin_reset_password(
         return RedirectResponse(url="/ui/login", status_code=303)
     if not admin_user.is_admin:
         return RedirectResponse(url="/ui", status_code=303)
+    redirect_target = _normalize_admin_redirect_target(redirect_to)
 
     try:
         target_id = uuid.UUID(user_id)
     except ValueError:
-        return _admin_redirect("Invalid user identifier.", error=True)
+        return _admin_redirect_with_target("Invalid user identifier.", error=True, target=redirect_target)
 
     target = db.query(User).filter(User.id == target_id).first()
     if not target:
-        return _admin_redirect("User not found.", error=True)
+        return _admin_redirect_with_target("User not found.", error=True, target=redirect_target)
 
     if password != confirm_password:
-        return _admin_redirect("Passwords did not match.", error=True)
+        return _admin_redirect_with_target("Passwords did not match.", error=True, target=redirect_target)
 
     if len(password) < 10:
-        return _admin_redirect("Password must be at least 10 characters.", error=True)
+        return _admin_redirect_with_target(
+            "Password must be at least 10 characters.",
+            error=True,
+            target=redirect_target,
+        )
 
     target.password_hash = hash_password(password)
     revoked = (
@@ -4828,25 +6070,34 @@ def admin_reset_password(
         request=request,
     )
     db.commit()
-    return _admin_redirect(f"Password reset for '{target.username}'.")
+    return _admin_redirect_with_target(
+        f"Password reset for '{target.username}'.",
+        target=redirect_target,
+    )
 
 
 @router.post("/admin/users/{user_id}/toggle-admin")
-def admin_toggle_role(user_id: str, request: Request, db: Session = Depends(get_db)):
+def admin_toggle_role(
+    user_id: str,
+    request: Request,
+    redirect_to: str = Form("security"),
+    db: Session = Depends(get_db),
+):
     admin_user = _get_current_user(db, request)
     if not admin_user:
         return RedirectResponse(url="/ui/login", status_code=303)
     if not admin_user.is_admin:
         return RedirectResponse(url="/ui", status_code=303)
+    redirect_target = _normalize_admin_redirect_target(redirect_to)
 
     try:
         target_id = uuid.UUID(user_id)
     except ValueError:
-        return _admin_redirect("Invalid user identifier.", error=True)
+        return _admin_redirect_with_target("Invalid user identifier.", error=True, target=redirect_target)
 
     target = db.query(User).filter(User.id == target_id).first()
     if not target:
-        return _admin_redirect("User not found.", error=True)
+        return _admin_redirect_with_target("User not found.", error=True, target=redirect_target)
 
     if getattr(target, "is_superadmin", False):
         add_audit_log(
@@ -4857,12 +6108,20 @@ def admin_toggle_role(user_id: str, request: Request, db: Session = Depends(get_
             request=request,
         )
         db.commit()
-        return _admin_redirect("Superadmin role cannot be changed by administrators.", error=True)
+        return _admin_redirect_with_target(
+            "Superadmin role cannot be changed by administrators.",
+            error=True,
+            target=redirect_target,
+        )
 
     if target.is_admin:
         admin_count = db.query(func.count(User.id)).filter(User.is_admin.is_(True)).scalar() or 0
         if admin_count <= 1:
-            return _admin_redirect("Cannot remove the last system administrator.", error=True)
+            return _admin_redirect_with_target(
+                "Cannot remove the last system administrator.",
+                error=True,
+                target=redirect_target,
+            )
 
     target.is_admin = not target.is_admin
     status_label = "granted" if target.is_admin else "removed"
@@ -4888,23 +6147,35 @@ def admin_toggle_role(user_id: str, request: Request, db: Session = Depends(get_
         request=request,
     )
     db.commit()
-    return _admin_redirect(f"Administrator role {status_label} for '{target.username}'.")
+    return _admin_redirect_with_target(
+        f"Administrator role {status_label} for '{target.username}'.",
+        target=redirect_target,
+    )
 
 
 @router.post("/admin/users/promote-self-superadmin")
-def admin_promote_self_superadmin(request: Request, db: Session = Depends(get_db)):
+def admin_promote_self_superadmin(
+    request: Request,
+    redirect_to: str = Form("security"),
+    db: Session = Depends(get_db),
+):
     admin_user = _get_current_user(db, request)
     if not admin_user:
         return RedirectResponse(url="/ui/login", status_code=303)
     if not admin_user.is_admin:
         return RedirectResponse(url="/ui", status_code=303)
+    redirect_target = _normalize_admin_redirect_target(redirect_to)
 
     if getattr(admin_user, "is_superadmin", False):
-        return _admin_redirect("Your account is already a superadmin.")
+        return _admin_redirect_with_target("Your account is already a superadmin.", target=redirect_target)
 
     superadmin_count = db.query(func.count(User.id)).filter(User.is_superadmin.is_(True)).scalar() or 0
     if superadmin_count > 0:
-        return _admin_redirect("A superadmin already exists. Self-promotion is disabled.", error=True)
+        return _admin_redirect_with_target(
+            "A superadmin already exists. Self-promotion is disabled.",
+            error=True,
+            target=redirect_target,
+        )
 
     admin_user.is_superadmin = True
     admin_user.is_admin = True
@@ -4930,26 +6201,38 @@ def admin_promote_self_superadmin(request: Request, db: Session = Depends(get_db
         request=request,
     )
     db.commit()
-    return _admin_redirect("Your account has been promoted to superadmin.")
+    return _admin_redirect_with_target(
+        "Your account has been promoted to superadmin.",
+        target=redirect_target,
+    )
 
 
 @router.get("/admin/users/promote-self-superadmin")
-def admin_promote_self_superadmin_get(request: Request, db: Session = Depends(get_db)):
+def admin_promote_self_superadmin_get(
+    request: Request,
+    redirect_to: str = "security",
+    db: Session = Depends(get_db),
+):
     admin_user = _get_current_user(db, request)
     if not admin_user:
         return RedirectResponse(url="/ui/login", status_code=303)
     if not admin_user.is_admin:
         return RedirectResponse(url="/ui", status_code=303)
+    redirect_target = _normalize_admin_redirect_target(redirect_to)
 
     if getattr(admin_user, "is_superadmin", False):
-        return _admin_redirect("Your account is already a superadmin.")
+        return _admin_redirect_with_target("Your account is already a superadmin.", target=redirect_target)
 
     superadmin_count = db.query(func.count(User.id)).filter(User.is_superadmin.is_(True)).scalar() or 0
     if superadmin_count == 0:
-        return _admin_redirect("Use the Promote button to submit superadmin recovery.")
-    return _admin_redirect(
+        return _admin_redirect_with_target(
+            "Use the Promote button to submit superadmin recovery.",
+            target=redirect_target,
+        )
+    return _admin_redirect_with_target(
         f"Self-promotion is unavailable because {superadmin_count} superadmin account(s) already exist.",
         error=True,
+        target=redirect_target,
     )
 
 
@@ -5128,6 +6411,7 @@ def profile_page(request: Request, db: Session = Depends(get_db)):
         return RedirectResponse(url="/ui/login", status_code=303)
 
     active_methods = _available_mfa_methods(user, transport_ready_only=False)
+    effective_timezone = _resolve_effective_timezone(request, user)
 
     return templates.TemplateResponse(
         "profile.html",
@@ -5146,6 +6430,8 @@ def profile_page(request: Request, db: Session = Depends(get_db)):
             "mfa_method_preferred": _resolve_mfa_method(user, user.mfa_preferred_method, active_methods),
             "mfa_method_labels": MFA_METHOD_LABELS,
             "sms_carrier_options": _sms_carrier_rows(),
+            "timezone_options": _profile_timezone_rows(),
+            "effective_timezone": effective_timezone,
         },
     )
 
@@ -5310,6 +6596,7 @@ def profile_update_preferences(
     email_visible: str | None = Form(None),
     phone_number: str = Form(""),
     sms_carrier: str = Form(""),
+    timezone: str = Form(""),
     email_mfa_enabled: str | None = Form(None),
     sms_mfa_enabled: str | None = Form(None),
     mfa_method: str | None = Form(None),
@@ -5325,6 +6612,10 @@ def profile_update_preferences(
         normalized_sms_carrier = _normalize_sms_carrier(sms_carrier)
     except HTTPException as exc:
         return _profile_redirect(str(exc.detail), error=True)
+
+    normalized_timezone = normalize_timezone(timezone)
+    if (timezone or "").strip() and not normalized_timezone:
+        return _profile_redirect("Select a valid IANA timezone.", error=True)
 
     if (sms_carrier or "").strip() and not normalized_sms_carrier:
         return _profile_redirect("Select a supported SMS carrier.", error=True)
@@ -5378,6 +6669,14 @@ def profile_update_preferences(
         user.sms_carrier = normalized_sms_carrier or None
         changed = True
 
+    existing_timezone = normalize_timezone(user.timezone)
+    existing_timezone_raw = (user.timezone or "").strip() or None
+    target_timezone = normalized_timezone or None
+    if existing_timezone != target_timezone or existing_timezone_raw != target_timezone:
+        user.timezone = target_timezone
+        _set_active_timezone(request, user)
+        changed = True
+
     email_mfa_effective = wants_email_mfa and bool(user.email and user.email_verified and _smtp_configured())
     if user.email_mfa_enabled != email_mfa_effective:
         user.email_mfa_enabled = email_mfa_effective
@@ -5410,6 +6709,7 @@ def profile_update_preferences(
             f"email_visible={'on' if user.email_visible else 'off'}, "
             f"phone={'set' if user.phone_number else 'unset'}, "
             f"sms_carrier={user.sms_carrier or 'unset'}, "
+            f"timezone={normalize_timezone(user.timezone) or 'auto'}, "
             f"email_mfa={'on' if user.email_mfa_enabled else 'off'}, "
             f"sms_mfa={'on' if user.sms_mfa_enabled else 'off'})."
         ),
@@ -6319,9 +7619,9 @@ def terminal_command(
         if not rows:
             message = "(no files)"
         else:
-            lines = ["Group files (id, name, size, uploaded UTC):"]
+            lines = ["Group files (id, name, size, uploaded):"]
             for r in rows:
-                uploaded = r.uploaded_at.isoformat(timespec="seconds") + "Z" if r.uploaded_at else "-"
+                uploaded = _format_utc(r.uploaded_at) if r.uploaded_at else "-"
                 lines.append(f"  {r.id}  {r.file_name}  {r.file_size}  {uploaded}")
             lines.append("")
             lines.append("Tip: gdownload <file_id>")
@@ -6834,7 +8134,7 @@ def terminal_command(
 
         rel = _terminal_rel_path(root, path)
         st = path.stat()
-        modified = datetime.utcfromtimestamp(st.st_mtime).isoformat(timespec="seconds") + "Z"
+        modified = _format_utc(datetime.utcfromtimestamp(st.st_mtime))
         if path.is_dir():
             try:
                 entries = [p for p in path.iterdir() if not p.is_symlink()]
@@ -6844,7 +8144,7 @@ def terminal_command(
                 f"Path: {rel if rel == '/' else rel + '/'}\n"
                 "Type: directory\n"
                 f"Entries: {len(entries)}\n"
-                f"Modified (UTC): {modified}"
+                f"Modified: {modified}"
             )
         else:
             mime_type, _ = mimetypes.guess_type(path.name)
@@ -6854,7 +8154,7 @@ def terminal_command(
                 "Type: file\n"
                 f"Size: {size_raw} bytes ({_format_bytes(size_raw)})\n"
                 f"MIME: {mime_type or 'application/octet-stream'}\n"
-                f"Modified (UTC): {modified}"
+                f"Modified: {modified}"
             )
         add_event(db, user, action="terminal", message=f"stat {target}\n{message}")
         return {"ok": True, "message": message}
@@ -6978,7 +8278,7 @@ def terminal_command(
         if safe_args:
             raise HTTPException(status_code=400, detail="encstatus does not take arguments")
 
-        checked_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        checked_at = _format_utc(datetime.utcnow())
         key_row = db.query(UserKey).filter(UserKey.user_id == user.id).first()
 
         key_present = key_row is not None
@@ -7135,6 +8435,62 @@ def terminal_command(
             if remaining > 0:
                 missing_group_summary = f"{missing_group_summary}, ... (+{remaining} more)"
 
+        dm_rows = (
+            db.query(
+                DirectMessage.id,
+                DirectMessage.thread_id,
+                DirectMessage.body,
+                DirectMessage.body_key_scheme,
+                DirectMessage.attachment_path,
+                DirectMessage.attachment_key_scheme,
+            )
+            .filter(or_(DirectMessage.sender_id == user.id, DirectMessage.recipient_id == user.id))
+            .all()
+        )
+        dm_thread_ids = {row.thread_id or row.id for row in dm_rows}
+        dm_total_threads = len(dm_thread_ids)
+        conversation_key_versions: dict[uuid.UUID, int] = {}
+        if dm_thread_ids:
+            for row in (
+                db.query(ConversationKey.thread_id, ConversationKey.key_version)
+                .filter(ConversationKey.thread_id.in_(dm_thread_ids))
+                .all()
+            ):
+                conversation_key_versions[row.thread_id] = int(row.key_version or 1)
+        dm_threads_with_key = sum(1 for tid in dm_thread_ids if tid in conversation_key_versions)
+        dm_threads_missing_key = max(0, dm_total_threads - dm_threads_with_key)
+        dm_body_conversation = sum(
+            1
+            for row in dm_rows
+            if row.body_key_scheme == DM_BODY_SCHEME_CONVERSATION or is_dm_conversation_encrypted(row.body or "")
+        )
+        dm_body_legacy = sum(
+            1
+            for row in dm_rows
+            if row.body_key_scheme == DM_BODY_SCHEME_FERNET
+            or (
+                row.body_key_scheme != DM_BODY_SCHEME_CONVERSATION
+                and is_message_encrypted(row.body or "")
+                and not is_dm_conversation_encrypted(row.body or "")
+            )
+        )
+        dm_body_plaintext = max(0, len(dm_rows) - dm_body_conversation - dm_body_legacy)
+        dm_attachment_total = sum(1 for row in dm_rows if row.attachment_path)
+        dm_attachment_conversation = sum(
+            1
+            for row in dm_rows
+            if row.attachment_path and (row.attachment_key_scheme or "").strip().lower() == DM_ATTACHMENT_SCHEME_CONVERSATION
+        )
+
+        dm_conversation_summary = "(none)"
+        if conversation_key_versions:
+            ordered_versions = sorted(conversation_key_versions.items(), key=lambda item: str(item[0]))
+            parts = [f"{str(thread_id)[:8]}=v{version}" for thread_id, version in ordered_versions[:6]]
+            dm_conversation_summary = ", ".join(parts)
+            remaining = len(ordered_versions) - len(parts)
+            if remaining > 0:
+                dm_conversation_summary = f"{dm_conversation_summary}, ... (+{remaining} more)"
+
         issues: list[str] = []
         if not key_present:
             issues.append("User key record is missing.")
@@ -7146,6 +8502,12 @@ def terminal_command(
             issues.append(f"{group_file_metadata_issues} group encrypted file(s) missing nonce/tag metadata.")
         if groups_missing_key:
             issues.append(f"{len(groups_missing_key)} joined group(s) do not have a group key record.")
+        if dm_threads_missing_key > 0:
+            issues.append(f"{dm_threads_missing_key} direct-message thread(s) do not have a conversation key record.")
+        if dm_body_legacy > 0:
+            issues.append(f"{dm_body_legacy} direct-message body row(s) still use legacy Fernet encryption.")
+        if dm_body_plaintext > 0:
+            issues.append(f"{dm_body_plaintext} direct-message body row(s) are plaintext.")
 
         root_key_source = (
             "Passphrase-derived root (Argon2id + HKDF-SHA256)"
@@ -7155,18 +8517,18 @@ def terminal_command(
         lines = [
             "Encryption Status",
             f"Account: {user.username}",
-            f"Checked (UTC): {checked_at}",
+            f"Checked: {checked_at}",
             "",
             "Cipher Suite",
             "  File encryption: AES-256-GCM (12-byte nonce, 16-byte tag)",
             "  Key wrapping: AES-256-GCM wrapped DEK (AAD bound to user/group id)",
-            "  Direct messages: Fernet tokens (enc:v1 prefix)",
+            "  Direct messages: Conversation AES-256-GCM (dmenc:v2); legacy Fernet read support",
             f"  Root key source: {root_key_source}",
             "",
             "User Key",
             f"  Record present: {'yes' if key_present else 'no'}",
             f"  Key version: {key_version}",
-            f"  Created (UTC): {key_created}",
+            f"  Created: {key_created}",
             f"  Wrap nonce: {wrap_nonce_state}",
             f"  Wrapped DEK blob: {wrapped_dek_state}",
             f"  DEK unwrap check: {unwrap_state}",
@@ -7187,6 +8549,16 @@ def terminal_command(
             f"  Group files visible: {group_file_total}",
             f"  Group encrypted files: {group_file_encrypted}",
             f"  Group encrypted metadata complete: {group_file_meta_complete}/{group_file_encrypted}",
+            "",
+            "Conversation Encryption Coverage",
+            f"  Direct-message rows: {len(dm_rows)}",
+            f"  Distinct threads: {dm_total_threads}",
+            f"  Threads with conversation key: {dm_threads_with_key}/{dm_total_threads}",
+            f"  Thread key versions: {dm_conversation_summary}",
+            f"  Body rows using conversation key: {dm_body_conversation}",
+            f"  Body rows using legacy Fernet: {dm_body_legacy}",
+            f"  Body rows plaintext: {dm_body_plaintext}",
+            f"  Attachments in conversation scheme: {dm_attachment_conversation}/{dm_attachment_total}",
             "",
             "Health Summary",
         ]
@@ -7229,11 +8601,11 @@ def terminal_command(
             except Exception:
                 page_path = page_hint_raw.split("?", 1)[0].strip()
 
-        checked_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        checked_at = _format_utc(datetime.utcnow())
         lines = [
             "Encryption Timeline",
             f"Account: {user.username}",
-            f"Checked (UTC): {checked_at}",
+            f"Checked: {checked_at}",
             f"Scope: {scope_label}",
             f"Page context: {page_hint}",
             "",
@@ -7257,13 +8629,36 @@ def terminal_command(
         if not message_rows:
             lines.append("  (no direct messages in scope)")
         else:
+            thread_ids = {row.thread_id or row.id for row in message_rows}
+            conversation_versions: dict[uuid.UUID, int] = {}
+            if thread_ids:
+                for key_row in db.query(ConversationKey).filter(ConversationKey.thread_id.in_(thread_ids)).all():
+                    conversation_versions[key_row.thread_id] = int(key_row.key_version or 1)
+
             lines.append(f"  Rows scanned: {len(message_rows)}")
             for row in message_rows:
+                thread_uuid = row.thread_id or row.id
                 direction = "outbound" if row.sender_id == user.id else "inbound"
                 partner = row.recipient.username if row.sender_id == user.id else row.sender.username
-                body_status = "encrypted" if is_message_encrypted(row.body or "") else "plaintext"
+                conversation_version = conversation_versions.get(thread_uuid)
+                is_conversation_body = (
+                    row.body_key_scheme == DM_BODY_SCHEME_CONVERSATION
+                    or is_dm_conversation_encrypted(row.body or "")
+                )
+                if is_conversation_body:
+                    body_status = "encrypted"
+                    body_key = _conversation_body_key_label(
+                        int(row.body_key_version or conversation_version or 0) or None
+                    )
+                elif is_message_encrypted(row.body or ""):
+                    body_status = "encrypted"
+                    body_key = _DM_BODY_KEY_LABEL
+                else:
+                    body_status = "plaintext"
+                    body_key = "plaintext"
 
                 attachment_status = "none"
+                attachment_key = "-"
                 attachment_mtime = "-"
                 if row.attachment_name and row.attachment_path:
                     scheme = (row.attachment_key_scheme or DM_ATTACHMENT_SCHEME_RECIPIENT).strip().lower()
@@ -7279,6 +8674,16 @@ def terminal_command(
                             attachment_mtime = datetime.utcfromtimestamp(attach_path.stat().st_mtime).isoformat(
                                 timespec="seconds"
                             ) + "Z"
+                    if scheme == DM_ATTACHMENT_SCHEME_CONVERSATION:
+                        attachment_key = _conversation_attachment_key_label(
+                            int(row.attachment_key_version or conversation_version or 0) or None
+                        )
+                    elif scheme in {"", DM_ATTACHMENT_SCHEME_RECIPIENT}:
+                        attachment_key = "dm-attachment:recipient-user-dek"
+                    elif scheme == DM_ATTACHMENT_SCHEME_SYSTEM:
+                        attachment_key = _DM_ATTACHMENT_SYSTEM_KEY_LABEL
+                    else:
+                        attachment_key = f"dm-attachment:{scheme}"
                     attachment_status = (
                         f"{'encrypted' if has_meta else 'metadata-missing'}"
                         f" ({scheme}, {path_state})"
@@ -7287,7 +8692,7 @@ def terminal_command(
                 lines.append(
                     "  "
                     f"{str(row.id)[:8]} {direction} {partner}: "
-                    f"body={body_status}, attachment={attachment_status}"
+                    f"body={body_status}, body_key={body_key}, attachment={attachment_status}, attachment_key={attachment_key}"
                 )
                 lines.append(
                     "    "
@@ -7356,7 +8761,7 @@ def terminal_command(
                 rel_dir = _terminal_rel_path(root, current_dir)
                 rel_label = "/" if rel_dir == "/" else f"{rel_dir}/"
                 try:
-                    modified = datetime.utcfromtimestamp(current_dir.stat().st_mtime).isoformat(timespec="seconds") + "Z"
+                    modified = _format_utc(datetime.utcfromtimestamp(current_dir.stat().st_mtime))
                 except OSError:
                     modified = "n/a"
                 filesystem_lines.append(f"  {rel_label} type=directory, state=container, modified={modified}")
@@ -7373,7 +8778,7 @@ def terminal_command(
                 rel = _terminal_rel_path(root, candidate)
                 modified = "n/a"
                 try:
-                    modified = datetime.utcfromtimestamp(candidate.stat().st_mtime).isoformat(timespec="seconds") + "Z"
+                    modified = _format_utc(datetime.utcfromtimestamp(candidate.stat().st_mtime))
                 except OSError:
                     pass
 
@@ -7431,7 +8836,7 @@ def terminal_command(
         rotate_files = target in {"all", "files"}
         rotate_messages = target in {"all", "messages"}
         rotate_groups = target in {"all", "groups"}
-        started_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        started_at = _format_utc(datetime.utcnow())
 
         user_summary: dict[str, int] | None = None
         message_summary: dict[str, int] | None = None
@@ -7483,13 +8888,13 @@ def terminal_command(
                     logger.warning("Group encryption rotation failed for group %s", group.id, exc_info=True)
                     group_failures.append(f"{group.name} ({role}) - {exc.__class__.__name__}")
 
-        completed_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        completed_at = _format_utc(datetime.utcnow())
         lines = [
             "Encryption Rotation",
             f"Account: {user.username}",
             f"Target: {target}",
-            f"Started (UTC): {started_at}",
-            f"Completed (UTC): {completed_at}",
+            f"Started: {started_at}",
+            f"Completed: {completed_at}",
             "",
         ]
 
@@ -7554,8 +8959,10 @@ def terminal_command(
                         f"{message_summary['messages_rotated']}/{message_summary['messages_total']}"
                         f" (plaintext upgraded: {message_summary['messages_upgraded_plaintext']})"
                     ),
+                    f"  Conversation keys touched: {message_summary['conversation_keys_touched']}",
                     (
                         "  Attachments rotated: "
+                        f"conversation={message_summary['attachments_conversation_rotated']}, "
                         f"system={message_summary['attachments_system_rotated']}, "
                         f"recipient={message_summary['attachments_recipient_rotated']}, "
                         f"recipient-skipped={message_summary['attachments_recipient_skipped']}"

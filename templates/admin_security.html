@@ -1,0 +1,555 @@
+{% extends "base.html" %}
+{% block body_class %}page-admin-security{% endblock %}
+{% block content %}
+<section class="card hero-card admin-hero">
+  <div class="eyebrow">System Administration</div>
+  <h1>Security operations center</h1>
+  <p class="muted">Review role exposure, lock or release directory writes, and apply account security playbooks.</p>
+  <div class="stat-row">
+    <div class="stat-chip">
+      <div class="stat-number">{{ summary.displayed_users }}</div>
+      <div class="stat-label">Displayed users</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ summary.admins }}</div>
+      <div class="stat-label">Administrators</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ summary.superadmins }}</div>
+      <div class="stat-label">Superadmins</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ summary.mfa_enabled }}</div>
+      <div class="stat-label">MFA enabled</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ summary.email_configured }}</div>
+      <div class="stat-label">Email configured</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ summary.compromised }}</div>
+      <div class="stat-label">Flagged compromised</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ summary.directory_locked }}</div>
+      <div class="stat-label">Directory locked</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ summary.user_key_records }}</div>
+      <div class="stat-label">User key records</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ summary.group_key_records }}/{{ summary.group_total }}</div>
+      <div class="stat-label">Group key records</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ summary.conversation_key_records }}</div>
+      <div class="stat-label">Conversation keys</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ summary.conversation_threads_missing_key }}</div>
+      <div class="stat-label">Threads missing key</div>
+    </div>
+    <div class="stat-chip">
+      <div class="stat-number">{{ summary.key_duplicate_total }}</div>
+      <div class="stat-label">Key duplicates</div>
+    </div>
+  </div>
+  <p class="muted">
+    Duplicate owners detected:
+    users={{ summary.user_key_duplicate_users }},
+    groups={{ summary.group_key_duplicate_groups }},
+    conversations={{ summary.conversation_key_duplicate_threads }}.
+  </p>
+  <p class="muted">
+    Key material diversity:
+    {% if summary.key_material_not_all_same %}
+    <strong class="security-uniqueness-pass">PASS</strong> keys are not all the same.
+    {% else %}
+    <strong class="security-uniqueness-fail">FAIL</strong> key material collision detected.
+    {% endif %}
+    unique={{ summary.key_material_unique_records }}/{{ summary.key_material_total_records }},
+    duplicates={{ summary.key_material_duplicate_records }},
+    unwrap-errors={{ summary.key_material_errors }},
+    user={{ summary.user_key_material_unique }},
+    group={{ summary.group_key_material_unique }},
+    conversation={{ summary.conversation_key_material_unique }}.
+  </p>
+</section>
+
+{% if error %}
+<div class="alert">{{ error }}</div>
+{% endif %}
+{% if notice %}
+<div class="alert admin-notice">{{ notice }}</div>
+{% endif %}
+
+{% set superadmin_count_display = summary.superadmins|default(0, true)|int %}
+{% set can_self_promote_display = can_self_promote_superadmin if can_self_promote_superadmin is defined else (user.is_admin and (not user.is_superadmin) and superadmin_count_display == 0) %}
+<section class="card">
+  <div class="card-header">
+    <h2>Superadmin recovery</h2>
+  </div>
+  {% if can_self_promote_display %}
+  <p class="muted">No superadmin account exists. You can claim superadmin to restore protected admin controls.</p>
+  <form method="post" action="/ui/admin/users/promote-self-superadmin" class="inline-form">
+    <input type="hidden" name="redirect_to" value="security" />
+    <button type="submit">Promote my account to superadmin</button>
+  </form>
+  {% elif user.is_superadmin %}
+  <p class="muted">Your account already has superadmin privileges.</p>
+  <button type="button" class="ghost" disabled>Already superadmin</button>
+  {% else %}
+  <p class="muted">
+    Self-promotion is only available when there are zero superadmins.
+    Current superadmin count: {{ superadmin_count_display }}.
+  </p>
+  <button type="button" class="ghost" disabled>Superadmin exists</button>
+  {% endif %}
+</section>
+
+<section class="card filters-card" id="adminSecurityFiltersTab">
+  <div class="card-header">
+    <h2>Filters</h2>
+    <div class="card-tools">
+      <a class="pill ghost" href="/ui/admin/help">Help inbox</a>
+      <a class="pill ghost" href="/ui/admin/reports">Message reports</a>
+    </div>
+  </div>
+  <form method="get" class="form compact filters-form">
+    <label class="filter-field filter-field-lg">
+      <span>Search (username or email)</span>
+      <input type="text" name="q" value="{{ filters.q }}" placeholder="test, user@example.com" />
+    </label>
+    <label class="filter-field filter-field-xs">
+      <span>Limit</span>
+      <input type="number" name="limit" min="1" max="500" value="{{ filters.limit }}" />
+    </label>
+    <div class="inline-form filters-actions">
+      <button type="submit">Apply filters</button>
+      <a class="pill ghost" href="/ui/admin/security">Reset</a>
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Key rotation workflow</h2>
+    <div class="card-tools">
+      <span class="muted">Rotate user, group, and conversation keys directly from this page.</span>
+    </div>
+  </div>
+  <div class="security-columns-guide soft-panel">
+    <div class="security-columns-guide-row">
+      <span><code>User key</code>: open a user window and run <em>Rotate user key</em></span>
+      <span><code>Group key</code>: use the <em>Rotate key</em> action in group inventory</span>
+      <span><code>Conversation key</code>: use the <em>Rotate key</em> action in conversation inventory</span>
+    </div>
+    <p class="muted">Each rotation increments key version, re-encrypts existing ciphertext, and writes audit logs.</p>
+  </div>
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>User queue</h2>
+    <div class="card-tools">
+      <span class="muted">Click a username to open a focused user window.</span>
+    </div>
+  </div>
+  <div class="security-columns-guide soft-panel">
+    <div class="security-columns-guide-row">
+      <span><code>User</code>: account identity and contact email</span>
+      <span><code>State</code>: compromise + directory write-lock flags</span>
+      <span><code>Encryption key</code>: personal key label/version for user files and recipient DM attachments</span>
+      <span><code>Activity</code>: active sessions and group memberships</span>
+      <span><code>Action</code>: open the full security window</span>
+    </div>
+    <p class="muted">Only key metadata is shown here. Raw encryption keys are never displayed.</p>
+  </div>
+  {% if rows %}
+  <div class="security-user-list-head" aria-hidden="true">
+    <span>User</span>
+    <span>State</span>
+    <span>Encryption key</span>
+    <span>Activity</span>
+    <span>Action</span>
+  </div>
+  <div class="security-user-list">
+    {% for row in rows %}
+    {% set target = row.user %}
+    <article class="soft-panel security-user-row">
+      <div class="security-user-main">
+        <button type="button" class="security-user-open" data-security-open="securityUserDialog-{{ target.id }}">
+          {{ target.username }}
+        </button>
+        <div class="security-user-email">{{ row.email_value or "(no email set)" }}</div>
+      </div>
+      <div class="security-user-status">
+        <code>{% if row.compromised %}compromised{% else %}normal{% endif %}</code>
+        <code>{% if row.directory_locked %}directory_locked{% else %}directory_open{% endif %}</code>
+      </div>
+      <div class="security-user-key">
+        <code class="{% if not row.user_key_present %}security-key-missing{% endif %}">{{ row.user_key_label }}</code>
+        <div class="security-user-key-meta">record {{ row.user_key_record_id }} · created {{ row.user_key_created_utc }}</div>
+      </div>
+      <div class="security-user-stats">
+        <span class="pill ghost">sessions {{ row.active_sessions }}</span>
+        <span class="pill ghost">groups {{ row.group_roles_count }}</span>
+      </div>
+      <div class="security-user-actions">
+        <button type="button" class="ghost" data-security-open="securityUserDialog-{{ target.id }}">Open window</button>
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+
+  {% for row in rows %}
+  {% set target = row.user %}
+  <dialog id="securityUserDialog-{{ target.id }}" class="modal modal-wide security-user-dialog">
+    <div class="modal-header">
+      <div>
+        <div class="eyebrow">Security profile</div>
+        <h2>{{ target.username }}</h2>
+        <div class="muted">User {{ target.id }}</div>
+      </div>
+      <div class="modal-header-actions">
+        <button type="button" class="ghost" data-security-close>Close</button>
+      </div>
+    </div>
+
+    <div class="security-user-dialog-body">
+      <section class="security-user-panel">
+        <h3>Overview</h3>
+        <div class="security-overview-grid">
+          <div class="meta-item">
+            <div class="label">Email</div>
+            <div>{{ row.email_value or "(not set)" }}</div>
+          </div>
+          <div class="meta-item">
+            <div class="label">Role</div>
+            <div>{{ row.role_label }}</div>
+          </div>
+          <div class="meta-item">
+            <div class="label">MFA</div>
+            <div>{{ row.mfa_summary }}</div>
+          </div>
+          <div class="meta-item">
+            <div class="label">Active sessions</div>
+            <div>{{ row.active_sessions }}</div>
+          </div>
+          <div class="meta-item">
+            <div class="label">Stored files</div>
+            <div>{{ row.file_count }}</div>
+          </div>
+          <div class="meta-item">
+            <div class="label">Group memberships</div>
+            <div>{{ row.group_roles_count }}</div>
+          </div>
+          <div class="meta-item">
+            <div class="label">Compromised flag</div>
+            <div>{% if row.compromised %}Yes{% else %}No{% endif %}</div>
+          </div>
+          <div class="meta-item">
+            <div class="label">Directory lock</div>
+            <div>{% if row.directory_locked %}Locked{% else %}Open{% endif %}</div>
+          </div>
+          <div class="meta-item">
+            <div class="label">User encryption key</div>
+            <div><code class="{% if not row.user_key_present %}security-key-missing{% endif %}">{{ row.user_key_label }}</code></div>
+          </div>
+          <div class="meta-item">
+            <div class="label">Key record ID</div>
+            <div><code>{{ row.user_key_record_id }}</code></div>
+          </div>
+          <div class="meta-item">
+            <div class="label">Key record created</div>
+            <div>{{ row.user_key_created_utc }}</div>
+          </div>
+          <div class="meta-item">
+            <div class="label">Created</div>
+            <div>{{ row.created_utc }}</div>
+          </div>
+          <div class="meta-item">
+            <div class="label">Last login</div>
+            <div>{{ row.last_login_utc }}</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="security-user-panel">
+        <h3>Directory controls</h3>
+        <form method="post" action="/ui/admin/security/{{ target.id }}/directory-lock" class="security-user-form security-user-form-lock">
+          <input type="hidden" name="action" value="{% if row.directory_locked %}unlock{% else %}lock{% endif %}" />
+          <input
+            type="text"
+            name="reason"
+            maxlength="240"
+            placeholder="{% if row.directory_locked %}Optional release note{% else %}Reason for lock (optional){% endif %}"
+          />
+          <button type="submit" {% if row.directory_locked %}class="ghost"{% else %}class="danger"{% endif %}>
+            {% if row.directory_locked %}Release directory{% else %}Lock directory{% endif %}
+          </button>
+        </form>
+      </section>
+
+      <section class="security-user-panel">
+        <h3>User management controls</h3>
+        <div class="admin-action-grid security-admin-actions">
+          <form method="post" action="/ui/admin/users/{{ target.id }}/revoke-sessions" class="inline-form">
+            <input type="hidden" name="redirect_to" value="security" />
+            <button type="submit" class="ghost">Revoke sessions</button>
+          </form>
+          <form method="post" action="/ui/admin/users/{{ target.id }}/reset-totp" class="inline-form">
+            <input type="hidden" name="redirect_to" value="security" />
+            <button type="submit" class="ghost">Reset MFA</button>
+          </form>
+          <form method="post" action="/ui/admin/users/{{ target.id }}/toggle-admin" class="inline-form">
+            <input type="hidden" name="redirect_to" value="security" />
+            <button
+              type="submit"
+              {% if target.is_admin and not target.is_superadmin %}class="danger"{% else %}class="ghost"{% endif %}
+              {% if row.admin_toggle_locked %}disabled{% endif %}
+            >
+              {{ "Superadmin locked" if target.is_superadmin else ("Remove admin" if target.is_admin else "Make admin") }}
+            </button>
+          </form>
+        </div>
+      </section>
+
+      <section class="security-user-panel">
+        <h3>Key rotation</h3>
+        <p class="muted">Rotate personal key material and re-encrypt personal files, recipient DM attachments, and avatar data.</p>
+        <form method="post" action="/ui/admin/security/{{ target.id }}/rotate-user-key" class="security-user-form security-user-form-rotate">
+          <button type="submit" class="danger">Rotate user key</button>
+        </form>
+      </section>
+
+      <section class="security-user-panel">
+        <h3>Password reset</h3>
+        <form
+          method="post"
+          action="/ui/admin/users/{{ target.id }}/reset-password"
+          class="security-user-form security-password-reset-form"
+          data-admin-password-form
+        >
+          <input type="hidden" name="redirect_to" value="security" />
+          <label>
+            <span>New password</span>
+            <input
+              type="password"
+              name="password"
+              minlength="10"
+              required
+              autocomplete="new-password"
+              data-admin-password
+            />
+          </label>
+          <label>
+            <span>Confirm password</span>
+            <input
+              type="password"
+              name="confirm_password"
+              minlength="10"
+              required
+              autocomplete="new-password"
+              data-admin-password-confirm
+            />
+          </label>
+          <div class="admin-action-grid security-admin-actions">
+            <button type="button" class="ghost" data-admin-generate-password>Generate</button>
+            <button type="submit">Reset password</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="security-user-panel">
+        <h3>Playbook actions</h3>
+        <form method="post" action="/ui/admin/security/{{ target.id }}/playbook" class="security-user-form security-user-form-playbook">
+          <select name="playbook" required>
+            {% for playbook in playbooks %}
+            <option value="{{ playbook.key }}">{{ playbook.label }}</option>
+            {% endfor %}
+          </select>
+          <input type="text" name="note" maxlength="240" placeholder="Optional playbook note" />
+          <button type="submit" class="ghost">Apply playbook</button>
+        </form>
+      </section>
+
+      <section class="security-user-panel security-user-panel-full">
+        <h3>Group roles</h3>
+        {% if row.group_roles %}
+        <ul class="security-role-list">
+          {% for role in row.group_roles %}
+          <li><code>{{ role }}</code></li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="muted">No group memberships for this user.</p>
+        {% endif %}
+      </section>
+    </div>
+  </dialog>
+  {% endfor %}
+  {% else %}
+  <p class="muted">No users matched the current filters.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Group key inventory</h2>
+    <div class="card-tools">
+      <span class="muted">One shared key per group storage domain.</span>
+    </div>
+  </div>
+  {% if group_key_rows %}
+  <div class="security-key-table-head" aria-hidden="true">
+    <span>Group</span>
+    <span>Shared key</span>
+    <span>Metadata</span>
+    <span>Usage</span>
+  </div>
+  <div class="security-key-table">
+    {% for item in group_key_rows %}
+    <article class="soft-panel security-key-row">
+      <div class="security-key-main">
+        <div class="security-key-primary">{{ item.group_name }}</div>
+        <div class="muted">Owner {{ item.owner_username }}</div>
+      </div>
+      <div class="security-key-value">
+        <code class="{% if not item.key_present %}security-key-missing{% endif %}">{{ item.key_label }}</code>
+      </div>
+      <div class="security-key-meta">
+        <div>record <code>{{ item.key_record_id }}</code></div>
+        <div class="muted">created {{ item.key_created_utc }}</div>
+      </div>
+      <div class="security-key-usage">
+        <span class="pill ghost">members {{ item.member_count }}</span>
+        <span class="pill ghost">files {{ item.file_count }}</span>
+        <form method="post" action="/ui/admin/security/group/{{ item.group_id }}/rotate-key" class="security-inline-action">
+          <button type="submit" class="ghost">Rotate key</button>
+        </form>
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+  {% if group_inventory_truncated %}
+  <p class="muted">Showing first {{ group_inventory_limit }} groups.</p>
+  {% endif %}
+  {% else %}
+  <p class="muted">No groups are currently configured.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <div class="card-header">
+    <h2>Conversation key inventory</h2>
+    <div class="card-tools">
+      <span class="muted">One shared key per direct-message thread.</span>
+    </div>
+  </div>
+  {% if conversation_key_rows %}
+  <div class="security-key-table-head security-key-table-head-conversation" aria-hidden="true">
+    <span>Participants</span>
+    <span>Thread</span>
+    <span>Conversation key</span>
+    <span>Metadata</span>
+  </div>
+  <div class="security-key-table">
+    {% for item in conversation_key_rows %}
+    <article class="soft-panel security-key-row security-key-row-conversation">
+      <div class="security-key-main">
+        <div class="security-key-primary">{{ item.participants }}</div>
+        <div class="muted">messages {{ item.message_count }}</div>
+      </div>
+      <div class="security-key-thread">
+        <code>{{ item.thread_id }}</code>
+      </div>
+      <div class="security-key-value">
+        <code>{{ item.key_label }}</code>
+      </div>
+      <div class="security-key-meta">
+        <div>record <code>{{ item.key_record_id }}</code></div>
+        <div class="muted">created {{ item.key_created_utc }}</div>
+        <form method="post" action="/ui/admin/security/conversation/{{ item.thread_id }}/rotate-key" class="security-inline-action">
+          <button type="submit" class="ghost">Rotate key</button>
+        </form>
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+  {% if conversation_inventory_truncated %}
+  <p class="muted">Showing first {{ conversation_inventory_limit }} conversation keys.</p>
+  {% endif %}
+  {% else %}
+  <p class="muted">No conversation key records exist yet.</p>
+  {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  (function () {
+    function openDialog(dialog) {
+      if (!dialog) return;
+      if (typeof dialog.showModal === "function") {
+        dialog.showModal();
+      } else {
+        dialog.setAttribute("open", "open");
+      }
+    }
+
+    function closeDialog(dialog) {
+      if (!dialog) return;
+      if (typeof dialog.close === "function") {
+        dialog.close();
+      } else {
+        dialog.removeAttribute("open");
+      }
+    }
+
+    document.querySelectorAll("[data-security-open]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const dialogId = (button.dataset.securityOpen || "").trim();
+        if (!dialogId) return;
+        openDialog(document.getElementById(dialogId));
+      });
+    });
+
+    document.querySelectorAll(".security-user-dialog").forEach((dialog) => {
+      dialog.querySelectorAll("[data-security-close]").forEach((button) => {
+        button.addEventListener("click", () => closeDialog(dialog));
+      });
+      dialog.addEventListener("click", (event) => {
+        if (event.target === dialog) {
+          closeDialog(dialog);
+        }
+      });
+
+      dialog.querySelectorAll("[data-admin-password-form]").forEach((form) => {
+        const pwd = form.querySelector("[data-admin-password]");
+        const confirmPwd = form.querySelector("[data-admin-password-confirm]");
+        const generateBtn = form.querySelector("[data-admin-generate-password]");
+        if (!pwd || !confirmPwd || !generateBtn) return;
+
+        generateBtn.addEventListener("click", () => {
+          if (!window.crypto || !window.crypto.getRandomValues) return;
+          const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@$%*-_+?";
+          const bytes = new Uint8Array(22);
+          window.crypto.getRandomValues(bytes);
+          let value = "";
+          for (let i = 0; i < bytes.length; i += 1) {
+            value += alphabet[bytes[i] % alphabet.length];
+          }
+          pwd.value = value;
+          confirmPwd.value = value;
+          pwd.focus();
+          if (typeof pwd.select === "function") {
+            pwd.select();
+          }
+        });
+      });
+    });
+  })();
+</script>
+{% endblock %}

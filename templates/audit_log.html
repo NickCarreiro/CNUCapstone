@@ -58,7 +58,7 @@
       </button>
       <a class="pill" href="/ui">Storage</a>
       {% if is_admin_view %}
-      <a class="pill ghost" href="/ui/admin/users">Admin users</a>
+      <a class="pill ghost" href="/ui/admin/security">Security center</a>
       {% endif %}
     </div>
   </div>
@@ -116,7 +116,7 @@
     <table class="table" id="auditTable">
       <thead>
         <tr>
-          <th>Timestamp (UTC)</th>
+          <th>Timestamp</th>
           {% if is_admin_view %}
           <th>User</th>
           {% endif %}
@@ -128,13 +128,7 @@
       <tbody>
         {% for row in rows %}
         <tr>
-          <td data-label="Timestamp (UTC)">
-            {% if row.log.event_timestamp %}
-            {{ row.log.event_timestamp.strftime("%Y-%m-%d %H:%M:%S") }}
-            {% else %}
-            -
-            {% endif %}
-          </td>
+          <td data-label="Timestamp">{{ row.event_timestamp_display }}</td>
           {% if is_admin_view %}
           <td data-label="User">{{ row.username }}</td>
           {% endif %}

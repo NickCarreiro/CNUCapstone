@@ -51,7 +51,7 @@
       >
         Hide filters tab
       </button>
-      <a class="pill ghost" href="/ui/admin/users">Admin users</a>
+      <a class="pill ghost" href="/ui/admin/security">Security center</a>
       <a class="pill ghost" href="/ui/admin/audit">Admin audit</a>
     </div>
   </div>
@@ -105,7 +105,7 @@
     <table class="table" id="adminReportsTable">
       <thead>
         <tr>
-          <th>Created (UTC)</th>
+          <th>Created</th>
           <th>Status</th>
           <th>Reason</th>
           <th>Reporter</th>
@@ -118,7 +118,7 @@
         {% for row in rows %}
         {% set report = row.report %}
         <tr>
-          <td data-label="Created (UTC)">{{ report.created_at.strftime("%Y-%m-%d %H:%M:%S") if report.created_at else "-" }}</td>
+          <td data-label="Created">{{ row.created_at_display }}</td>
           <td data-label="Status"><code>{{ report.status }}</code></td>
           <td data-label="Reason"><code>{{ report.reason }}</code></td>
           <td data-label="Reporter">{{ row.reporter_username }}</td>

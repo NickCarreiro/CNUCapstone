@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block body_class %}page-login{% endblock %}
+{% block content %}
+<section class="card auth-card">
+  <div class="eyebrow">Secure Access</div>
+  <h1>MFA verification</h1>
+  <p class="muted">Password accepted for <code>{{ username }}</code>. Complete the MFA step to finish sign in.</p>
+  {% if notice %}
+  <div class="alert admin-notice">{{ notice }}</div>
+  {% endif %}
+  {% if error %}
+  <div class="alert">{{ error }}</div>
+  {% endif %}
+  <form method="post" action="/ui/login/mfa" class="form">
+    <input type="hidden" name="pending_token" value="{{ pending_token }}" />
+    <label>
+      <span>MFA method</span>
+      <select name="mfa_method">
+        {% for method in mfa_methods %}
+        <option value="{{ method.value }}" {% if mfa_method == method.value %}selected{% endif %}>{{ method.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>MFA code</span>
+      <input type="text" name="mfa_code" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code" />
+    </label>
+    <div class="modal-actions">
+      <button type="submit">Verify and sign in</button>
+      <button type="submit" class="ghost" name="send_mfa_code" value="1">Send code</button>
+    </div>
+  </form>
+  <p class="muted helper-link">
+    Need to start over? <a href="/ui/login">Back to sign in</a>
+  </p>
+</section>
+{% endblock %}

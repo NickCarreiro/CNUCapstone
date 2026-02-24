@@ -29,7 +29,7 @@
     <h2>Report details</h2>
     <div class="card-tools">
       <a class="pill ghost" href="/ui/admin/reports">Back to reports</a>
-      <a class="pill ghost" href="/ui/admin/users">Admin users</a>
+      <a class="pill ghost" href="/ui/admin/security">Security center</a>
     </div>
   </div>
 
@@ -40,8 +40,8 @@
         <code>{{ report.id }}</code>
       </div>
       <div class="meta-item">
-        <div class="label">Created (UTC)</div>
-        <div>{{ report.created_at.strftime("%Y-%m-%d %H:%M:%S") if report.created_at else "-" }}</div>
+        <div class="label">Created</div>
+        <div>{{ report_created_at_display }}</div>
       </div>
       <div class="meta-item">
         <div class="label">Reporter</div>
@@ -103,8 +103,8 @@
         <div>{{ message.recipient.username if message.recipient else "-" }}</div>
       </div>
       <div class="meta-item">
-        <div class="label">Sent (UTC)</div>
-        <div>{{ message.created_at.strftime("%Y-%m-%d %H:%M:%S") if message.created_at else "-" }}</div>
+        <div class="label">Sent</div>
+        <div>{{ message_created_at_display }}</div>
       </div>
       <div class="meta-item">
         <div class="label">Attachment</div>
@@ -194,4 +194,3 @@
   </div>
 </section>
 {% endblock %}
-
