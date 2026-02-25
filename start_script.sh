@@ -7,6 +7,14 @@ cd "$SCRIPT_DIR"
 PORT="${PORT:-8000}"
 HOST="${HOST:-0.0.0.0}"
 APP="${APP:-app.main:app}"
+ENV_FROM_DOTENV=""
+if [[ -f .env ]]; then
+  ENV_FROM_DOTENV="$(grep '^PFV_ENVIRONMENT=' .env 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
+  ENV_FROM_DOTENV="${ENV_FROM_DOTENV%\"}"
+  ENV_FROM_DOTENV="${ENV_FROM_DOTENV#\"}"
+fi
+ENVIRONMENT="${PFV_ENVIRONMENT:-${ENVIRONMENT:-${ENV_FROM_DOTENV:-production}}}"
+RELOAD="${RELOAD:-}"
 MODE="${1:-start}"
 
 find_running_servers() {
@@ -144,4 +152,20 @@ if [[ -n "$RUNNING" || -n "$LISTENERS" ]]; then
 fi
 
 echo "Starting server on $HOST:$PORT..."
-exec python3 -m uvicorn "$APP" --reload --host "$HOST" --port "$PORT"
+if [[ -z "$RELOAD" ]]; then
+  case "${ENVIRONMENT,,}" in
+    prod|production|staging)
+      RELOAD="0"
+      ;;
+    *)
+      RELOAD="1"
+      ;;
+  esac
+fi
+
+UVICORN_ARGS=(--host "$HOST" --port "$PORT")
+if [[ "$RELOAD" == "1" || "$RELOAD" == "true" || "$RELOAD" == "yes" ]]; then
+  UVICORN_ARGS+=(--reload)
+fi
+
+exec python3 -m uvicorn "$APP" "${UVICORN_ARGS[@]}"

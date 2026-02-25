@@ -3,10 +3,12 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db import get_db
 from app.models.core import Session as SessionModel
 from app.models.core import User
 from app.schemas.auth import LoginRequest, SessionOut, UserCreate, UserOut
+from app.services.authn import get_current_user
 from app.services.audit import add_audit_log
 from app.services.security import (
     decrypt_totp_secret,
@@ -21,13 +23,27 @@ import pyotp
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+def _optional_current_user(request: Request, db: Session) -> User | None:
+    try:
+        return get_current_user(request=request, db=db)
+    except HTTPException:
+        return None
+
+
 @router.post("/register", response_model=UserOut)
 def register(payload: UserCreate, request: Request, db: Session = Depends(get_db)):
+    is_first_user = db.query(User.id).first() is None
+    current_user = _optional_current_user(request, db)
+    if not (is_first_user or settings.allow_self_service_registration or (current_user and current_user.is_admin)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Self-service registration is disabled",
+        )
+
     existing = db.query(User).filter(User.username == payload.username).first()
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already exists")
 
-    is_first_user = db.query(User.id).first() is None
     user = User(
         username=payload.username,
         password_hash=hash_password(payload.password),
@@ -158,14 +174,29 @@ def logout(request: Request, db: Session = Depends(get_db)):
 
 
 @router.post("/totp/enroll")
-def enroll_totp(user_id: str, request: Request, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
+def enroll_totp(
+    user_id: str,
+    request: Request,
+    actor: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if actor.id != target.id and not actor.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient privileges")
 
     totp = pyotp.TOTP(pyotp.random_base32())
-    user.totp_secret_enc = encrypt_totp_secret(totp.secret)
-    user.totp_enabled = True
-    add_audit_log(db, user=user, event_type="mfa.enabled", details="MFA enabled via API enrollment.", request=request)
+    target.totp_secret_enc = encrypt_totp_secret(totp.secret)
+    target.totp_enabled = True
+    add_audit_log(db, user=target, event_type="mfa.enabled", details="MFA enabled via API enrollment.", request=request)
+    if actor.id != target.id:
+        add_audit_log(
+            db,
+            user=actor,
+            event_type="admin.mfa_enabled_for_user",
+            details=f"Enabled MFA enrollment secret for user '{target.username}'.",
+            request=request,
+        )
     db.commit()
-    return {"provisioning_uri": totp.provisioning_uri(name=user.username)}
+    return {"provisioning_uri": totp.provisioning_uri(name=target.username)}

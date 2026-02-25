@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=str(_PROJECT_ROOT / ".env"), env_prefix="PFV_")
 
     app_name: str = "FileFort"
-    environment: str = "dev"
+    environment: str = "production"
 
     database_url: str = "postgresql+psycopg://pfv:pfv@localhost:5432/pfv"
 
@@ -30,11 +30,22 @@ class Settings(BaseSettings):
 
     # Session settings
     session_ttl_minutes: int = 60
+    session_cookie_samesite: str = "lax"
 
     # MFA challenge settings
     mfa_code_ttl_seconds: int = 300
     mfa_resend_cooldown_seconds: int = 30
     mfa_max_attempts: int = 5
+
+    # Web security hardening
+    enforce_https: bool = False
+    trusted_hosts: str = ""
+    public_base_url: str = ""
+    allow_self_service_registration: bool = False
+    csrf_protection_enabled: bool = True
+    auth_rate_limit_enabled: bool = True
+    auth_rate_limit_attempts: int = 20
+    auth_rate_limit_window_seconds: int = 300
 
     # Optional outgoing mail transport for profile email verification + email MFA.
     smtp_host: str = ""

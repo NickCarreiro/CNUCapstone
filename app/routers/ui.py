@@ -97,6 +97,7 @@ _PENDING_LOGIN_TTL_SECONDS = 10 * 60
 _PENDING_PASSWORD_RESET_CACHE: dict[str, dict[str, object]] = {}
 _PENDING_PASSWORD_RESET_TTL_SECONDS = 15 * 60
 _ACTIVE_TIMEZONE: contextvars.ContextVar[str] = contextvars.ContextVar("pfv_active_timezone", default=DEFAULT_TIMEZONE)
+_SESSION_COOKIE_NAME = "pfv_session"
 
 _TERMINAL_COMMANDS = [
     "help",
@@ -558,7 +559,7 @@ def _set_active_timezone(request: Request, user: User | None = None) -> str:
 
 def _get_current_user(db: Session, request: Request) -> User | None:
     _set_active_timezone(request)
-    session_id = request.cookies.get("pfv_session")
+    session_id = request.cookies.get(_SESSION_COOKIE_NAME)
     session = _get_session(db, session_id)
     if not session:
         return None
@@ -573,7 +574,57 @@ def _get_current_user(db: Session, request: Request) -> User | None:
 
 
 def _get_session_id(request: Request) -> str:
-    return request.cookies.get("pfv_session") or ""
+    return request.cookies.get(_SESSION_COOKIE_NAME) or ""
+
+
+def _request_is_secure(request: Request) -> bool:
+    proto = (request.headers.get("x-forwarded-proto") or "").split(",", 1)[0].strip().lower()
+    if proto:
+        return proto == "https"
+    return request.url.scheme == "https"
+
+
+def _session_cookie_samesite() -> str:
+    value = (settings.session_cookie_samesite or "lax").strip().lower()
+    if value in {"lax", "strict", "none"}:
+        return value
+    return "lax"
+
+
+def _set_session_cookie(response: Response, request: Request, session_id: uuid.UUID | str) -> None:
+    same_site = _session_cookie_samesite()
+    secure = _request_is_secure(request)
+    if same_site == "none":
+        secure = True
+    response.set_cookie(
+        _SESSION_COOKIE_NAME,
+        str(session_id),
+        httponly=True,
+        secure=secure,
+        samesite=same_site,
+        max_age=max(60, int(settings.session_ttl_minutes) * 60),
+        path="/",
+    )
+
+
+def _clear_session_cookie(response: Response, request: Request) -> None:
+    same_site = _session_cookie_samesite()
+    secure = _request_is_secure(request)
+    if same_site == "none":
+        secure = True
+    response.delete_cookie(
+        _SESSION_COOKIE_NAME,
+        path="/",
+        secure=secure,
+        httponly=True,
+        samesite=same_site,
+    )
+
+
+def _self_service_registration_open(db: Session) -> bool:
+    if settings.allow_self_service_registration:
+        return True
+    return db.query(User.id).first() is None
 
 
 def _user_root(user: User) -> Path:
@@ -886,12 +937,12 @@ def _email_token_hash(token: str) -> str:
 
 
 def _public_origin(request: Request) -> str:
-    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "http").strip()
-    host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc).strip()
-    if not host:
-        base = str(request.base_url).rstrip("/")
-        return base
-    return f"{proto}://{host}"
+    configured = (settings.public_base_url or "").strip().rstrip("/")
+    if configured:
+        parsed = urlsplit(configured)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return configured
+    return str(request.base_url).rstrip("/")
 
 
 def _smtp_configured() -> bool:
@@ -2520,7 +2571,7 @@ def _complete_signin(request: Request, db: Session, user: User) -> RedirectRespo
     db.commit()
 
     response = RedirectResponse(url="/ui", status_code=303)
-    response.set_cookie("pfv_session", str(session.id), httponly=True)
+    _set_session_cookie(response, request, session.id)
     return response
 
 
@@ -2880,7 +2931,13 @@ def forgot_password_mfa_action(
 
 
 @router.get("/register")
-def register_page(request: Request):
+def register_page(request: Request, db: Session = Depends(get_db)):
+    if not _self_service_registration_open(db):
+        return _render_login_page(
+            request,
+            error="Self-service registration is disabled. Contact an administrator.",
+            status_code=403,
+        )
     return templates.TemplateResponse(
         "register.html",
         {"request": request, "error": None, "username": None},
@@ -2895,6 +2952,14 @@ def register_action(
     confirm_password: str = Form(...),
     db: Session = Depends(get_db),
 ):
+    if not _self_service_registration_open(db):
+        return _render_login_page(
+            request,
+            error="Self-service registration is disabled. Contact an administrator.",
+            username=username,
+            status_code=403,
+        )
+
     username = username.strip()
     if not username:
         return templates.TemplateResponse(
@@ -2949,7 +3014,7 @@ def register_action(
     db.commit()
 
     response = RedirectResponse(url="/ui", status_code=303)
-    response.set_cookie("pfv_session", str(session.id), httponly=True)
+    _set_session_cookie(response, request, session.id)
     return response
 
 
@@ -7029,7 +7094,7 @@ def profile_update_password(
     # Re-issue a session so the user stays signed in after the revoke.
     session = create_session(db, user)
     response = RedirectResponse(url=f"/ui/profile?notice={quote_plus('Password updated.')}", status_code=303)
-    response.set_cookie("pfv_session", str(session.id), httponly=True)
+    _set_session_cookie(response, request, session.id)
     return response
 
 
@@ -9208,7 +9273,7 @@ def terminal_suggest(
 
 @router.get("/logout")
 def logout(request: Request, db: Session = Depends(get_db)):
-    session_id = request.cookies.get("pfv_session")
+    session_id = request.cookies.get(_SESSION_COOKIE_NAME)
     session = _get_session(db, session_id)
     if session:
         user = db.query(User).filter(User.id == session.user_id).first()
@@ -9218,5 +9283,5 @@ def logout(request: Request, db: Session = Depends(get_db)):
             add_audit_log(db, user=user, event_type="signout", details="Interactive sign-out completed.", request=request)
         db.commit()
     response = RedirectResponse(url="/ui/login", status_code=303)
-    response.delete_cookie("pfv_session")
+    _clear_session_cookie(response, request)
     return response
